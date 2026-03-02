@@ -343,7 +343,7 @@ if not self.qkv_bias:
 - 替代了传统的 `qkv_bias`（当 `qkv_bias=False` 时启用）
 - 与 Llama 等模型的区别：Qwen3 对每个 head 单独做 norm，粒度更细
 
-![[Pasted image 20260227222651.png]]
+![[assets/Pasted image 20260227222651.png]]
 
 ### 3. SwiGLU 激活函数
 
@@ -481,7 +481,7 @@ $$\text{argmax}\bigl(\log p_i - \log E_i\bigr) = \text{argmax}\bigl(\log(p_i / E
 
 ### 7. 列并行与行并行 Linear（`layers/linear.py`, `embed_head.py`）
 
-![[Pasted image 20260302111018.png]]
+![[assets/Pasted image 20260302111018.png]]
 
 对线性层 $Y = XW$，TP 有两种切法：
 

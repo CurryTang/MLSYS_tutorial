@@ -2,10 +2,10 @@
 
 ### Overview
 
-![[Pasted image 20251222135239.png]]
+![[assets/Pasted image 20251222135239.png]]
 **图1：NVIDIA H100/B100 GPU 整体架构抽象图。** 展示了 GPU 的层次化内存与计算结构：多个流多处理器（SM 0, SM 1, ... SM N-1）并行排列，每个 SM 内包含 4 个 Tensor Core（负责矩阵乘法运算，贡献主要算力，类似 TPU 的 MXU）和 4 个 Warp Scheduler（SIMD 向量单元，包含 32 个 lane 即"CUDA Core"，同一 warp 内所有 lane 必须执行相同操作）。每个 SM 拥有 256KB 的 L1 Cache/SMEM（共享内存，可由程序员控制，类似 TPU VMEM 但更小）。所有 SM 共享 50MB 的 L2 Cache（硬件自动管理，提供更快的带宽）和底层的 HBM 高带宽显存（H100 为 80GB，B100 为 192GB，用于存储模型参数、激活值和优化器状态）。
 
-![[Pasted image 20251222135741.png]]
+![[assets/Pasted image 20251222135741.png]]
 **图2：NVIDIA H100 单个 SM（流多处理器）内部详细架构图。** 每个 SM 包含 4 个处理块（Processing Block），共享 L1 指令缓存和 256KB L1 数据缓存/共享内存。每个处理块包含：L0 指令缓存、Warp Scheduler（每周期调度 32 线程）、Dispatch Unit、16384×32-bit 的寄存器文件，以及大量计算单元——16 个 INT32 单元、16 个 FP32 单元、8 个 FP64 单元、1 个第四代 Tensor Core、LD/ST（加载/存储）单元和 SFU（特殊函数单元）。底部还配备 Tensor Memory Accelerator（张量内存加速器）和 Tex（纹理单元）。这种设计使得 H100 能够高效地并行执行大规模矩阵运算和深度学习工作负载。
 
 

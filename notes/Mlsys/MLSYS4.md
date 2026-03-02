@@ -151,17 +151,17 @@ __global__ void reduce_v0(float *g_idata, float *g_odata, int n) {
 
 理解变量的内存结构
 
-![[Pasted image 20251229150638.png]]
+![[assets/Pasted image 20251229150638.png]]
 
 理解变量的数据流向
 
-![[Pasted image 20251229151159.png]]
+![[assets/Pasted image 20251229151159.png]]
 
-![[Pasted image 20251229151249.png]]
+![[assets/Pasted image 20251229151249.png]]
 
 
 什么情况下需要syncthreads?
-![[Pasted image 20251229151721.png]]
+![[assets/Pasted image 20251229151721.png]]
 
 **问题分析：**
 
@@ -425,7 +425,7 @@ if (i + 2*blockDim.x < n) mySum += g_idata[i + 2*blockDim.x];
 if (i + 3*blockDim.x < n) mySum += g_idata[i + 3*blockDim.x];
 ```
 
-![[Pasted image 20251229161226.png]]
+![[assets/Pasted image 20251229161226.png]]
 
 
 
@@ -611,7 +611,7 @@ __global__ void reduce_v6(float *g_idata, float *g_odata, int n) {
 | 是否需要同步 | 是 | 否（warp内） |
 | Bank conflict | 可能 | 不存在 |
 | 资源消耗 | 占用 shared memory | 无 |
-![[Pasted image 20260102223044.png]]
+![[assets/Pasted image 20260102223044.png]]
 
 ```
 T __shfl_down_sync(unsigned mask, T var, unsigned int delta);

@@ -71,7 +71,7 @@ $$\text{Efficiency} = \frac{\text{Achieved FLOPs/s}}{\pi} = \frac{W / T_{\text{a
 - **平台区域（Compute-bound）**：计算是瓶颈，已达峰值算力
   - 实际吞吐 = $\pi$（不再增长）
 
-![[Pasted image 20251216210603.png]]
+![[assets/Pasted image 20251216210603.png]]
 > *展示了两种不同运算强度的算法（算法 1 和算法 2）及其在不同带宽（BW1 和 BW2）下的理论峰值吞吐量。红色区域表示算法在两种带宽下均受限于带宽，浪费了硬件峰值 FLOPs/s 的一部分。黄色区域表示算法仅在较低带宽（BW1）下受限于带宽。绿色区域表示算法在所有带宽下均受限于计算能力。此处，我们已充分利用了加速器的峰值 FLOPs/s，增加带宽或提高运算强度均无益处。*
 
 ### 3.3 例子：Dot Product（向量点积）
@@ -350,16 +350,16 @@ ncu-ui profile.ncu-rep
 ### 4.3 分析hello world kernel/matmul kernel的roofline
 
 
-![[Pasted image 20251223165208.png]]
+![[assets/Pasted image 20251223165208.png]]
 所有ops都在同一个位置
 
 
-![[Pasted image 20251223164911.png]]
+![[assets/Pasted image 20251223164911.png]]
 
 这个是matmul的roofline curve，可以看到随着scale增大，逐渐从memory bound成为了compute bound(这里会跑到线上去,为什么？因为这张图其实是错的，这是cuda core的图，但是bf16的matmul会用到的是tensor core！)
 ### 5 小结
 
-![[Pasted image 20251223105527.png]]
+![[assets/Pasted image 20251223105527.png]]
 
 * 点相对于 Ridge Point 的位置
 	* 点在 Ridge Point 左侧（AI < Ridge Point）：

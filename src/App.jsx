@@ -33,6 +33,12 @@ const notes = [
 ];
 
 const noteIdByAlias = buildNoteAliasMap(notes);
+const mediaModules = import.meta.glob('../notes/Mlsys/assets/**/*.{png,jpg,jpeg,gif,webp,svg,avif,bmp}', {
+  eager: true,
+  import: 'default',
+  query: '?url',
+});
+const mediaUrlByAlias = buildMediaAliasMap(mediaModules);
 
 function createNote(id, url) {
   const fileName = id.split('/').at(-1) ?? id;
@@ -85,6 +91,33 @@ function buildNoteAliasMap(noteList) {
   return map;
 }
 
+function buildMediaAliasMap(modules) {
+  const map = new Map();
+
+  const addAlias = (alias, url) => {
+    const normalized = normalizePathToken(alias);
+    if (normalized && !map.has(normalized)) {
+      map.set(normalized, url);
+    }
+  };
+
+  Object.entries(modules).forEach(([modulePath, assetUrl]) => {
+    if (typeof assetUrl !== 'string') {
+      return;
+    }
+
+    const relativePath = modulePath.replace('../notes/', '');
+    const fileName = relativePath.split('/').at(-1) ?? relativePath;
+    addAlias(relativePath, assetUrl);
+    addAlias(`notes/${relativePath}`, assetUrl);
+    addAlias(fileName, assetUrl);
+    addAlias(`assets/${fileName}`, assetUrl);
+    addAlias(`./assets/${fileName}`, assetUrl);
+  });
+
+  return map;
+}
+
 function splitObsidianTarget(rawContent) {
   const [targetPart, ...aliasParts] = rawContent.split('|');
   const target = targetPart?.trim() ?? '';
@@ -131,6 +164,27 @@ function resolveNoteId(rawTarget) {
   return null;
 }
 
+function resolveMediaUrl(rawTarget) {
+  const [withoutAnchor] = rawTarget.split('#');
+  const normalized = normalizePathToken(withoutAnchor);
+
+  if (!normalized) {
+    return null;
+  }
+
+  const basename = normalized.split('/').at(-1) ?? normalized;
+  const candidates = [normalized, basename, `mlsys/assets/${basename}`, `assets/${basename}`];
+
+  for (const candidate of candidates) {
+    const match = mediaUrlByAlias.get(candidate);
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
 function normalizeObsidianMarkdown(markdownText) {
   if (!markdownText) {
     return '';
@@ -154,6 +208,11 @@ function normalizeObsidianMarkdown(markdownText) {
     const { target, alias } = splitObsidianTarget(body);
     if (!target) {
       return '';
+    }
+
+    const mediaUrl = resolveMediaUrl(target);
+    if (mediaUrl) {
+      return `![${alias || prettyLabel(target)}](${mediaUrl})`;
     }
 
     const noteId = resolveNoteId(target);
