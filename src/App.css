@@ -175,6 +175,14 @@
   line-height: 1.72;
 }
 
+.markdown-body blockquote {
+  margin: 1rem 0;
+  padding: 0.5rem 0.9rem;
+  border-left: 4px solid #2f7b94;
+  background: rgba(179, 220, 234, 0.25);
+  border-radius: 8px;
+}
+
 .markdown-body a {
   color: #005f83;
   text-decoration-thickness: 2px;
@@ -197,6 +205,18 @@
 .markdown-body img {
   max-width: 100%;
   border-radius: 8px;
+}
+
+.markdown-body mark {
+  background: #ffef94;
+  border-radius: 4px;
+  padding: 0 0.22rem;
+}
+
+.markdown-body .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.2rem 0;
 }
 
 .empty-note {

@@ -1,31 +1,193 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import rehypeKatex from 'rehype-katex';
+import rehypeRaw from 'rehype-raw';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import note1Url from '../notes/Mlsys/MLSYS1.md?url';
+import note2Url from '../notes/Mlsys/MLSYS2.md?url';
+import note3Url from '../notes/Mlsys/MLSYS3.md?url';
+import note4Url from '../notes/Mlsys/MLSYS4.md?url';
+import note5Url from '../notes/Mlsys/MLSYS5.md?url';
+import note6Url from '../notes/Mlsys/MLSYS6.md?url';
+import note7Url from '../notes/Mlsys/MLSYS7 Compute-Bound Kernel (1).md?url';
+import note8Url from '../notes/Mlsys/MLSYS8 Compute-Bound Kernel (2).md?url';
+import note9Url from '../notes/Mlsys/MLSYS9 Compute-bound kernel (3).md?url';
+import note10Url from '../notes/Mlsys/MLSYS10 parallelism.md?url';
+import note11Url from '../notes/Mlsys/MLSYS11 nano-vllm-1.md?url';
+import 'katex/dist/katex.min.css';
 import './App.css';
 
-const noteModules = import.meta.glob('../notes/**/*.md', {
-  eager: true,
-  import: 'default',
-  query: '?url',
-});
+const notes = [
+  createNote('Mlsys/MLSYS1.md', note1Url),
+  createNote('Mlsys/MLSYS2.md', note2Url),
+  createNote('Mlsys/MLSYS3.md', note3Url),
+  createNote('Mlsys/MLSYS4.md', note4Url),
+  createNote('Mlsys/MLSYS5.md', note5Url),
+  createNote('Mlsys/MLSYS6.md', note6Url),
+  createNote('Mlsys/MLSYS7 Compute-Bound Kernel (1).md', note7Url),
+  createNote('Mlsys/MLSYS8 Compute-Bound Kernel (2).md', note8Url),
+  createNote('Mlsys/MLSYS9 Compute-bound kernel (3).md', note9Url),
+  createNote('Mlsys/MLSYS10 parallelism.md', note10Url),
+  createNote('Mlsys/MLSYS11 nano-vllm-1.md', note11Url),
+];
 
-const notes = Object.entries(noteModules)
-  .map(([modulePath, assetUrl]) => {
-    const relativePath = modulePath.replace('../notes/', '');
-    const fileName = relativePath.split('/').at(-1) ?? relativePath;
-    return {
-      id: relativePath,
-      fileName,
-      title: fileName.replace(/\.md$/i, ''),
-      url: typeof assetUrl === 'string' ? assetUrl : '',
-    };
-  })
-  .sort((a, b) =>
-    a.fileName.localeCompare(b.fileName, undefined, {
-      numeric: true,
-      sensitivity: 'base',
-    }),
-  );
+const noteIdByAlias = buildNoteAliasMap(notes);
+
+function createNote(id, url) {
+  const fileName = id.split('/').at(-1) ?? id;
+  return {
+    id,
+    fileName,
+    title: fileName.replace(/\.md$/i, ''),
+    url,
+  };
+}
+
+function normalizePathToken(rawValue) {
+  if (!rawValue) {
+    return '';
+  }
+
+  let value = rawValue.trim().replace(/\\/g, '/');
+  try {
+    value = decodeURIComponent(value);
+  } catch {
+    // Ignore malformed URI fragments and keep the original token.
+  }
+
+  value = value.replace(/^\.\//, '');
+  value = value.replace(/^\//, '');
+  value = value.replace(/^notes\//i, '');
+
+  return value.toLowerCase();
+}
+
+function buildNoteAliasMap(noteList) {
+  const map = new Map();
+
+  const addAlias = (alias, id) => {
+    const normalized = normalizePathToken(alias);
+    if (normalized && !map.has(normalized)) {
+      map.set(normalized, id);
+    }
+  };
+
+  noteList.forEach((note) => {
+    const base = note.fileName.replace(/\.md$/i, '');
+    addAlias(note.id, note.id);
+    addAlias(note.fileName, note.id);
+    addAlias(base, note.id);
+    addAlias(`Mlsys/${note.fileName}`, note.id);
+    addAlias(`notes/Mlsys/${note.fileName}`, note.id);
+  });
+
+  return map;
+}
+
+function splitObsidianTarget(rawContent) {
+  const [targetPart, ...aliasParts] = rawContent.split('|');
+  const target = targetPart?.trim() ?? '';
+  const aliasRaw = aliasParts.join('|').trim();
+
+  if (!aliasRaw || /^\d+$/.test(aliasRaw)) {
+    return { target, alias: '' };
+  }
+
+  return { target, alias: aliasRaw };
+}
+
+function prettyLabel(rawTarget) {
+  const [withoutAnchor] = rawTarget.split('#');
+  const token = withoutAnchor.split('/').at(-1) ?? withoutAnchor;
+  return token.replace(/\.md$/i, '').trim() || rawTarget.trim();
+}
+
+function resolveNoteId(rawTarget) {
+  const [withoutAnchor] = rawTarget.split('#');
+  const normalized = normalizePathToken(withoutAnchor);
+
+  if (!normalized) {
+    return null;
+  }
+
+  const basename = normalized.split('/').at(-1) ?? normalized;
+  const candidates = [
+    normalized,
+    normalized.endsWith('.md') ? normalized.slice(0, -3) : `${normalized}.md`,
+    basename,
+    basename.endsWith('.md') ? basename.slice(0, -3) : `${basename}.md`,
+    `mlsys/${basename}`,
+    `mlsys/${basename.endsWith('.md') ? basename.slice(0, -3) : `${basename}.md`}`,
+  ];
+
+  for (const candidate of candidates) {
+    const match = noteIdByAlias.get(candidate);
+    if (match) {
+      return match;
+    }
+  }
+
+  return null;
+}
+
+function normalizeObsidianMarkdown(markdownText) {
+  if (!markdownText) {
+    return '';
+  }
+
+  let normalized = markdownText;
+
+  // Remove Obsidian comments.
+  normalized = normalized.replace(/%%[\s\S]*?%%/g, '');
+
+  // Convert Obsidian callouts into standard Markdown blockquotes.
+  normalized = normalized.replace(/^>\s*\[!([^\]\n+-]+)(?:[+-])?\](.*)$/gim, (_, type, rawTitle) => {
+    const label = type.trim();
+    const title = rawTitle.trim().replace(/^[-:\s]+/, '');
+    const heading = title || (label.charAt(0).toUpperCase() + label.slice(1).toLowerCase());
+    return `> **${heading}:**`;
+  });
+
+  // Convert embedded links and media: ![[...]].
+  normalized = normalized.replace(/!\[\[([^\]\n]+)\]\]/g, (_, body) => {
+    const { target, alias } = splitObsidianTarget(body);
+    if (!target) {
+      return '';
+    }
+
+    const noteId = resolveNoteId(target);
+    if (noteId) {
+      return `[Embedded note: ${alias || prettyLabel(target)}](#${encodeURIComponent(noteId)})`;
+    }
+
+    return `*Embedded asset not found: ${alias || prettyLabel(target)}*`;
+  });
+
+  // Convert wiki-links: [[target|alias]].
+  normalized = normalized.replace(/\[\[([^\]\n]+)\]\]/g, (_, body) => {
+    const { target, alias } = splitObsidianTarget(body);
+    if (!target) {
+      return '';
+    }
+
+    const noteId = resolveNoteId(target);
+    if (noteId) {
+      return `[${alias || prettyLabel(target)}](#${encodeURIComponent(noteId)})`;
+    }
+
+    if (/^https?:\/\//i.test(target)) {
+      return `[${alias || target}](${target})`;
+    }
+
+    return alias || prettyLabel(target);
+  });
+
+  // Obsidian highlight syntax.
+  normalized = normalized.replace(/==([^=\n][^=\n]*?)==/g, '<mark>$1</mark>');
+
+  return normalized;
+}
 
 function App() {
   const initialHash = decodeURIComponent(window.location.hash.replace(/^#/, ''));
@@ -117,13 +279,18 @@ function App() {
   const selectedError = selectedNote ? errorById[selectedNote.id] : '';
   const selectedIsLoading = Boolean(selectedNote && !hasSelectedContent && !selectedError);
 
+  const normalizedSelectedContent = useMemo(
+    () => normalizeObsidianMarkdown(selectedContent),
+    [selectedContent],
+  );
+
   return (
     <div className="app-shell">
       <aside className="notes-panel">
         <header className="panel-header">
           <p className="eyebrow">ML Systems Tutorial</p>
           <h1>Reading Room</h1>
-          <p className="panel-meta">{notes.length} Markdown files synced locally</p>
+          <p className="panel-meta">{notes.length} published notes</p>
         </header>
 
         <label className="search">
@@ -166,9 +333,10 @@ function App() {
             <article className="markdown-body">
               {selectedError && <p className="empty-note">Load failed: {selectedError}</p>}
               {selectedIsLoading && !selectedError && <p className="empty-note">Loading markdown...</p>}
-              {!selectedIsLoading && !selectedError && selectedContent?.trim() && (
+              {!selectedIsLoading && !selectedError && normalizedSelectedContent?.trim() && (
                 <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
+                  remarkPlugins={[remarkGfm, remarkMath]}
+                  rehypePlugins={[rehypeRaw, rehypeKatex]}
                   components={{
                     a: ({ href, children, ...props }) => {
                       const external = href?.startsWith('http');
@@ -185,7 +353,7 @@ function App() {
                     },
                   }}
                 >
-                  {selectedContent}
+                  {normalizedSelectedContent}
                 </ReactMarkdown>
               )}
               {!selectedIsLoading && !selectedError && selectedContent !== undefined && !selectedContent.trim() && (
@@ -195,8 +363,8 @@ function App() {
           </>
         ) : (
           <section className="reader-empty">
-            <h2>No Markdown files found</h2>
-            <p>Add `.md` files to `notes/` and refresh.</p>
+            <h2>No published Markdown files found</h2>
+            <p>Add ready notes to the published allowlist and refresh.</p>
           </section>
         )}
       </main>

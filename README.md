@@ -29,5 +29,5 @@ If you need a custom path, set `VITE_BASE_PATH` during build.
 
 ## Notes content
 
-All markdown files in `notes/` are auto-indexed by the frontend using `import.meta.glob`.
-Any `.md` file added there will appear in the UI after rebuild.
+Published notes are loaded from `notes/Mlsys/` and controlled by an allowlist in `src/App.jsx` (`PUBLISHED_NOTE_PATHS`).
+Draft notes can remain in `notes/Mlsys/` but stay ignored by git until they are ready.

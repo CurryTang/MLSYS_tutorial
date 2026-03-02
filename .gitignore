@@ -22,3 +22,17 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Notes publishing control: keep drafts local until ready
+notes/Mlsys/*
+!notes/Mlsys/MLSYS1.md
+!notes/Mlsys/MLSYS2.md
+!notes/Mlsys/MLSYS3.md
+!notes/Mlsys/MLSYS4.md
+!notes/Mlsys/MLSYS5.md
+!notes/Mlsys/MLSYS6.md
+!notes/Mlsys/MLSYS7 Compute-Bound Kernel (1).md
+!notes/Mlsys/MLSYS8 Compute-Bound Kernel (2).md
+!notes/Mlsys/MLSYS9 Compute-bound kernel (3).md
+!notes/Mlsys/MLSYS10 parallelism.md
+!notes/Mlsys/MLSYS11 nano-vllm-1.md
