@@ -1,0 +1,225 @@
+.app-shell {
+  display: grid;
+  grid-template-columns: minmax(280px, 380px) 1fr;
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 10% 10%, rgba(255, 238, 201, 0.38), transparent 40%),
+    radial-gradient(circle at 95% 85%, rgba(196, 255, 233, 0.4), transparent 45%),
+    linear-gradient(120deg, #f6f2e9 0%, #ecf4f6 100%);
+}
+
+.notes-panel {
+  border-right: 1px solid rgba(35, 53, 66, 0.18);
+  backdrop-filter: blur(8px);
+  padding: 2rem 1.2rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1.2rem;
+}
+
+.panel-header h1 {
+  margin: 0.35rem 0;
+  font-family: "Space Grotesk", "Avenir Next", sans-serif;
+  letter-spacing: 0.02em;
+  line-height: 1.05;
+}
+
+.eyebrow {
+  margin: 0;
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-weight: 700;
+  color: #506677;
+}
+
+.panel-meta {
+  margin: 0;
+  color: #425563;
+  font-size: 0.9rem;
+}
+
+.search {
+  display: grid;
+  gap: 0.42rem;
+  font-weight: 600;
+  color: #1f323e;
+  font-size: 0.84rem;
+}
+
+.search input {
+  border-radius: 12px;
+  border: 1px solid rgba(26, 57, 72, 0.25);
+  padding: 0.65rem 0.7rem;
+  background: rgba(255, 255, 255, 0.65);
+  color: #132733;
+  font-family: "IBM Plex Mono", "Courier New", monospace;
+}
+
+.search input:focus {
+  outline: 2px solid #2f7b94;
+  outline-offset: 1px;
+}
+
+.note-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+  overflow-y: auto;
+  padding-right: 0.4rem;
+}
+
+.note-button {
+  text-align: left;
+  border: 1px solid rgba(39, 64, 77, 0.18);
+  border-radius: 12px;
+  padding: 0.72rem;
+  background: rgba(255, 255, 255, 0.56);
+  transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  cursor: pointer;
+}
+
+.note-button:hover {
+  transform: translateY(-1px);
+  border-color: rgba(26, 66, 84, 0.45);
+  box-shadow: 0 8px 16px rgba(30, 63, 81, 0.14);
+}
+
+.note-button.active {
+  border-color: #0d6d8f;
+  background: linear-gradient(145deg, rgba(214, 247, 255, 0.88), rgba(251, 255, 255, 0.96));
+}
+
+.note-title {
+  font-weight: 700;
+  color: #0f2532;
+}
+
+.note-subtitle {
+  color: #3d5564;
+  font-size: 0.76rem;
+  font-family: "IBM Plex Mono", "Courier New", monospace;
+}
+
+.note-summary {
+  color: #3f5664;
+  font-size: 0.82rem;
+}
+
+.list-empty {
+  margin: 0.7rem 0;
+  color: #3a525f;
+  font-style: italic;
+}
+
+.reader-panel {
+  padding: 2rem clamp(1rem, 2vw, 2.4rem);
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 1rem;
+}
+
+.reader-header {
+  background: rgba(255, 255, 255, 0.66);
+  border-radius: 18px;
+  border: 1px solid rgba(18, 58, 78, 0.19);
+  padding: 1.1rem 1.2rem;
+  box-shadow: 0 8px 18px rgba(28, 50, 63, 0.1);
+}
+
+.reader-header h2 {
+  margin: 0.25rem 0;
+  line-height: 1.2;
+  color: #102736;
+}
+
+.reader-header p {
+  margin: 0;
+  color: #3e5461;
+  font-family: "IBM Plex Mono", "Courier New", monospace;
+  font-size: 0.82rem;
+}
+
+.reader-label {
+  text-transform: uppercase;
+  letter-spacing: 0.13em;
+  font-size: 0.72rem;
+  font-family: "IBM Plex Mono", "Courier New", monospace;
+  color: #2c5c72;
+  font-weight: 600;
+}
+
+.markdown-body {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid rgba(25, 58, 75, 0.2);
+  border-radius: 18px;
+  padding: clamp(1rem, 2vw, 1.6rem) clamp(0.95rem, 2vw, 1.7rem);
+  overflow-y: auto;
+  box-shadow: 0 18px 26px rgba(31, 53, 66, 0.12);
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  font-family: "Space Grotesk", "Avenir Next", sans-serif;
+  color: #102735;
+}
+
+.markdown-body p,
+.markdown-body li,
+.markdown-body blockquote {
+  color: #1f3847;
+  line-height: 1.72;
+}
+
+.markdown-body a {
+  color: #005f83;
+  text-decoration-thickness: 2px;
+}
+
+.markdown-body code {
+  font-family: "IBM Plex Mono", "Courier New", monospace;
+  font-size: 0.9em;
+  background: rgba(212, 230, 241, 0.5);
+  padding: 0.13rem 0.3rem;
+  border-radius: 6px;
+}
+
+.markdown-body pre code {
+  display: block;
+  padding: 0.8rem;
+  overflow-x: auto;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+.empty-note {
+  margin: 0;
+  color: #3f5663;
+  font-style: italic;
+}
+
+.reader-empty {
+  display: grid;
+  place-items: center;
+  text-align: center;
+  color: #1f3847;
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(300px, 42vh) 1fr;
+  }
+
+  .notes-panel {
+    border-right: none;
+    border-bottom: 1px solid rgba(35, 53, 66, 0.18);
+  }
+}
