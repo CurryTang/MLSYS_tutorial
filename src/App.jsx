@@ -15,6 +15,7 @@ import note8Url from '../notes/Mlsys/MLSYS8 Compute-Bound Kernel (2).md?url';
 import note9Url from '../notes/Mlsys/MLSYS9 Compute-bound kernel (3).md?url';
 import note10Url from '../notes/Mlsys/MLSYS10 parallelism.md?url';
 import note11Url from '../notes/Mlsys/MLSYS11 nano-vllm-1.md?url';
+import note12Url from '../notes/Mlsys/MLSYS12 nano-vllm-2.md?url';
 import 'katex/dist/katex.min.css';
 import './App.css';
 
@@ -30,6 +31,7 @@ const notes = [
   createNote('Mlsys/MLSYS9 Compute-bound kernel (3).md', note9Url),
   createNote('Mlsys/MLSYS10 parallelism.md', note10Url),
   createNote('Mlsys/MLSYS11 nano-vllm-1.md', note11Url),
+  createNote('Mlsys/MLSYS12 nano-vllm-2.md', note12Url),
 ];
 
 const noteIdByAlias = buildNoteAliasMap(notes);
