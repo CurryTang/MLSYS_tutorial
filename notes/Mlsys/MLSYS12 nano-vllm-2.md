@@ -1005,6 +1005,19 @@ Triton 版本的优势在三个层面：
 
 每次 kernel launch 有约 5–10 μs 的固定开销。对于 prefill（每个 token 做大量计算），这点开销可以忽略；但 **decode 阶段每个序列只写 1 个 token 的 KV**，实际写入时间极短，此时 launch 开销的占比就很显著了——这和 CUDA Graph 消除 launch 开销的动机完全相同。
 
+#### 实测 Benchmark（A6000）
+
+在 A6000 上对两种实现做了完整推理对比：
+
+| 实现 | 整体吞吐 | Decode 实时速度 | 总耗时 |
+|------|---------|---------------|--------|
+| Triton（nano-vllm 实现） | 3902 tok/s | ~310 tok/s | 34.33s |
+| PyTorch（index_put_ 等价实现） | 3867 tok/s | ~284 tok/s | 34.64s |
+
+整体吞吐差距只有 ~0.9%，但 decode 阶段实时速度差了 **~8.5%**（310 vs 284 tok/s）。差距集中在 decode 是预期中的：decode 时 batch 很小，每个序列只有 1 个 token，此时每次 kernel launch 的固定开销占实际计算时间的比例更高。
+
+benchmark 过程中还暴露了 PyTorch 实现的一个重要隐藏限制：**boolean indexing 产生动态形状，无法被 CUDA Graph 捕获**。这意味着 PyTorch 版本和 CUDA Graph 路径不兼容，decode 阶段只能走 eager 模式，损失进一步叠加。Triton kernel 内部的条件分支（`if slot == -1: return`）不影响 grid size，因此天然兼容 CUDA Graph——这是 Triton 实现的另一个隐藏优势。
+
 **`slot_mapping` 的来源**：由 `ModelRunner.prepare_prefill/decode()` 计算，公式是 `block_table[逻辑 block] × block_size + 块内偏移`（§3.6 有详细推导）。`slot_mapping` 不是单调的——不同序列的 KV 散布在物理空间各处，这正是 Triton scatter 写入的意义所在。
 
 ### 9.3 Prefill Attention：flash_attn_varlen_func
