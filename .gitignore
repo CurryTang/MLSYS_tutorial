@@ -37,5 +37,6 @@ notes/Mlsys/*
 !notes/Mlsys/MLSYS10 parallelism.md
 !notes/Mlsys/MLSYS11 nano-vllm-1.md
 !notes/Mlsys/MLSYS12 nano-vllm-2.md
+!notes/Mlsys/MLSYS13 Quantization and precision.md
 !notes/Mlsys/assets/
 !notes/Mlsys/assets/**

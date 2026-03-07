@@ -16,6 +16,7 @@ import note9Url from '../notes/Mlsys/MLSYS9 Compute-bound kernel (3).md?url';
 import note10Url from '../notes/Mlsys/MLSYS10 parallelism.md?url';
 import note11Url from '../notes/Mlsys/MLSYS11 nano-vllm-1.md?url';
 import note12Url from '../notes/Mlsys/MLSYS12 nano-vllm-2.md?url';
+import note13Url from '../notes/Mlsys/MLSYS13 Quantization and precision.md?url';
 import 'katex/dist/katex.min.css';
 import './App.css';
 
@@ -43,6 +44,7 @@ const mediaModules = import.meta.glob('../notes/Mlsys/assets/**/*.{png,jpg,jpeg,
 const mediaUrlByAlias = buildMediaAliasMap(mediaModules);
 
 function createNote(id, url) {
+  createNote('Mlsys/MLSYS13 Quantization and precision.md', note13Url),
   const fileName = id.split('/').at(-1) ?? id;
   return {
     id,
