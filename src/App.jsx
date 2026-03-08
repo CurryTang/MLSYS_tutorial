@@ -33,6 +33,7 @@ const notes = [
   createNote('Mlsys/MLSYS10 parallelism.md', note10Url),
   createNote('Mlsys/MLSYS11 nano-vllm-1.md', note11Url),
   createNote('Mlsys/MLSYS12 nano-vllm-2.md', note12Url),
+  createNote('Mlsys/MLSYS13 Quantization and precision.md', note13Url),
 ];
 
 const noteIdByAlias = buildNoteAliasMap(notes);
@@ -44,7 +45,6 @@ const mediaModules = import.meta.glob('../notes/Mlsys/assets/**/*.{png,jpg,jpeg,
 const mediaUrlByAlias = buildMediaAliasMap(mediaModules);
 
 function createNote(id, url) {
-  createNote('Mlsys/MLSYS13 Quantization and precision.md', note13Url),
   const fileName = id.split('/').at(-1) ?? id;
   return {
     id,
