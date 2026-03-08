@@ -382,13 +382,41 @@ W8A8 在当前 LLM 量化中可以认为是**基本做到头了**。SmoothQuant 
 
 > W8A8 解决了"能不能量化"的问题。下一步自然是：**能不能压得更狠？** 4-bit 权重 = 模型体积再砍一半。这里只量化权重（weight-only），激活保持 FP16，推理时权重 dequant 回 FP16 做 GEMM。核心难点从"离群值"变成了"如何在只有 16 个量化级的情况下最小化权重量化误差"。
 
+**W8A8 vs W4A16：怎么选？** 两者的设计目标不同，没有绝对的优劣，取决于部署场景：
+
+| | W8A8 (SmoothQuant) | W4A16 (GPTQ/AWQ) |
+|---|---|---|
+| **精度** | 近乎无损（PPL 增量 < 0.1） | 略有损失（PPL 增量 0.3-0.5） |
+| **模型体积** | 原始的 ~50%（权重+激活都 8-bit） | 原始的 ~25%（权重 4-bit） |
+| **GEMM 计算** | INT8 × INT8 → 真正加速计算 | INT4→dequant→FP16 × FP16 → 计算仍是 FP16 |
+| **加速来源** | 带宽 2× + 计算 2× | 主要是带宽 4×，计算不变 |
+
+**速度对比的关键：取决于 batch size 和瓶颈类型**：
+
+- **小 batch decode（memory-bound）**：瓶颈是从 HBM 加载权重。W4A16 的权重只有 W8A8 的一半大小，**加载速度快 2×**。虽然 W4A16 的 GEMM 计算仍是 FP16，但小 batch 下计算不是瓶颈，所以 **W4A16 更快**。这是 LLM 推理最常见的场景（autoregressive decode，batch 较小）。
+- **大 batch prefill（compute-bound）**：瓶颈是 GEMM 计算。W8A8 的 INT8 × INT8 Tensor Core 算力是 FP16 的 2×，而 W4A16 仍然做 FP16 计算，所以 **W8A8 更快**。
+- **显存受限场景**：W4A16 的模型体积更小（4-bit vs 8-bit 权重），同等 GPU 可以跑更大的模型或更长的 context。
+
+**目前的使用趋势**：
+- **开源社区/本地部署**：W4A16（GPTQ/AWQ）占主导。原因是大多数用户在单卡上跑中等大小模型，典型场景是小 batch decode（memory-bound），W4A16 的 4× 带宽节省直接转化为加速，而且模型体积小可以在消费级 GPU 上运行。
+- **生产 serving**：逐步转向 **FP8**（H100+ 硬件原生支持），精度接近 FP16，不需要校准和平滑变换，运维最简单。大 batch serving 场景下 W8A8/FP8 的计算加速优势更明显。
+- **边缘/移动端**：W4A16 甚至更低 bit（llama.cpp 的 Q4_K_M），追求最大压缩比。
+
+**简单决策规则**：追求精度 → W8A8/FP8；追求最小体积 → W4A16；有 H100+ → 直接 FP8 最省事。
+
 ### 5.1 GPTQ — 近似二阶权重量化
 
 > Frantar et al., 2023 · ICLR
 
-**思路**：RTN（直接最近整数取整）在 4-bit 下精度崩溃。原因是每个权重的舍入误差会影响后续计算。GPTQ 用 Hessian 信息量化一个权重后，把误差**补偿到还没量化的权重上**，使整层输出误差最小。
+**为什么 RTN 在 4-bit 下崩溃？** Round-to-Nearest（直接最近整数取整）在 8-bit 下工作良好，但到 4-bit 时精度急剧下降。根本原因是：INT4 只有 16 个量化级，单个权重的舍入误差相对值很大（最坏情况下误差 = 半个量化步长，而步长 = range/15）。更关键的是，矩阵乘 $Y = WX$ 中每个输出元素是数千个权重的加权和，独立的舍入误差不会完美抵消，而是按 $\sqrt{d}$ 量级累积。RTN 对每个权重独立取整，完全不考虑它们之间的误差相关性。
 
-**核心算法**：对权重矩阵的每一行，逐列量化。量化第 $i$ 列时：
+**GPTQ 的核心思想**：量化不应该是独立的——量化一个权重后产生的误差，可以通过**调整还没量化的权重**来补偿。这个思想来自 OBS（Optimal Brain Surgeon）框架：用 Hessian 矩阵 $H$ 描述每个权重对输出的影响，误差补偿的方向和大小由 $H^{-1}$ 给出。
+
+**从 OBQ 到 GPTQ 的演进**：
+
+OBQ（Optimal Brain Quantizer, Frantar & Alistarh 2022）是 GPTQ 的前身，思路完全一致——逐个量化权重 + Hessian 误差补偿。但 OBQ 每步要**贪心选择**量化哪个权重（选误差最小的），复杂度 $O(d^3)$，量化一个 BERT 就要几小时，完全无法扩展到 LLM。GPTQ 的关键贡献是发现：**固定量化顺序（从左到右）几乎不损失精度**，但把复杂度降到了 $O(d^2)$ 并允许大规模并行。
+
+**核心算法**：对权重矩阵 $W \in \mathbb{R}^{d_{\text{out}} \times d_{\text{in}}}$，逐行独立处理。对每一行，从左到右逐列量化。量化第 $i$ 列时：
 
 $$\hat{w}_i = Q(w_i)$$
 
@@ -396,44 +424,123 @@ $$\delta_i = w_i - \hat{w}_i$$
 
 $$w_{j>i} \;\leftarrow\; w_{j>i} - \delta_i \cdot \frac{[H^{-1}]_{ij}}{[H^{-1}]_{ii}}$$
 
-$H = 2X^TX$ 是该行权重对应的 Hessian，只用校准数据前向一次即可。
+**直觉解释**：$\delta_i$ 是第 $i$ 列的量化误差。$[H^{-1}]_{ij} / [H^{-1}]_{ii}$ 描述的是"第 $i$ 列的误差对第 $j$ 列最优调整量的比例"——本质上是在 Hessian 定义的二次误差面上做最优投影。$H = 2X^TX$ 是该行权重对应的 Hessian（$X$ 是校准数据的激活矩阵），只需前向一次即可计算。
+
+**为什么误差补偿有效？** 考虑一个简化例子：两个权重 $w_1 = 0.3, w_2 = 0.7$，对应激活 $x_1, x_2$，输出 $y = w_1 x_1 + w_2 x_2$。如果 $w_1$ 量化后变成 $\hat{w}_1 = 0$（误差 0.3），RTN 下 $w_2$ 仍然是 1（量化到最近整数），输出误差 = $0.3 x_1$。但如果我们把 $w_1$ 的误差补偿到 $w_2$ 上——根据 $x_1, x_2$ 的相关性，适当增大 $w_2$，就能让 $\hat{w}_1 x_1 + \hat{w}_2 x_2 \approx w_1 x_1 + w_2 x_2$。Hessian 矩阵正是编码了这种"哪些权重之间可以互相补偿"的信息。
 
 **工程优化**：
 
 | 优化 | 效果 |
 |---|---|
-| 固定列序（0→d-1） | 避免逐步贪心排序的 $O(d^2)$ 开销 |
-| Cholesky 预算 $H^{-1}$ | 一次分解，逐列读取 |
-| Block 量化（128 列一批） | 降低显存峰值，利用 GPU 并行 |
-| Group quantization（g=128） | 每 128 列共享 scale，精度↑，存储开销可控 |
+| 固定列序（0→d-1） | 避免 OBQ 逐步贪心排序的 $O(d^3)$ 开销，实测精度几乎不变 |
+| Cholesky 预算 $H^{-1}$ | 对 $H^{-1}$ 做 Cholesky 分解，逐列量化时直接读取对应行，无需重复求逆 |
+| Block 量化（128 列一批） | 每 128 列为一组，组内逐列量化 + 补偿，组间一次性更新残差。降低显存峰值，利用 GPU 并行 |
+| Group quantization（g=128） | 每 128 列共享 scale/zero-point，比 per-tensor 精度高很多，额外存储仅 ~0.5 bit/weight |
+| 阻尼项 $H \leftarrow H + \lambda I$ | 防止 $H$ 病态（对角元素太小导致补偿爆炸），$\lambda$ 通常取 $0.01 \cdot \text{mean}(\text{diag}(H))$ |
 
-**数字**：128 条校准样本，单 GPU 几小时量化 175B。4-bit PPL 增量 < 0.5。
+**数字**：128 条校准样本，单 GPU 几小时量化 175B。4-bit group (g=128) PPL 增量 < 0.5（LLaMA-65B）。3-bit 也能用但精度下降明显。
 
-**局限**：Weight-only。端到端加速取决于 INT4×FP16 kernel（如 MARLIN，§9.1）。大 batch 时 dequant 开销不可忽视。
+**局限**：
+- **Weight-only**：只量化权重，激活仍 FP16，GEMM 实际是 INT4×FP16 混合计算，端到端加速取决于专用 kernel（如 MARLIN，§9.1）。
+- **大 batch 瓶颈**：小 batch 推理是 memory-bound（受限于权重加载带宽），4-bit 权重压缩直接带来加速。但大 batch 推理是 compute-bound，dequant 回 FP16 的开销不可忽视。
+- **校准数据敏感性**：Hessian 的质量取决于校准数据的代表性。如果校准数据分布与实际使用场景差异大，量化效果会下降。
 
 ### 5.2 AWQ — 激活感知权重量化
 
 > Lin et al., 2024 · MLSys (Best Paper)
 
-**思路的递进**：GPTQ 用二阶信息做误差补偿，计算量不小。AWQ 换了个角度——与其优化取整方式，不如先**保护重要权重**再量化。
-
-**核心洞察**：不是所有权重同等重要——与 **salient activation channels** 对应的权重列更关键，量化误差会被放大。
-
+**思路的递进**：GPTQ 用二阶 Hessian 信息做误差补偿，虽然效果好但计算量不小（需要求逆、逐列补偿）。AWQ 换了个角度——与其优化取整方式，不如先**保护重要权重**再量化。
+**核心洞察**：不是所有权重同等重要。观察 $Y = XW$，输出误差 $\Delta Y = X \cdot \Delta W$，第 $j$ 列权重的量化误差 $\Delta w_j$ 对输出的影响与对应激活 $X_{:,j}$ 的幅度成正比。如果第 $j$ 通道的激活值普遍很大（salient channel），那么即使 $\Delta w_j$ 很小，$X_{:,j} \cdot \Delta w_j$ 也会很大——这些通道的权重是"重要权重"，量化误差会被**激活幅度放大**。**一个自然的想法——为什么不直接跳过重要权重？** 最直觉的做法是：找到 top-1% 的 salient channels，这些通道的权重保持 FP16 不量化，其余量化。但这会破坏矩阵乘的硬件效率——混合精度的列需要特殊处理（类似 LLM.int8() 的问题）。
+**AWQ 的解决方案——等价缩放**：借鉴 SmoothQuant 的思路，用数学恒等变换保护重要权重，而不是真的跳过它们。
 **算法**：
-
 ```
-1. 校准数据统计激活幅度：  s_j = mean_i |X_{ij}|
-2. 对 salient channels（top-1%），权重乘 α > 1，激活除 α
-      Ŵ_{:,j} = W_{:,j} · α_j
-      X̂_{:,j} = X_{:,j} / α_j
+1. 校准数据统计激活幅度：  s_j = mean_i |X_{ij}|   （衡量每个通道的重要性）
+2. 对每个通道，按重要性做等价缩放：
+      Ŵ_{:,j} = W_{:,j} · α_j       （放大重要权重 → 量化相对误差变小）
+      X̂_{:,j} = X_{:,j} / α_j       （缩小对应激活 → 保持恒等）
    数学恒等变换：X̂Ŵ = XW
-3. Grid search 找最优 α，目标：min_α ‖Q(Ŵ)X̂ − WX‖
+3. Grid search 找最优 α_j：
+      目标：min_{α_j} ‖Q(Ŵ_{:,j}) · X̂_{:,j} − W_{:,j} · X_{:,j}‖
+      搜索空间：α_j ∈ [1, max_scale]，按通道独立搜索
 ```
+**为什么放大权重能保护它？** 量化的绝对误差上界约为半个量化步长 $s/2$，而 $s = \max|w| / (2^{b-1}-1)$。当权重乘以 $\alpha > 1$ 后，虽然 $s$ 也会变大，但权重值本身增大了 $\alpha$ 倍，**相对误差** $|\Delta w| / |w|$ 降低了。对于 salient channel，激活幅度大会放大绝对误差，所以降低相对误差特别重要。
+**与 SmoothQuant 的联系与区别**：
 
-- 校准几分钟，无反向传播。
-- 4-bit group (g=128) 在 LLaMA 系列上 **优于 GPTQ**。
-- 配套 TinyChat：端到端 4-bit 推理，边缘设备 3×+ 加速。
-- 局限：weight-only；不同硬件最优 $\alpha$ / group size 不同。
+|        | SmoothQuant            | AWQ                          |
+| ------ | ---------------------- | ---------------------------- |
+| 目标     | 平滑激活离群值，让 W8A8 可行      | 保护重要权重，提升 W4A16 精度           |
+| 变换     | 缩小激活离群通道，放大对应权重        | 放大重要权重，缩小对应激活                |
+| 缩放因子来源 | 激活 max 和权重 max 的几何均衡   | 激活 mean（衡量重要性） + grid search |
+| 吸收位置   | $s^{-1}$ 融合进 LayerNorm | $\alpha^{-1}$ 融合进前一层         |
+
+本质上都是用**逐通道等价缩放**改变量化难度分布，但优化目标不同：SmoothQuant 追求"激活和权重一样好量化"，AWQ 追求"重要权重的量化误差最小"。
+
+**数字**：
+- 校准几分钟，无反向传播，比 GPTQ 快很多。
+- 4-bit group (g=128) 在 LLaMA 系列上**优于 GPTQ**（PPL 更低）。
+- 配套 TinyChat runtime：端到端 4-bit 推理，边缘设备（Jetson Orin）3×+ 加速。
+
+**局限**：
+- **Weight-only**：同 GPTQ，激活仍 FP16，不加速计算本身。
+- **不同硬件最优配置不同**：$\alpha$ / group size 的最佳选择与硬件的内存带宽、compute 能力相关。
+- **与 GPTQ 互补**：AWQ 保护重要通道，GPTQ 做误差补偿，理论上可以组合使用（先 AWQ 缩放，再 GPTQ 补偿），部分开源实现已支持。
+
+### 5.3 MR-GPTQ — FP4 微缩格式专用量化
+
+> Egiazarian, Panferov et al., 2026 · ICLR 2026
+
+**背景：为什么需要 FP4 专用量化？** NVIDIA Blackwell/AMD 新一代 GPU 原生支持 MXFP4 和 NVFP4 两种微缩浮点格式（microscaling FP4），理论算力翻倍。但直接将 INT4 时代的量化方法（GPTQ、QuaRot 等）套用到 FP4 格式上效果很差——MXFP4 的 E8M0 幂次 scale 精度太粗导致 ~10% 精度下降，而 NVFP4 的极小 group size (16) 使得传统离群值缓解技术失效。MR-GPTQ 是第一个针对 FP4 微缩格式特性定制的量化算法。
+
+**MXFP4 vs NVFP4 两种微缩格式**：
+
+| | MXFP4 | NVFP4 |
+|---|---|---|
+| 元素格式 | FP4 E2M1 | FP4 E2M1 |
+| Block 大小 | 32 | 16 |
+| Scale 格式 | E8M0（纯指数，无尾数） | E4M3（标准 FP8） |
+| 额外 Scale | 无 | Per-tensor FP32 |
+| 每元素平均 bit | 4.25 | 4.5 |
+| 优点 | 更省空间，硬件乘法简单 | Scale 精度高，离群保持好 |
+| 缺点 | Power-of-2 scale 误差大 | 略多存储 |
+
+**核心发现——旋转对 FP4 的效果与 INT4 不同**：
+
+MR-GPTQ 首先从理论上分析了 Hadamard 旋转对两种 FP4 格式的影响：
+
+- **MXFP4**：旋转有益。E8M0 scale 的精度瓶颈在于 power-of-2 量化，旋转使权重分布更均匀后，scale 的粗粒度影响降低。
+- **NVFP4**：旋转**可能有害**。NVFP4 的小 group size (16) 天然提供了较好的离群值保持（top element 被"提升"到 E4M3 精度），旋转反而破坏了这一优势，把 top element 的误差扩散到整个 group。
+- **关键结论**：存在一个"交叉点"——group size 较小时 Laplace（原始）分布的 MSE 低于 Normal（旋转后）分布，group size 较大时反过来。
+
+**MR-GPTQ 的三个核心改进**：
+
+1. **Block-wise Hadamard 旋转**：不用全局 Hadamard，而是用与 quantization group size 匹配的 block-diagonal Hadamard 矩阵（如 $H_{32}$），在 group 内部做旋转。权重侧离线融合进权重，激活侧在线计算。由于 block size ≤ 128，变换是 memory-bound 的，任何旋转矩阵（不限于 Hadamard）的开销都相同。
+
+2. **MSE-optimized scale search**：针对 NVFP4 的 per-group + per-tensor 双层 scale 结构，用交替优化（alternating optimization）搜索最小 MSE 的 scale 组合，而非简单取 absmax。对 MXFP4，由于旋转后分布均匀，固定 static scale 即可。
+
+3. **Static activation reordering**：原始 GPTQ 的 "act-order"（按 Hessian 对角线排序列）虽然提升精度，但需要运行时动态 shuffle 列，带来 10-20% 推理开销。MR-GPTQ 改为：先固定 scale 和 grid，shuffle 列做 GPTQ 补偿，再 shuffle 回来——获得同等精度收益但**零运行时开销**。
+
+**GPU kernel 支持（QuTLASS）**：MR-GPTQ 配套发布了 Blackwell 架构优化 kernel 库 QuTLASS：
+- 轻量级 fused kernel 做在线旋转 + 量化 + scale 计算，延迟可忽略
+- 支持 SM100 (B200) 和 SM120 (RTX5090) 两种 compute capability
+- MXFP4 kernel 吞吐量甚至**超过理想 NVFP4** 矩阵乘
+
+**实验结果**（Llama-3.1-8B-Instruct, W4A4）：
+
+| 方法 | 格式 | Avg. Recovery |
+|---|---|---|
+| RTN | NVFP4 | 94.7% |
+| SmoothQuant | NVFP4 | 96.5% |
+| GPTQ | NVFP4 | **97.2%** |
+| MR-GPTQ | NVFP4 | **97.0%** |
+| RTN | MXFP4 | 88.4% |
+| QuaRot | MXFP4 | 91.3% |
+| MR-GPTQ | MXFP4 | **95.2%** |
+
+- MXFP4 上 MR-GPTQ 将精度恢复从 88% 提升到 95%，接近 NVFP4 水平
+- 端到端推理加速：B200 上 **2.2×**，RTX5090 上 **4×**（对比 FP16 baseline）
+- Layer-wise 加速：B200 **3.6×**，RTX5090 **6×**
+
+**与 GPTQ/AWQ 的关系**：MR-GPTQ 是 GPTQ 在 FP4 微缩格式上的自然扩展。传统 GPTQ 针对均匀 INT 格式设计，MR-GPTQ 通过 block-wise 旋转和格式感知优化适配了 FP4 的非均匀量化特性。
 
 ---
 
@@ -445,76 +552,241 @@ $H = 2X^TX$ 是该行权重对应的 Hessian，只用校准数据前向一次即
 
 > Ashkboos et al., 2024
 
-**思路**：离群值本质是能量集中在少数维度。如果用**正交变换旋转坐标系**，把能量均匀分散到所有维度，离群就消失了——而且正交变换不改变向量范数和内积，模型输出不变。
+**为什么 SmoothQuant 的思路在 4-bit 下不够用了？** SmoothQuant 用逐通道缩放把激活离群值"搬"到权重，在 8-bit 下效果很好。但 4-bit 只有 16 个量化级，即使平滑后激活的动态范围仍然太大——缩放只能改变每个通道的幅度，不能改变能量在维度间的分布。需要更强的变换。
 
-**方法**：对隐藏状态做正交变换 $R$（随机 Hadamard 矩阵）：
+**核心思想**：离群值本质是**能量集中在少数维度**。如果用**正交变换旋转坐标系**，把能量均匀分散到所有维度，离群就消失了——而且正交变换不改变向量范数和内积，模型输出不变。
+
+**数学原理**：对任意正交矩阵 $R$（$R R^T = I$），有：
 
 $$Y = XW = (XR^T)(RW)$$
 
-$R$ 正交 → $XR^T$ 把离群值**分散到所有维度**（旋转坐标系使能量不集中在少数轴）。
+设 $\tilde{X} = XR^T$，$\tilde{W} = RW$，则 $Y = \tilde{X}\tilde{W}$，输出完全不变。关键性质是：**随机正交变换（如 Hadamard 矩阵）具有"民主化"效应**——它把集中在少数维度的能量均匀分散到所有维度。直觉上，Hadamard 矩阵的每一行都是 $\pm 1/\sqrt{d}$ 的等幅组合，旋转后每个新维度都是原始所有维度的等权混合，任何单一维度的极端值都被"稀释"了。
 
-**插入位置**：
+**为什么用 Hadamard 矩阵而不是任意正交矩阵？** 一般正交矩阵乘法需要 $O(d^2)$ 复杂度，与 GEMM 同量级，作为预处理太贵。Hadamard 矩阵有快速算法（类似 FFT），复杂度只有 $O(d \log d)$，远小于 GEMM 的 $O(d^2)$。
+
+**在 Transformer 中的插入位置**：不能简单地对整个模型做一次旋转了事——Transformer 中有 LayerNorm、softmax 等非线性操作会"打断"旋转的可吸收性。QuaRot 的关键工程贡献是识别出哪些旋转可以离线吸收进权重，哪些必须在线计算：
 
 ```
-每个 Transformer block 的输入/输出处插入 R / Rᵀ
+Transformer Block 中的旋转插入：
 
-对 QKV 投影：
-  Q' = QRᵀ,  K' = KRᵀ  →  KV cache 也去离群
+1. 线性层之间：R 可吸收进权重（离线）
+   W_q, W_k, W_v ← R · W_q, R · W_k, R · W_v
+   W_o ← W_o · Rᵀ
+   → 推理时零开销
 
-R 可吸收进相邻权重矩阵（离线）
-推理时只需在线 Hadamard 变换：O(d log d)  ≪  GEMM 的 O(d²)
+2. LayerNorm 之后：RMSNorm(x) · W = RMSNorm(x) · Rᵀ · (R · W)
+   RMSNorm 对旋转不可交换 → 需在线计算 xRᵀ
+   → 用快速 Hadamard 变换，O(d log d)
+
+3. Attention 内部：Q, K 需要同时旋转保持内积不变
+   Q' = QRᵀ_head,  K' = KRᵀ_head  （per-head 旋转）
+   → Q'K'ᵀ = QRᵀR Kᵀ = QKᵀ  ✓
+   → KV cache 也被旋转 → 离群被分散 → KV cache 也能低 bit 量化
 ```
 
-- 权重 + 激活 + KV cache 全链路 4-bit 可行。
-- 局限：需改 attention kernel；随机旋转方差大，不同种子结果差异明显。
+**效果**：旋转后激活的通道间方差显著降低，原本集中在 0.1% 通道的离群值被分散到所有维度。在此基础上，直接用简单的 RTN 或 GPTQ 就能实现 W4A4+KV4 全链路量化。
+
+**数字**：LLaMA-2-70B W4A4 量化，PPL 增量约 0.5-1.0，远优于不旋转直接量化（崩溃）。
+
+**局限**：
+- **在线 Hadamard 变换开销**：虽然 $O(d \log d)$ 远小于 GEMM，但需要定制 CUDA kernel，对现有推理框架有侵入性。
+- **随机种子敏感**：随机 Hadamard 矩阵的选择影响最终精度，不同种子结果方差可达 0.2-0.3 PPL，实践中需多次试验取最佳。
+- **需修改 attention kernel**：KV cache 被旋转后，attention 计算的内存布局和 kernel 都需要适配。
 
 ### 6.2 SpinQuant — 学习最优旋转
 
 > Liu et al., 2025 · ICLR
 
-**思路的递进**：QuaRot 用随机 Hadamard 矩阵，效果依赖运气。能不能**学习一个最优的旋转矩阵**？
+**思路的递进**：QuaRot 用随机 Hadamard 矩阵，效果依赖随机种子的运气。自然的问题：能不能**学习一个最优的旋转矩阵**，而不是随机抽一个？
 
-将 $R$ 作为可学习参数，Cayley 参数化保证正交：
+**核心挑战**：旋转矩阵 $R$ 必须是正交的（$RR^T = I$），这是一个约束优化问题。如果直接用梯度下降更新 $R$，更新后 $R$ 不再正交，模型输出就会改变。SpinQuant 用 **Cayley 参数化**巧妙解决了这个问题：
 
-$$R = (I + A)^{-1}(I - A), \qquad A = -A^T$$
+$$R = (I + A)^{-1}(I - A), \qquad A = -A^T \text{（反对称矩阵）}$$
 
-优化目标：量化后输出重构误差 or 端到端 loss。
+当 $A$ 是反对称矩阵时，上述 Cayley 变换的输出 $R$ **自动满足正交性**。这样只需要对 $A$ 做无约束优化（$A$ 的上三角元素是自由参数），梯度下降自然保证 $R$ 始终正交。
 
-- 比 QuaRot 精度更高（尤其 W4A4）。
-- 优化成本：几十到几百步梯度下降 ≪ QAT。
-- 可只对部分层学习旋转。
-- 局限：仍高于纯 PTQ 成本；旋转结构需 kernel 配合。
+**优化目标**：注意 SpinQuant **只优化旋转矩阵 $R$，不优化模型权重本身**——它不是端到端的 QAT，而是在 PTQ 之前寻找最佳的预处理旋转。给定校准数据，最小化"旋转 + 量化"后的输出重构误差：
+
+$$\min_A \sum_{\text{layers}} \|\text{Quant}(\tilde{W}_l) \cdot \tilde{X}_l - W_l \cdot X_l\|_F^2$$
+
+其中 $\tilde{W}_l = R_l W_l$，$\tilde{X}_l = X_l R_l^T$ 是旋转后的权重和激活，$\text{Quant}(\cdot)$ 是模拟量化。优化变量只有 $A$（决定 $R$），模型权重 $W$ 完全冻结。优化结束后，得到最优旋转 $R^*$，然后再用 GPTQ、AWQ 或 RTN 等标准 PTQ 方法对旋转后的权重 $R^* W$ 做实际量化。也可以直接优化端到端 loss（更贵但更准），但本质上仍然只调 $R$。
+
+**训练成本**：几十到几百步梯度下降（只优化 $R$ 的参数 $A$，不动模型权重），远小于 QAT（不需要完整训练），但高于纯 PTQ（需要反向传播来计算 $\partial \mathcal{L}/\partial A$）。可以只对部分"敏感"层学习旋转，其余层用随机 Hadamard，进一步节省成本。
+
+**与 QuaRot 的对比**：
+
+| | QuaRot | SpinQuant |
+|---|---|---|
+| 旋转矩阵 | 随机 Hadamard | 学习（Cayley 参数化） |
+| 优化成本 | 零（直接用） | 几十到几百步梯度下降 |
+| 精度 | 好，但方差大 | 更好，方差小 |
+| W4A4 场景 | 可用但精度有波动 | 稳定优于 QuaRot 0.2-0.5 PPL |
+
+**局限**：
+- **成本介于 PTQ 和 QAT 之间**：需要反向传播来优化 $A$，比纯 PTQ（如 GPTQ/AWQ）慢，但远快于全参数 QAT。
+- **旋转结构需 kernel 配合**：同 QuaRot，在线 Hadamard 变换需要定制 kernel。
+- **与现有量化方法组合**：SpinQuant 解决的是"消除离群值"，消除后仍需搭配 GPTQ/AWQ/RTN 做实际的权重量化。
 
 ### 6.3 KIVI — KV Cache 2-bit 量化
 
 > Liu et al., 2024 · ICML
 
-**问题转向**：前面解决了权重和激活的全链路量化。但长上下文场景下还有一个显存大户—— **KV cache**。LLaMA-2-7B 在 128K context 下 KV cache 达数十 GB，远超模型权重本身。
+**问题转向**：前面解决了权重和激活的全链路量化。但长上下文场景下还有一个显存大户—— **KV cache**。
 
-**关键发现——Key 和 Value 的离群结构不同**：
+**为什么 KV cache 是长上下文的瓶颈？** LLM 推理时，每一层的 attention 都需要缓存所有历史 token 的 Key 和 Value 向量。以 LLaMA-2-7B 为例：
 
-| 张量 | 离群特征 | 适合的量化粒度 |
-|---|---|---|
-| **Key** | 离群集中在**固定通道**（跨 token 稳定） | Per-channel |
-| **Value** | 离群在 **token 维**变化 | Per-token |
+- 每层 KV cache：$2 \times \text{seq\_len} \times d_{\text{head}} \times n_{\text{heads}} \times 2\text{B}$（FP16）
+- 32 层 × 128K context：$2 \times 128000 \times 128 \times 32 \times 32 \times 2 \approx 32\text{GB}$
 
-**方法**：
+这远超模型权重本身（~14GB in FP16），而且 **KV cache 随 seq_len 线性增长**——context 越长，KV cache 越大，最终成为显存瓶颈，限制了最大 batch size 和最大 context length。
+
+**为什么不能直接对 KV cache 用统一的量化方法？** KIVI 的关键贡献是发现 **Key 和 Value 的离群结构完全不同**，需要不同的量化策略：
+
+| 张量 | 离群特征 | 原因 | 适合的量化粒度 |
+|---|---|---|---|
+| **Key** | 离群集中在**固定通道**（跨 token 稳定） | Key 投影权重的某些输出通道天然产生大值，与输入 token 无关 | **Per-channel** |
+| **Value** | 离群在 **token 维**变化，不同 token 的 Value 幅度差异大 | Value 的幅度与 token 的语义重要性相关，如 BOS token 通常有异常大的 Value | **Per-token** |
+
+如果对 Key 用 per-token 量化，固定通道的离群值会拉大每个 token 的 scale，浪费其余通道的精度；如果对 Value 用 per-channel 量化，某些异常 token 会拉大该通道的 scale。KIVI 的做法是"**按离群结构选粒度**"。
+
+**方法详解**：
+
+**Step 1：观察 Key 和 Value 的离群模式差异**
+
+KIVI 首先在多个模型（LLaMA-2-7B/13B、Mistral-7B 等）上系统分析了 KV cache 的数值分布：
+
+- **Key 矩阵** $K \in \mathbb{R}^{T \times d}$：对每个通道 $j$ 统计所有 token 的值 $K_{:,j}$，发现**少数固定通道的值始终比其余通道大 10-100×**，而且这些"离群通道"跨不同输入 token 几乎不变——这与 §3 讨论的 emergent outlier 现象一致，本质是 Key 投影权重 $W_K$ 的某些输出通道天然产生大值。
+- **Value 矩阵** $V \in \mathbb{R}^{T \times d}$：同样分析发现 Value 的离群**不在固定通道，而在特定 token 上**——某些 token（如 BOS、标点符号、高频功能词）的 Value 向量整体幅度远大于普通 token，而同一通道内不同 token 的值变化很大。
+
+这个不对称性决定了不能用同一种量化粒度处理两者。
+
+**Step 2：选择匹配的量化粒度**
 
 ```
-Key cache K ∈ ℝ^{T×d}:
-  - 按通道（d 维）算 scale/zero-point
-  - 新 token 沿用已有通道统计 or 滑动更新
+Key cache K ∈ ℝ^{T×d}（离群在通道维，跨 token 稳定）:
+  → Per-channel 量化：对每个通道 j，计算 scale 和 zero-point
+    s_j = (max(K_{:,j}) - min(K_{:,j})) / (2^b - 1)
+    z_j = round(-min(K_{:,j}) / s_j)
+  → 固定通道的大值被该通道自己的 s_j 覆盖，不影响其余通道
 
-Value cache V ∈ ℝ^{T×d}:
-  - 按 token（T 维）算 scale/zero-point
-  - 新 token 独立量化
+Value cache V ∈ ℝ^{T×d}（离群在 token 维，跨通道变化）:
+  → Per-token 量化：对每个 token t，计算 scale 和 zero-point
+    s_t = (max(V_{t,:}) - min(V_{t,:})) / (2^b - 1)
+    z_t = round(-min(V_{t,:}) / s_t)
+  → 异常 token 的大值被该 token 自己的 s_t 覆盖，不影响其余 token
 
-均 2-bit 非对称，group size 可调（32/64/128）
+均使用非对称量化（z ≠ 0），精度 2-bit，group size 可调（32/64/128）
 ```
 
-- Tuning-free。2-bit KV 在 LLaMA-2 / Mistral 上 PPL 增量小。
-- 峰值显存降 **2.6×+**，最大 batch 显著提升。
-- 局限：与 attention kernel packing / 内存布局强绑定。
+**Step 3：Residual token 机制处理增量更新**
+
+自回归推理时，每步生成一个新 token，其 Key/Value 向量需要追加到 cache 中。这带来一个问题：**新 token 的值可能超出已有 cache 的量化范围**，尤其是 Key 的 per-channel 量化——新 token 的某通道值可能比历史所有 token 都大，需要更新该通道的 $s_j$，这意味着要对整个 Key cache 重新量化，开销极大。
+
+KIVI 的解决方案是 **residual token buffer**：
+
+```
+KV cache 结构：
+┌─────────────────────────┐  ┌─────────────┐
+│  量化 cache（2-bit）      │  │ 残差 buffer   │
+│  token 1 ~ token T-R     │  │ (FP16, 最近R个)|
+│  已量化，不再修改          │  │  token T-R+1  │
+│                          │  │  ...          │
+│                          │  │  token T      │
+└─────────────────────────┘  └─────────────┘
+
+每当残差 buffer 满（积累 R 个 token）→ 批量量化这 R 个 token
+→ 追加到量化 cache → 清空 buffer
+```
+
+- 最近的 $R$ 个 token 保持 FP16 不量化（$R$ 通常取 128）——这些 token 通常是 attention 权重最大的部分（局部性），保持高精度最重要
+- 只有"历史"token 被量化，且一旦量化就不再修改——避免了反复更新 scale 的问题
+- Key 的 per-channel scale 在每次批量量化时，基于当前 buffer 中 $R$ 个 token 计算（而非全局更新）
+
+**Step 4：量化后的 Attention 计算**
+
+量化后 Attention 的计算需要分成两部分——量化部分和 FP16 残差部分：
+
+$$\text{Attn}(Q, K, V) = \text{softmax}\!\left(\frac{Q \cdot [K_{\text{quant}}; K_{\text{res}}]^T}{\sqrt{d}}\right) \cdot [V_{\text{quant}}; V_{\text{res}}]$$
+
+其中 $K_{\text{quant}}, V_{\text{quant}}$ 是 2-bit 量化部分，$K_{\text{res}}, V_{\text{res}}$ 是 FP16 残差 buffer。实际实现中：
+
+1. 计算 $Q \cdot K_{\text{quant}}^T$：需要对 2-bit Key 做 dequant（乘 scale + 减 zero-point），然后与 Q 做矩阵乘
+2. 计算 $Q \cdot K_{\text{res}}^T$：标准 FP16 矩阵乘
+3. 拼接后过 softmax
+4. $\text{softmax\_weights} \cdot [V_{\text{quant}}; V_{\text{res}}]$：同样分两部分 dequant + 乘
+
+这个分段计算需要定制的 attention kernel 支持（标准 FlashAttention 不支持混合精度 KV cache）。
+
+**为什么能做到 2-bit？** 关键在于 KV cache 量化的"容错空间"比权重量化大得多：
+
+1. **Key 侧**：Attention score 是 $QK^T / \sqrt{d}$，经过 softmax 后动态范围被大幅压缩。Key 的小量化误差导致 attention score 的微小偏移，但 softmax 的"赢者通吃"特性使得排名几乎不变——真正重要的 token 的 attention 权重仍然最大。
+2. **Value 侧**：$\text{softmax}(QK^T) \cdot V$ 是加权平均，attention 权重本身是稀疏的（大部分 token 权重接近 0），所以只有少数"被关注"的 token 的 Value 精度真正影响输出。而这些重要 token 往往在残差 buffer 中（最近的 token），保持了 FP16 精度。
+3. **非对称量化的额外收益**：2-bit 对称量化只有 {-1, 0, +1, 2} 四个值，而非对称量化通过 zero-point 偏移可以更灵活地覆盖任意区间，对 KV cache 中常见的偏斜分布（如 Value 中某些 token 全为正值）特别有效。
+
+**显存分析**（LLaMA-2-7B, 4K context, per head）：
+
+| 精度 | 单层 KV cache | 32 层总计 | 128K context |
+|---|---|---|---|
+| FP16 | $2 \times 4096 \times 128 \times 2\text{B} = 2\text{MB}$ | 64 MB | ~2 GB |
+| KIVI 2-bit | $2 \times 4096 \times 128 \times 0.25\text{B} + \text{scales} \approx 0.28\text{MB}$ | ~9 MB | ~0.28 GB |
+| 节省 | **~7×** | | |
+
+加上 residual buffer（$R=128$ tokens, FP16）的固定开销约 2MB/层，总节省仍然显著。实际测试中 128K context 的峰值显存从 >32GB 降到 ~12GB。
+
+**数字**：
+- Tuning-free，无需校准数据——scale/zero-point 完全在线计算。
+- 2-bit KV 在 LLaMA-2-7B/13B、Mistral-7B 上 PPL 增量通常 < 0.2。
+- 峰值显存降 **2.6×+**，最大 batch size 显著提升（长上下文场景下收益更明显）。
+- 可与权重量化（GPTQ/AWQ）正交使用——权重用 4-bit，KV cache 用 2-bit，叠加压缩。
+
+**局限**：
+- **Attention kernel 适配**：2-bit KV cache 需要定制的 packing/unpacking 逻辑和内存布局，标准 FlashAttention 无法直接使用。需要实现混合精度 attention kernel（量化部分 + FP16 残差部分的分段计算）。
+- **Key 的 per-channel 统计依赖 batch 量化**：每次批量量化 $R$ 个 token 时，per-channel scale 基于这 $R$ 个 token 计算。如果这批 token 不具有代表性（如前 128 个 token 与后续分布差异大），可能导致 scale 不够准确。实际中 $R=128$ 通常足够稳健。
+- **与 GQA 的交互**：GQA 中多个 query head 共享同一组 KV head，KV cache 已经被压缩（如 LLaMA-3 的 8 KV heads vs 32 query heads），进一步量化到 2-bit 的精度影响需要更仔细评估——每个 KV head 服务更多 query head，其误差被放大的机会也更多。
+- **Residual buffer 大小的选择**：$R$ 太小则最近 token 也被量化，损害局部 attention 精度；$R$ 太大则 FP16 部分占用过多显存，削弱量化收益。实际中 $R = 128$ 是一个经验性的平衡点。
+
+### 6.4 MambaQuant — 非 Transformer 架构的量化挑战
+
+> Xu, Yue et al., 2025 · ICLR 2025
+
+**为什么要关注 Mamba 量化？** 前面 §4-§6 的所有方法都假设目标架构是 Transformer。但 Mamba（基于 Selective State Space Model）正在成为 Transformer 的重要竞争者——在长序列任务上具有线性复杂度优势。当我们尝试将 Transformer 上成功的量化方法（如 QuaRot）直接应用到 Mamba 时，却发现**精度崩溃**：QuaRot 在 Vim-T 上 W8A8 精度下降 21%。MambaQuant 是第一个系统研究 Mamba 量化并提出解决方案的工作。
+
+**Mamba 量化的三大挑战**：
+
+1. **Gate/Output 投影层的离群值**：Mamba block 中 gate projection 的权重和 output projection 的输入激活存在显著离群值，类似 Transformer 但分布模式不同。
+
+2. **Parallel Scan (PScan) 放大离群**：Mamba 的核心操作是 PScan——连续对固定参数矩阵 $A$ 做自乘：$h(t) = A h(t-1) + B x(t)$。高值通道在 PScan 中被反复放大，低值通道被抑制，导致输出的通道间方差差异**远大于 Transformer**。
+
+3. **Hadamard 变换失效**：在 Transformer 上 Hadamard 旋转能有效均匀化 max value（QuaRot 的核心）。但 MambaQuant 从理论上证明：Hadamard 变换**无法保证通道方差一致**。具体来说，Hadamard 变换后第 $l$ 个通道的方差为：
+
+$$(\mathbf{C}_{\mathbf{X}\mathbf{H}})_{ll} = \frac{1}{n-1}\sum_{j=1}^{m}\left(\sum_{i=1}^{m}H_{il}K_{ij}\right)^2\lambda_j$$
+
+由于 $H$ 是固定矩阵而 $K$（特征向量）和 $\lambda$（特征值）随输入变化，Hadamard 无法适应不同的通道分布，导致旋转后方差仍然不一致。
+
+**MambaQuant 的解决方案**：
+
+**Offline 模式——KLT 增强旋转**：将 Karhunen-Loève 变换（KLT）与 Hadamard 矩阵组合。KLT 通过特征值分解找到数据的主成分方向，组合矩阵 $H_K = KH$（先 KLT 再 Hadamard）使得：
+
+$$(\mathbf{C}_{\mathbf{X}\mathbf{H}_K})_{ll} = \frac{1}{(n-1)m}\sum_{j=1}^{m}\lambda_j$$
+
+**所有通道方差完全相同**——等于特征值的均值。KLT 利用校准数据离线计算，不增加推理开销。应用于 LoRA 模块和 block 间连接（output/gate/state projection）。
+
+**Online 模式——Smooth-Fused 旋转**：对无法离线吸收的位置（如 PScan 输出），在 Hadamard 变换前先做 SmoothQuant 式的通道缩放来均匀化方差，再用 Hadamard 均匀化 max value。创新点是将 smoothing 参数巧妙融合进 Mamba 结构：
+- **Output projection**：将 SiLU 扩展为 Smooth-SiLU（S-SiLU），smoothing 因子吸收进 gate 和 output 权重
+- **Matrix multiplication**：smoothing 因子分别吸收进 B projection 和 C projection 权重，对 $\Delta$ 的指数运算做 addcmul 处理
+
+**实验结果**：
+
+| 模型 | 方法 | W8A8 | W4A8 |
+|---|---|---|---|
+| Vim-T (76.1%) | QuaRot | 59.3% | 52.7% |
+| Vim-T (76.1%) | **MambaQuant** | **75.6%** | **72.1%** |
+| Vim-S (80.5%) | QuaRot | 73.8% | 72.0% |
+| Vim-S (80.5%) | **MambaQuant** | **80.3%** | **79.4%** |
+| Mamba-LLM | QuaRot | 显著退化 | — |
+| Mamba-LLM | **MambaQuant** | <1% 精度损失 | ~1% 精度损失 |
+
+**关键启示**：**量化方法不能盲目跨架构迁移**。Transformer 上的最佳实践在 SSM/Mamba 架构上可能完全失效——需要理解目标架构的特有数值特征（如 PScan 的放大效应）并定制方案。这对未来混合架构（如 Jamba = Mamba + Attention）的量化也有启示。
 
 ---
 
@@ -522,112 +794,390 @@ Value cache V ∈ ℝ^{T×d}:
 
 > 前面 §4-§6 都是压缩已有模型（PTQ）。另一条完全不同的路线：**从头训练就用极低 bit**，让模型天生适应量化。这是 QAT（§2.1）在 LLM 时代的激进应用。
 
-### 7.1 经典路线
+**为什么要走这条路？** PTQ 方法（GPTQ、AWQ 等）本质上是在"抢救"一个按 FP16/BF16 训练好的模型——训练时权重分布是为高精度优化的，硬塞到 4-bit 不可避免地丢失信息。一个自然的想法：如果模型**从训练开始就在低 bit 下优化**，权重分布会自然适应低精度表示，理论上能获得比 PTQ 更好的精度。代价是需要完整的训练流程。
 
-| 方法 | 权重 | 激活 | 核心操作 |
-|---|---|---|---|
-| BinaryConnect / BNN | {-1, +1} | 实值 or 二值 | XNOR + popcount |
-| TWN | {-α, 0, +α} | 实值 | 阈值置零 + 缩放 |
-| XNOR-Net | {-1, +1} | {-1, +1} | XNOR + popcount + 通道级 scale |
+**重要澄清：这里的"低 bit 训练"是模拟量化，不是真正的低精度计算。** §2.1 介绍的 QAT 框架在这里同样适用——前向传播通过伪量化节点（quantize → dequantize）让模型"看到"量化误差，但**实际的 GEMM 仍然用 FP16/FP32 Tensor Core 执行**，梯度也在 FP32 latent weights 上累积。低 bit 权重只在推理时导出使用。换句话说，BitNet 的训练成本与 FP16 模型相当——它节省的是**推理**而非训练的计算量。真正降低训练计算精度的方法见 §8（FP8/FP4 训练）。
 
-理论 32× 压缩，但精度鸿沟大，且二值运算在现代 GPU Tensor Core 上未必快于 FP16 GEMM。
+### 7.1 经典路线（CNN 时代）
 
-### 7.2 BitNet
+| 方法 | 年份 | 权重 | 激活 | 核心操作 | 关键思想 |
+|---|---|---|---|---|---|
+| BinaryConnect | 2015 | {-1, +1} | 实值 | 乘法 → 符号翻转 | 首次证明二值权重可以训练 |
+| BNN | 2016 | {-1, +1} | {-1, +1} | XNOR + popcount | 权重和激活都二值化 |
+| TWN | 2016 | {-α, 0, +α} | 实值 | 阈值置零 + 缩放 | 加入零值，稀疏化 |
+| XNOR-Net | 2016 | {-1, +1} | {-1, +1} | XNOR + popcount + 通道级 scale | 加入实值 scale 因子恢复精度 |
 
-> Wang et al., 2023
+**这些方法的共同框架**：训练时维护一份 FP32 的 latent weights（真正的可训练参数）。前向传播时将 latent weights 量化为二值/三值，然后**立即 dequant 回 FP16/FP32**再做标准 GEMM——这就是 §2.1 介绍的伪量化（fake quantization），模型"看到"了量化误差但实际计算仍在浮点精度下进行，**训练时没有速度收益**。反向传播用 STE（§1.4）让梯度穿过 sign 函数，更新 FP32 latent weights。推理时丢弃 latent weights，导出真正的二值/三值权重，此时才用专用 kernel（如 XNOR+popcount 或 bitnet.cpp）获得加速。
 
-用 **BitLinear** 替代 `nn.Linear`：
+**为什么在 CNN 上没有成功？** 理论上 32× 压缩（FP32 → 1-bit），但实际问题很多：
+- **精度鸿沟**：ImageNet 上 ResNet-18 二值化后 top-1 精度下降 10-15%，大型网络（ResNet-50+）下降更多。
+- **硬件没有真正加速**：XNOR + popcount 在 CPU 上确实快，但现代 GPU 的 Tensor Core 专为 FP16/INT8 矩阵乘优化，二值运算反而因为缺乏硬件支持而更慢。
+- **训练不稳定**：STE 是一个非常粗糙的梯度近似（sign 的真实梯度是 0，STE 假装是 1），训练过程中容易出现梯度震荡和收敛困难。
 
+### 7.2 BitNet — LLM 时代的 1-bit 网络
+
+> Wang et al., 2023 (Microsoft Research)
+
+BitNet 是首个将极低 bit 训练扩展到 LLM 规模的工作。核心改造是用 **BitLinear** 替代所有 `nn.Linear`：
+
+**权重二值化**：
 $$\hat{W} = \text{Sign}(W - \mathbb{E}[W])$$
 
-激活量化到 8-bit，权重 {-1, +1}。训练用 STE。LayerNorm-before-quantization + absmax activation scaling。
+先减去均值（中心化），再取符号。减均值很关键——如果权重分布不对称（均值 ≠ 0），直接 Sign 会让 +1 和 -1 的数量严重不平衡，浪费表达能力。
 
-### 7.3 BitNet b1.58
+**激活量化**：激活量化到 $b$-bit（论文中用 8-bit），使用 absmax 对称量化：
+$$\hat{X} = \text{Quant}(X) = \text{Clip}\!\left(\left\lfloor \frac{X}{\max|X|} \cdot (2^{b-1} - 1) \right\rceil, -2^{b-1}+1, 2^{b-1}-1\right)$$
 
-> Ma et al., 2024
+**完整的 BitLinear 前向**：
+```
+训练时的 BitLinear 前向（伪量化）：
+1. LayerNorm(x)                         ← 稳定输入分布
+2. W_bin = Sign(W - mean(W))            ← 权重二值化（值为 ±1，但数据类型仍 FP16）
+3. X_q = absmax_quant(x, 8bit)          ← 激活量化再 dequant（值含量化误差，类型仍 FP16）
+4. Y = X_q @ W_bin                      ← 标准 FP16 GEMM（训练时无加速）
+5. Y = Y · (β · γ / Q_max)             ← rescale 还原数值范围
+   其中 β = mean(|W|), γ = max(|X|)
 
-权重 {-1, 0, +1}，即 $\log_2 3 \approx 1.58$ bit：
+推理时的 BitLinear（真正低 bit）：
+  导出的 W_bin 为真正的 1-bit packed 格式
+  → 专用 kernel 实现加减法替代乘法 → 获得实际加速
+```
+
+**训练**：STE + FP32 latent weights。与经典方法相同：前向用 {-1, +1} 权重，反向传播梯度到 FP32 latent weights 更新。
+
+**关键发现**：BitNet 展示了 **scaling law 对 1-bit 模型依然成立**——随着模型增大，1-bit 和 FP16 之间的精度差距在缩小。这暗示足够大的 1-bit 模型可能匹配较小的 FP16 模型性能。
+
+### 7.3 BitNet b1.58 — 从 {-1, +1} 到 {-1, 0, +1}
+
+> Ma et al., 2024 (Microsoft Research)
+
+BitNet b1.58 是 BitNet 的关键改进：权重从二值 {-1, +1} 扩展到三值 {-1, 0, +1}，每个权重的信息量为 $\log_2 3 \approx 1.58$ bit。
+
+**权重量化**：
 
 $$\hat{W} = \text{RoundClip}\!\left(\frac{W}{\gamma},\,-1,\,1\right), \qquad \gamma = \frac{\|W\|_1}{nm}$$
 
-矩阵乘退化为**纯加减法**（无乘法）。
+$\gamma$ 是权重绝对值的均值（L1 归一化因子）。归一化后权重大部分落在 $[-1, 1]$ 内，取整到 {-1, 0, +1}。
 
-- **原生低 bit** 路线：从头训练，不压缩已有模型。
-- 挑战：需专用 kernel；对齐 / RLHF 等复杂流程兼容性未充分验证。
+**0 的引入为什么是关键改进？**
+
+1. **矩阵乘变成纯加减法**：$y_i = \sum_j w_j x_j$，当 $w_j \in \{-1, 0, +1\}$ 时，$w_j x_j$ 要么是 $+x_j$，要么是 $-x_j$，要么是 0（跳过），完全消除了乘法运算。相比 BitNet 的 {-1, +1}（只有加减），0 引入了**稀疏性**——部分权重直接跳过计算。
+2. **更好的特征选择**：0 允许模型"忽略"某些输入维度，相当于隐式做了特征选择。{-1, +1} 强制每个输入都参与计算，即使某些输入对当前输出不重要。
+3. **精度显著提升**：同等模型大小下，b1.58 的精度大幅优于 BitNet（1-bit），在 3B 参数规模上已经可以**匹配 FP16 LLaMA 的性能**。
+
+**与 PTQ 方法的根本区别**：
+
+| | PTQ（GPTQ/AWQ） | BitNet b1.58 |
+|---|---|---|
+| 起点 | FP16 训练好的模型 | 从头训练 |
+| 权重分布 | 为 FP16 优化，强行压缩到低 bit | 训练过程中自然适应三值 |
+| 精度 | 4-bit 较好，3-bit 以下崩溃 | 1.58-bit 可匹配 FP16 |
+| 成本 | 几分钟到几小时 | 完整训练（与 FP16 训练同等成本） |
+| 推理硬件 | 现有 GPU + 专用 kernel | 需要全新的硬件/kernel 支持 |
+
+**挑战与未解决问题**：
+- **需要专用硬件/kernel**：现有 GPU 的 Tensor Core 不支持三值矩阵乘。虽然理论上加减法比乘法快得多，但没有硬件原生支持就无法兑现加速优势。Microsoft 已发布 bitnet.cpp 推理引擎。
+- **训练基础设施**：训练时仍需 FP32/FP16 latent weights + STE，训练成本与 FP16 模型相当。优势只在推理侧。
+- **对齐/RLHF 兼容性**：大模型训练后还需要 SFT、RLHF、DPO 等对齐步骤。这些步骤在三值权重约束下的稳定性和效果尚未充分验证。
+- **Scaling 到更大模型**：目前公开的实验最大到 3B 参数，百亿以上规模的验证仍缺失。
 
 ---
 
 ## 8 训练侧低精度
 
-> §4-§7 聚焦推理量化。训练同样有低精度需求——不是为了压缩模型，而是为了**节省训练显存和加速计算**。混合精度训练的基础已在 §1.5 介绍，本节聚焦更激进的 FP8 训练和低精度优化器。
+> §4-§6 聚焦 PTQ 推理量化，§7 的 BitNet 走的是"从头用低 bit 训练"路线——但 BitNet 的目标仍是获得一个低 bit **推理**模型，训练过程本身仍用 FP16/FP32。本节关注的是另一个方向：**训练计算本身的低精度化**——不是为了得到低 bit 模型，而是为了**让训练过程更快、更省显存**。混合精度训练的基础已在 §1.5 介绍，本节聚焦更激进的 FP8/FP4 训练和低精度优化器。
 
 ### 8.1 FP8 训练与 Scaling
 
 > Micikevicius et al., 2022
 
+**为什么要从 FP16/BF16 进一步降到 FP8？** 混合精度训练已经把 GEMM 从 FP32 降到了 FP16/BF16（§1.5），但训练规模还在指数增长。FP8 Tensor Core 的算力是 FP16 的 **2×**（H100：FP8 1979 TFLOPS vs FP16 990 TFLOPS），同时显存带宽占用也减半。如果能把训练的 GEMM 进一步降到 FP8，理论上可以再获得 2× 加速。
+
+**为什么 FP8 训练比 FP16 训练难？** FP8 只有 8 bit，能表示的数值范围和精度都很有限（§1.6）。关键矛盾是训练中不同张量的数值特征差异很大：
+
+- **权重**：分布相对集中，绝对值通常在 $[0, 几]$ 范围内，需要精度 → 用 **E4M3**（3 bit 尾数，范围 ±448）
+- **激活**：分布类似权重但可能有离群值 → 也用 **E4M3**
+- **梯度**：分布极端——大部分接近 0，少数极大值（尤其训练早期和尾部层），需要大动态范围 → 用 **E5M2**（2 bit 尾数，范围 ±57344）
+
 | 格式 | 指数 | 尾数 | 动态范围 | 典型用途 |
 |---|---|---|---|---|
-| **E4M3** | 4 | 3 | ±240 | 前向：权重 / 激活 |
+| **E4M3** | 4 | 3 | ±448 | 前向：权重 / 激活 |
 | **E5M2** | 5 | 2 | ±57344 | 反向：梯度 |
 
-FP8 动态范围有限 → 必须 scaling：
+**Scaling 是 FP8 训练的核心技术**。即使选对了 E4M3/E5M2 格式，FP8 的动态范围仍然有限。如果张量的实际值远小于 FP8 最大值，大部分 FP8 量化级被浪费（利用率低）；如果实际值超过 FP8 最大值，直接溢出到 NaN/Inf。Scaling 就是在 cast 到 FP8 之前先缩放到合适的范围：
 
-$$x_{\text{fp8}} = \texttt{cast\_fp8}(x \,/\, s)$$
+$$x_{\text{fp8}} = \texttt{cast\_fp8}(x \,/\, s), \qquad s = \frac{\max|x|}{f_{\max}}$$
 
-| Scaling 策略 | 说明 | 精度 | 开销 |
-|---|---|---|---|
-| Per-tensor | 整张量一个 $s$ | 低 | 最低 |
-| Per-token × per-channel | 激活按 token，权重按 channel | 中 | 中 |
-| Per-block (MXFP8) | 固定 tile（如 32 元素）一个 $s$ | 高 | 较高 |
-| Delayed scaling | 用前几步 amax 估 $s$ | 中 | 低（有时序依赖） |
+其中 $f_{\max}$ 是 FP8 格式的最大可表示值（E4M3: 448, E5M2: 57344）。反量化时乘以 $s$ 还原。
 
-- H100 (Hopper) 原生 FP8 Tensor Core；Blackwell 进一步支持 MXFP8。
-- 端到端 FP8 训练：GEMM 用 FP8，master weights / optimizer state 仍 FP32/BF16。
-- 瓶颈：如果只 GEMM 用 FP8、其余算子仍 FP16，整体加速有限。
+**Scaling 策略对比**——粒度越细精度越高，但开销也越大：
+
+| Scaling 策略 | 说明 | 精度 | 开销 | 代表 |
+|---|---|---|---|---|
+| **Per-tensor** | 整张量一个 $s$ | 低（离群值拉大 s） | 最低 | Transformer Engine 默认 |
+| **Per-token × per-channel** | 激活按 token 一个 $s$，权重按 output channel 一个 $s$ | 中（分维度适配） | 中 | 部分学术工作 |
+| **Per-block (MXFP8)** | 固定 tile（如 32 元素）一个 $s$，$s$ 本身用 8-bit 存储 | 高（局部精度好） | 较高 | Blackwell MXFP8 |
+| **Delayed scaling** | 不用当前 step 的 $\max\lvert x \rvert$（需要额外 pass），而是用前几步的 amax 估计 $s$ | 中 | 低（但有时序依赖） | NVIDIA recipe |
+
+**Delayed scaling 详解**：Per-tensor scaling 的一个实际问题是——要算 $s = \max|x| / f_{\max}$，需要先跑一遍前向得到 $x$，才能算 $s$，然后再用 $s$ 做量化跑第二遍前向。为了避免两遍开销，delayed scaling 用前几步的历史 $\max|x|$ 来估计当前 step 的 $s$。假设相邻 step 的统计变化不大（通常成立），这种"延迟"一步的近似足够好。
+
+**端到端 FP8 训练的完整 recipe**：
+
+```
+前向传播：
+  权重 cast FP8 E4M3 (per-tensor scaling)
+  激活 cast FP8 E4M3 (per-tensor scaling)
+  GEMM: FP8 × FP8 → FP16/FP32 累积（Tensor Core 内部用高精度累加）
+
+反向传播：
+  梯度 cast FP8 E5M2 (per-tensor scaling)
+  权重梯度 GEMM: FP8 × FP8 → FP16/FP32 累积
+
+参数更新：
+  FP32 master weights + FP32 optimizer states（同 FP16 混合精度）
+```
+
+**硬件支持现状**：
+- **H100 (Hopper)**：原生 FP8 Tensor Core，支持 E4M3 和 E5M2，per-tensor scaling。NVIDIA Transformer Engine 库提供开箱即用的 FP8 linear layer。
+- **B200 (Blackwell)**：进一步支持 MXFP8（per-block scaling，block size 32），精度更高，且 $s$ 用 8-bit 共享指数存储，元数据开销可控。
+- **AMD MI300X**：支持 FP8 但生态和优化程度落后于 NVIDIA。
+
+**瓶颈**：FP8 目前主要加速 GEMM 操作。但训练中还有大量非 GEMM 算子（LayerNorm、softmax、残差连接、激活函数等）仍用 FP16/BF16。如果这些算子占比较高（尤其在小 batch 或 attention-heavy 的场景下），FP8 GEMM 的加速会被非 GEMM 部分稀释——Amdahl 定律。
 
 ### 8.2 低精度优化器
 
-> Dettmers et al., 2021
+> Dettmers et al., 2021 (bitsandbytes 8-bit Adam)
 
-**问题**：Adam 的 $m$（一阶动量）和 $v$（二阶动量）各占模型大小的 FP32 存储，是训练显存的大头。
+**问题**：训练一个 LLM，显存的大头不是模型权重，而是**优化器状态**。以 Adam 训练 7B 模型为例：
 
-**做法**：block-wise dynamic INT8 量化：
+| 组件 | 精度 | 显存 |
+|---|---|---|
+| 模型权重 | BF16 | 14 GB |
+| 梯度 | BF16 | 14 GB |
+| FP32 master weights | FP32 | 28 GB |
+| Adam $m$（一阶动量） | FP32 | 28 GB |
+| Adam $v$（二阶动量） | FP32 | 28 GB |
+| **合计** | | **~112 GB** |
+
+优化器状态（$m + v$）占了 56 GB，超过模型权重本身的 4 倍。如果能把 $m, v$ 从 FP32 压缩到 INT8，就能节省 42 GB（75%）。
+
+**为什么不能直接把 $m, v$ 存成 FP16？** $m$ 和 $v$ 的分布特征与权重不同——$m$ 是梯度的指数移动平均，可正可负，分布相对集中；$v$ 是梯度平方的移动平均，全为正，且跨参数的幅度差异可达数个数量级。FP16 的 5 bit 指数覆盖的动态范围有限，某些参数的 $v$ 值可能下溢到 0，导致 Adam 更新步长爆炸（$\text{update} \propto m / \sqrt{v}$，$v \to 0$ 时分母趋零）。
+
+**bitsandbytes 的做法——block-wise dynamic INT8 量化**：
 
 ```
-1. 将 m / v 切分为 block（如 B=2048 元素）
-2. 每 block 独立算 absmax → 对称 INT8 量化
-3. 更新时：反量化→FP32 Adam update→量化回 INT8
+每步 Adam 更新：
+
+1. 反量化：m_fp32 = dequant_int8(m_int8),  v_fp32 = dequant_int8(v_int8)
+2. 标准 Adam 更新（FP32）：
+     m_fp32 = β1 · m_fp32 + (1-β1) · grad
+     v_fp32 = β2 · v_fp32 + (1-β2) · grad²
+     weight -= lr · m_fp32 / (√v_fp32 + ε)
+3. 重新量化：m_int8 = quant_int8(m_fp32),  v_int8 = quant_int8(v_fp32)
 ```
 
-**Stable Embedding**：embedding 层梯度极稀疏且不稳定 → 保留 FP32 optimizer state。
+**关键设计——为什么 block-wise？** 如果对整个 $m$ 或 $v$ 向量用一个 scale 做 INT8 量化，少数极大值会拉大 scale，挤压其余参数的精度（和 §3 离群值问题一模一样）。Block-wise（block size = 2048）让每个 block 独立计算 scale，局部大值只影响局部精度，不会污染全局。
 
-- 显存节省约 75%（optimizer state 从 FP32 → INT8）。
-- 收敛曲线几乎无损。
-- `bnb.optim.Adam8bit` 即插即用。
+**Stable Embedding**：Embedding 层的特殊性在于梯度极稀疏——每个 batch 只有被采样到的 token embedding 有非零梯度，其余全是 0。这导致 $m, v$ 的更新极不规律（长时间为 0 突然跳变），INT8 量化后容易丢失小更新。解决方案很简单：**embedding 层保留 FP32 optimizer state**，其余层用 INT8。Embedding 参数量相对小，FP32 的额外显存可接受。
+
+**数字**：
+- 显存节省约 75%（optimizer state 从 FP32 → INT8 + 少量 scale 元数据）。
+- 在 GPT-2、RoBERTa、BLOOM 等模型上收敛曲线几乎无损，最终精度与 FP32 Adam 相当。
+- 使用极简：`bnb.optim.Adam8bit` 替换 `torch.optim.Adam` 即可，接口完全兼容。
+
+**后续发展**：
+- **4-bit 优化器**（Dettmers et al., 2024）：进一步压缩到 4-bit，使用非均匀量化（类似 NF4），显存节省更多但需要更仔细的超参数调整。
+- **Galore**（Zhao et al., 2024）：从另一个角度压缩——将梯度投影到低秩子空间，减少优化器状态的维度而非精度。与 8-bit optimizer 正交，可组合使用。
+
+### 8.3 Quartet — FP4 预训练
+
+> Panferov, Chen et al., 2025 · ICML 2025
+
+**为什么要比 FP8 更低？** §8.1 介绍了 FP8 训练，Blackwell 架构已经原生支持。但 Blackwell 同时还支持 **MXFP4** 格式的 Tensor Core 运算——理论上比 FP8 再快 2×。问题是：FP4 只有 7 个非零可表示值（E2M1 格式），训练中如此粗糙的表示能否收敛？Quartet 证明答案是肯定的，并给出了具体方法。
+
+**MXFP4 格式回顾**：每 32 个 FP4 元素共享一个 E8M0 scale（power-of-2），每个元素 1 sign + 2 exp + 1 mantissa。可表示的正值仅为 {0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}，加上 0 和对应负值，共 15 个值。
+
+**核心方法——前向后向不对称量化**：
+
+Quartet 的关键洞察是：**前向和后向传播对量化的需求完全不同**。
+
+- **前向传播**（权重 × 激活）：需要高精度，因为直接决定模型输出质量。使用 **QuEST**（Quantization with Error-aware Stochastic Training）——在 Hadamard 旋转后寻找最小 MSE 的 clipping ratio 做确定性量化，精度高但计算略重。
+- **后向传播**（梯度 × 激活/权重）：可以容忍更多噪声（梯度本身就是随机估计），使用 **随机取整（Stochastic Rounding, SR）**——将量化噪声变成零均值随机变量，保证梯度期望无偏。SR 计算简单但单次精度差。
+
+```
+Quartet 一步训练流程：
+
+前向传播：
+  X̃ = Hadamard(X)    # 旋转消除离群
+  W̃ = Hadamard(W)
+  Y = QuEST_FP4(X̃) × QuEST_FP4(W̃)    # 确定性最优量化
+
+后向传播：
+  ∂L/∂X = SR_FP4(∂L/∂Y) × W̃ᵀ          # 随机取整，无偏
+  ∂L/∂W = X̃ᵀ × SR_FP4(∂L/∂Y)
+
+优化器更新：FP32 master weights（同混合精度训练）
+```
+
+**低精度 Scaling Law**：Quartet 提出了考虑精度的 scaling law：
+
+$$L(N, D, P_{fwd}, P_{bwd}) = \frac{A}{(\text{effN})^\alpha} + \frac{B}{(\text{effD})^\beta} + E$$
+
+其中 $\text{effN} = N \cdot \rho(P_{fwd})$ 为"有效参数量"（低精度降低了参数的信息容量），$\text{effD} = D \cdot \eta(P_{bwd})$ 为"有效数据量"（低精度梯度降低了每个 token 的学习效率）。核心发现：
+
+- **前向精度影响参数效率**：FP4 前向的 $\rho$ 约 0.69-0.78，即 FP4 模型需要约 1.3-1.45× 参数才能匹配 BF16 同等精度
+- **后向精度影响数据效率**：FP4 后向的 $\eta$ 约 0.85，需要约 1.18× 数据补偿
+- **前向比后向更敏感**：这解释了为什么 Quartet 在前向用更精确的 QuEST 而后向用简单的 SR
+
+**实验结果**：
+- 在 Llama 架构上训练 60M-1.3B 模型，FP4 训练精度与 FP8 baseline 差距在 **0.5-1.0 PPL** 以内
+- 相比 BF16 baseline，FP4 需要约 1.3× 参数才能匹配同等精度
+- **硬件加速**：在 Blackwell GPU 上，FP4 GEMM 吞吐量为 FP8 的 **2×**，end-to-end 训练加速约 **2×**
+
+**局限**：目前仅验证了预训练阶段；FP4 的极粗粒度在 fine-tuning（学习率小、梯度信号弱）阶段可能更具挑战。
+
+### 8.4 HALO — Hadamard 辅助低精度微调
+
+> Ashkboos et al., 2025
+
+**动机**：§8.1-§8.3 讨论的是预训练阶段的低精度化。但大模型部署前还需要 fine-tuning（SFT/RLHF），对于大多数用户来说这才是训练的主要场景。Fine-tuning 的特殊性在于：(1) 学习率比预训练低 10-100×，梯度信号更弱，对精度更敏感；(2) 通常在消费级 GPU（如 RTX 4090）上进行，显存更紧张。HALO 专门为 fine-tuning 场景设计低精度方案。
+
+**核心思想——两级量化方案**：
+
+HALO 提出两个级别，用户根据硬件约束选择：
+
+**HALO-1（FP6 级别）**：权重和激活量化到 FP6，前向 GEMM 用 FP6 计算。这是一个"保守"方案，精度损失极小，主要收益是 1.5× 显存节省。
+
+**HALO-2（INT8 级别）**：权重和激活量化到 INT8，前向和部分后向 GEMM 都用 INT8 计算。更激进，2× 显存节省和计算加速。
+
+**关键技术——右手侧 vs 左手侧 Hadamard 旋转**：
+
+QuaRot 等方法只在"右手侧"做旋转：$Y = (XR^T)(RW) = \tilde{X}\tilde{W}$，分散激活和权重的离群值。但 HALO 发现 fine-tuning 中的**误差梯度**（error gradient $\partial L / \partial Y$）也存在严重离群值——如果只旋转了前向的 $X$ 和 $W$ 而不处理反向的 $\partial L / \partial Y$，后向传播的量化误差会很大。
+
+HALO 的创新是同时在"左手侧"做旋转：
+
+$$Y = (Q \cdot X \cdot R^T) \cdot (R \cdot W \cdot P^T)$$
+
+- $R$：右手侧旋转，分散激活和权重的离群
+- $Q$：左手侧旋转，分散误差梯度 $\partial L / \partial Y$ 的离群
+- $P$：输出侧旋转，处理输出方向的离群
+
+反向传播时：$\partial L / \partial X = Q^T \cdot \text{quant}(\partial L / \partial Y_{\text{rotated}}) \cdot R \cdot W$，$\partial L / \partial Y$ 先被 $Q$ 旋转均匀化再量化，精度更高。
+
+**HQ-FSDP：量化分布式通信**：
+
+Fine-tuning 大模型通常使用 FSDP（Fully Sharded Data Parallelism），通信量是一个瓶颈。HALO 将 FSDP 的 all-gather（分发权重）和 reduce-scatter（聚合梯度）操作中传输的张量也做量化压缩：
+- All-gather：传输量化后的权重，接收端反量化
+- Reduce-scatter：梯度量化后传输，聚合后反量化
+- 通信量减少 2-4×，在多卡训练时显著提速
+
+**实验结果**：
+- 在 Llama-2-7B fine-tuning 上，HALO-2 精度损失 <0.5%，训练速度提升 **1.41×**（RTX 4090 单卡）
+- HQ-FSDP 在 4× RTX 4090 上额外带来 15-20% 加速
+- 与 QLoRA 对比：HALO 做全参数低精度 fine-tuning，QLoRA 做低秩 + 量化；两者互补，可组合使用
+
+### 8.5 Flash Attention 低精度训练的隐患
+
+> Qiu & Yao, 2025 — "Why Low-Precision Transformer Training Fails"
+
+**问题**：BF16 Flash Attention 训练在某些情况下会突然 loss 爆炸——例如 GPT-2 在 ~6600 步后训练发散。这一现象在 nanoGPT、flash-attention 等项目的 issue 中被反复报告，但此前缺乏机理解释。本节剖析根因并给出修复方案。
+
+**故障链路追踪**：
+
+作者通过系统排查，将问题定位到 Flash Attention 反向传播中的一个关键中间量：
+
+$$\delta[T] = \text{rowsum}(dO \odot O)[T]$$
+
+其中 $O = \text{softmax}(QK^\top)V$ 是注意力输出，$dO$ 是输出梯度。在低精度下 $\delta_{\text{lp}}$ 与高精度 $\delta_{\text{hp}}$ 之间产生了**系统性偏差**（非随机噪声），导致权重梯度累积低秩误差矩阵，谱范数持续增长直到训练爆炸。
+
+**两个根因的叠加**：
+
+| 根因 | 机制 | 后果 |
+|---|---|---|
+| **相似低秩表示** | 训练过程中，注意力矩阵 $P$、投影矩阵 $K$、隐层 $X$ 在 token 间形成相似的低秩结构 $R$ | 梯度误差 $dW_{\text{hp}} - dW_{\text{lp}} \approx \alpha \sum (\delta_{\text{lp}} - \delta_{\text{hp}})[T] \cdot R$，不会因 token 平均而消除 |
+| **BF16 有偏舍入** | Safe softmax 中，当 score 行内存在多个相同最大值时，$\bar{P}$ 中出现精确等于 1 的元素。后续 $\bar{P}V$ 的 BF16 累加因 significand overflow 产生**系统性负偏差** | $O$ 偏负 → $(\delta_{\text{lp}} - \delta_{\text{hp}})[T]$ 系统性偏正 → 权重谱范数单调增长 |
+
+**为什么 $\bar{P}$ 出现精确的 1 是危险的？**
+
+Safe softmax 计算 $\bar{P} = \exp(S - m)$，其中 $m = \text{rowmax}(S)$。当一行中有多个 token 的 score 等于行最大值时，$S[T,t] - m = 0$，$\exp(0) = 1.0$。此时 $\bar{P}[T,t] \times V[t,i]$ 的 BF16 乘加运算会因 significand 对齐和舍入产生有偏误差——与 $\bar{P} < 1$ 时误差统计对称的情况完全不同。
+
+**与 attention sink 的联系**：Attention sink 现象（少数 token 吸引极高注意力分数）使得 $\bar{P} = 1$ 的情况更频繁出现，这从数值算术层面直接解释了为什么 attention sink 会加剧训练不稳定性。这也与 §3 中讨论的离群值问题形成呼应——离群值不仅影响推理量化，也通过注意力集中效应威胁训练稳定性。
+
+**修复：动态最大值调整（Stabilized Flash Attention）**
+
+核心思想：利用 softmax 的平移不变性 $\text{softmax}(z) = \text{softmax}(z - c)$，在检测到行内重复最大值时动态调大归一化常数 $m$，确保 $\bar{P}$ 的所有元素严格小于 1：
+
+$$r_m = \text{rowmax}(S), \quad r_s = \text{rowsum}(S \equiv r_m)$$
+$$m = \begin{cases} \beta \cdot r_m & \text{if } r_m > 0 \wedge r_s > 1 \\ 0 & \text{if } r_m < 0 \wedge r_s > 1 \\ r_m & \text{otherwise} \end{cases}$$
+
+其中 $\beta \in [2, 8]$。这样 $\max(S - m) < 0$，因此 $\max(\bar{P}) < 1$，消除了有偏舍入的触发条件。
+
+**设计要点**：
+- **为什么不用固定偏移？** 固定减去小常数会在 $\bar{P}$ 的 BF16 转换中引入新的系统性舍入误差，无法根治问题
+- **为什么条件触发？** 无条件调整 $m$ 在 $r_m$ 很大时会导致 $\exp(S - \beta r_m)$ 下溢为 0，引发除零错误
+- **仅修改前向传播**：调整只在 softmax 的 tiling 算法中加入一行判断（Algorithm 1 第 8-9 行），反向传播无需改动
+
+**实验验证**：
+- GPT-2 BF16 训练：原始 Flash Attention 在 ~6600 步 loss 爆炸，Stabilized Flash Attention（$\beta=7$）训练全程稳定
+- 修复在 NVIDIA A100、RTX 4090、Huawei Ascend 910B 上均有效
+- 数学上精确等价于标准注意力（只是选择了不同的平移常数 $c$），不影响模型精度
+
+**启示**：这项工作揭示了一个容易被忽视的事实——**低精度训练的不稳定性不一定来自显式的量化操作，也可能藏在基础算子（如 Flash Attention）的数值实现细节中**。对于 §8.1-§8.4 中讨论的各种低精度训练方法，Flash Attention 的 BF16 舍入问题同样适用，需要配合使用稳定化方案。
+
+### 8.6 优化器选择如何影响量化？
+
+> Vlassis, Ashkboos et al., 2025 · "Beyond Outliers"
+
+前面 §3 介绍了离群值是 LLM 量化的核心挑战，§4-§6 介绍了各种 PTQ 方法来应对离群值。一个被忽视的问题是：**所有量化方法都假设"给定一个训练好的模型"，但不同优化器训好的模型，量化友好程度一样吗？** Beyond Outliers 首次系统研究了优化器（AdamW、Muon、PSGD、Shampoo、SOAP、Scion）与量化（PTQ + QAT）的交互关系，在 50M-1.5B 参数规模上实验，得出了多个反直觉结论。
+
+**核心发现 1：离群值指标不能预测 PTQ 精度**
+
+§3 中我们介绍了离群值（outlier）是 LLM 量化的核心难点。直觉上，离群值越大量化越难——传统工作用 MMR（max/median ratio）或 Kurtosis 来衡量离群程度，并以此指导量化方案设计（如 §4.2 SmoothQuant 的目标就是降低激活的离群值）。但 Beyond Outliers 发现，**跨优化器比较时 MMR 和 Kurtosis 与 PTQ 后精度几乎无相关性**（$\rho = 0.62$ 和 $\rho = -0.89$ 对 760M 模型）：
+
+- **Muon** 的 MMR 最低（离群最小），但 PTQ 后精度**下降最严重**（760M: 64.63% → 50.00%）
+- **Shampoo** 的 MMR 最高（离群最大），但 PTQ 后精度**保持最好**（760M: 63.05% → 59.26%）
+
+**为什么 MMR 失败？** 论文给出了理论分析——ABC 分解框架。MMR 是**单层**度量，但量化误差的总效应取决于误差如何**逐层传播和放大**。具体来说，将第 $\ell$ 层的量化误差 $\Delta h_\ell = h_\ell^q - h_\ell$ 分解为：
+
+$$R_\ell = A_\ell + B_\ell + C_\ell$$
+
+- $A_\ell$：前面层累积误差经当前层传播（**主导项**——类似 §6.1 QuaRot 讨论的"误差沿计算图传播"）
+- $B_\ell$：当前层新引入的量化误差（MMR 能部分预测的部分）
+- $C_\ell$：两者的交互项
+
+关键发现：$R_\ell$ 几乎完全由 $A_\ell$ 主导。即使 MMR 能预测单层误差 $B_\ell$，总误差取决于**增益** $G_\ell = A_\ell / R_{\ell-1}$——量化误差通过每一层的放大倍数：
+
+$$G_\ell = G_{1,\ell} \cdot G_{2,\ell}$$
+
+$G_{1,\ell}$ 是谱范数比（量化前后权重谱范数变化，各优化器接近 1），$G_{2,\ell}$ 是对齐比（量化误差方向与权重主奇异方向的对齐程度）。**Muon 的 $G_\ell$ 在线性层最高**——量化误差恰好指向权重放大最强的方向，导致误差快速积累；Shampoo 和 AdamW 的 $G_\ell$ 最低。
+
+论文提出的新指标 $R_L$（最终层累积量化误差）与 PTQ 精度高度相关（$\rho = 0.70$）。
+
+**核心发现 2：QAT 最佳优化器 ≠ 全精度最佳优化器**
+
+在全精度训练中 Muon 表现最好（参考 §2.1 讨论的 QAT 需要重新训练），但 4-bit QAT（使用 §8.3 提到的 QuEST 方案）下各优化器排名完全改变。**Shampoo 在 QAT 中精度退化最小**——如 760M: Shampoo 仅 -0.46%，而 Muon -3.57%。
+
+**核心发现 3：QAT 的 scaling law**
+
+类似 §8.3 Quartet 提出的低精度 scaling law（用 effN 描述精度对参数效率的影响），Beyond Outliers 推导了 QAT 下的 optimizer-aware scaling law：$L = A' / (N \cdot \rho)^\alpha + E$，其中 $\rho$ 是"参数效率"——4-bit QAT 模型的等效参数量为 $\rho \cdot N$。各优化器的 $\rho_{4bit}$：
+
+| 优化器 | $\rho_{4bit}$ | 含义 |
+|---|---|---|
+| **Shampoo** | **0.879** | 4-bit 保留 87.9% 参数效率 |
+| AdamW | 0.863 | |
+| Scion | 0.856 | |
+| Muon | 0.852 | |
+| SOAP | 0.822 | |
+
+**实践启示**：如果最终目标是部署量化模型，训练阶段的优化器选择也很重要——Shampoo 训出的模型量化更鲁棒。对于 PTQ，传统的离群值度量（MMR、Kurtosis）可能误导优化方向，应关注误差传播特性而非单层统计。**评测量化友好性需要全局视角，不能只看局部指标**。
 
 ---
 
-## 9 Kernel 与系统落地
+## 9 量化工程实现
 
-> 量化算法设计得再好，没有高效 kernel 支持就无法真正加速。本节从"算法到硬件"的视角看量化如何落地。
+> 量化算法最终需要工程实现才能落地。本节以 bitsandbytes 为例介绍量化库的实现细节，并讨论量化库与推理框架在架构上的本质区别。
 
-### 9.1 MARLIN — INT4×FP16 推理 Kernel
-
-> Frantar et al., 2024
-
-**问题**：4-bit 权重推理（§5 的 GPTQ/AWQ）需 dequant→FP16 GEMM。朴素实现 dequant 开销抵消压缩收益。
-
-**设计**：
-
-| 技术 | 作用 |
-|---|---|
-| **4:16 Packing Layout** | 4-bit 权重紧凑排列，对齐 128-byte cache line |
-| **异步 Dequant + 计算 Pipeline** | async copy global→shared mem 隐藏 dequant，Tensor Core 同时执行上一批 GEMM |
-| **Split-K 并行** | 小 batch（如 16 tokens decode）将 K 维切分到多 SM，减少尾延迟 |
-
-A100 上 batch=16 时接近理想 **3.5–4× 加速**（vs FP16）。
-
-### 9.2 bitsandbytes 量化实现
+### 9.1 bitsandbytes 量化实现
 
 bitsandbytes 是 §1.1 均匀量化公式的典型工程实现，分 Python 接口和 CUDA kernel 两层。
 
@@ -665,25 +1215,59 @@ x_hat = absmax_per_block * code[x_q]
 
 与均匀量化不同，NF4 的量化点分布是非均匀的，中心更密、尾部更稀，匹配正态分布的概率密度。
 
-**CUDA kernel 层**（`csrc/kernels.cu`）伪代码：
+**CUDA kernel 层**（`csrc/kernels.cu`）关键实现片段：
 
-```c
-__global__ void kQuantizeBlockwise(float *x, uint8_t *out, float *absmax, int blocksize) {
-    int block_idx = blockIdx.x;
-    int local_idx = threadIdx.x;
-    int global_idx = block_idx * blocksize + local_idx;
+**1. Block 内 absmax 归约**——使用 CUB 的 `BlockReduce` 原语，比手写 shared memory 归约更高效：
 
-    // 1. shared memory 归约求 block 内 max|x|
-    float local_abs = fabsf(x[global_idx]);
-    float block_max = blockReduceMax(local_abs);
-    if (local_idx == 0) absmax[block_idx] = block_max;
-    __syncthreads();
+```cuda
+// 每个线程处理 NUM_PER_TH 个元素，先求局部 abs max，再用 CUB 做 block 级归约
+local_abs_max = BlockReduce(reduce).Reduce(local_abs_max, BNB_MAX_OP, valid_items);
 
-    // 2. 量化：scale = absmax / 127
-    float s = absmax[block_idx] / 127.0f;
-    out[global_idx] = (uint8_t)roundf(x[global_idx] / s + 128.0f);  // 偏移存储为 uint8
+if (threadIdx.x <mark> 0) {
+    smem_absmax_value[0] = 1.0f / local_abs_max;  // 存倒数，后续用乘法替代除法
+    absmax[i / BLOCK_SIZE] = local_abs_max;
 }
 ```
+
+**2. NF4 量化——决策树替代线性搜索**：16 个非均匀量化点的最近邻查找被编译为二叉判断树（$O(\log 16) = 4$ 次比较），避免了遍历码本的开销：
+
+```cuda
+__device__ unsigned char dQuantizeNF4(float x) {
+    // 编译期展开为 4 层 if-else，每个叶节点返回 4-bit 索引
+    if (x > 0.03979014977812767f)
+        if (x > 0.3893125355243683f)
+            if (x > 0.6427869200706482f)
+                if (x > 0.8614784181118011f) return 0b1111;
+                else return 0b1110;
+            else if (x > 0.5016634166240692f) return 0b1101;
+            else return 0b1100;
+        // ... 共 16 个叶节点，阈值为相邻码本值的中点
+}
+```
+
+**3. 4-bit packing——两个值压入一个字节**：
+
+```cuda
+// NF4: 每个 byte 存两个 4-bit 量化值，高 4 位 + 低 4 位
+for (int j = 0; j < NUM_PER_TH / 2; j++) {
+    qvals[j]  = dQuantizeNF4(((float)vals[2*j])   * local_abs_max) << 4;
+    qvals[j] |= dQuantizeNF4(((float)vals[2*j+1]) * local_abs_max);
+}
+```
+
+**4. 反量化——查表 + 位操作**：
+
+```cuda
+__device__ __forceinline__ float dDequantizeNF4(unsigned char val) {
+    return nf4_dequantization_lut[val & 0x0F];  // 16 entry LUT，预计算好的码本值
+}
+```
+
+**主要工程挑战**：
+- **归约效率**：每个 block（2048 元素）需要求 absmax，朴素 shared memory 归约有 bank conflict 和同步开销。bitsandbytes 依赖 CUB 的 `BlockReduce`，内部使用 warp shuffle 指令避免 shared memory 访问
+- **4-bit packing/unpacking 的对齐问题**：两个 4-bit 值共享一个字节，读写时需要位移和掩码操作。当 block 边界不对齐时需要特殊处理（`valid_items` 参数）
+- **小 block 场景的 warp 利用率**：当 blocksize 很小（如 64）时，标准 kernel 的线程块过大导致浪费。bitsandbytes 为此实现了 `kQuantizeBlockwiseSmall`，用 `WarpReduce` 替代 `BlockReduce`，一个线程块处理多个 block
+- **反量化的访存模式**：`dDequantizeNF4` 的 LUT 仅 16 个 float，常驻 L1 cache。但量化值的随机访问模式可能导致 cache miss——实际实现中通过 `__ldg()`（read-only cache）和连续 tile 加载来缓解
 
 **整体架构**：
 
@@ -701,57 +1285,326 @@ CUDA kernels (csrc/kernels.cu)
 
 总结：bitsandbytes 在基础公式上加了两个关键工程优化：**Blockwise**（分 block 各算 scale，精度更高）和 **NF4 码本**（4-bit 时用正态分布最优量化点替代均匀量化，匹配权重分布）。
 
-### 9.3 Runtime 对照
+### 9.2 量化库 vs 推理框架：两种落地路径
 
-| Runtime | 支持格式 | 定位 |
+bitsandbytes 代表的是**量化工具库**路径——提供量化/反量化原语，用户在 PyTorch 训练或推理流程中调用。但在生产部署中，主流做法是使用 vLLM、TensorRT-LLM 等**推理框架**，它们将量化深度融合到推理 kernel 中。两者的本质区别：
+
+| 维度 | 量化工具库（bitsandbytes, TorchAO） | 推理框架（vLLM, TensorRT-LLM, SGLang） |
 |---|---|---|
-| **vLLM** | GPTQ / AWQ / FP8 / Marlin / bitsandbytes | Serving，PagedAttention |
-| **llama.cpp** | GGUF（Q2_K – Q8_0） | CPU / 边缘，自带 ppl / kld 评测 |
-| **TensorRT-LLM** | W4A8 / W4A16 / FP8 / KV quant | NVIDIA 深度优化 |
-| **TorchAO** | INT4 / INT8 / FP8 + torch.compile | PyTorch 原生，研究→生产过渡 |
+| **量化位置** | Python 层显式调用量化/反量化 | 量化逻辑融合在 CUDA kernel 内部 |
+| **计算流程** | 量化存储 → 反量化回 FP16 → 标准 GEMM | 量化权重直接参与计算，dequant 与 GEMM 流水线化（如 MARLIN kernel 将 INT4 解包隐藏在访存延迟中） |
+| **性能瓶颈** | 反量化是独立步骤，有额外开销 | dequant 开销被计算完全掩盖，接近理论带宽上限 |
+| **典型加速** | 主要节省显存，速度提升有限 | W4A16 可达 ~3.9× 加速（vs FP16），接近 4× 理论值 |
+| **适用场景** | 研究实验、QLoRA 微调、快速原型 | 生产部署、高吞吐在线服务 |
 
----
+**为什么推理框架能做到接近理论加速？** 以 vLLM 默认使用的 MARLIN kernel（Frantar et al., 2024）为例：LLM 小 batch 推理是 memory-bound（瓶颈在从 HBM 加载权重），4-bit 权重理论上减少 4× 带宽占用。MARLIN 通过异步 dequant + 计算 pipeline（第 $i$ 批权重从 global mem 异步拷贝到 shared mem 时，Tensor Core 同时执行第 $i-1$ 批的 FP16 GEMM），将 dequant 完全隐藏在访存延迟中，A100 上实测达到理论带宽上限的 >95%。
 
-## 10 评测体系
+**实践选择**：研究阶段用 bitsandbytes/TorchAO 快速验证量化方案 → 确定方案后用推理框架的融合 kernel 部署。两者不是替代关系，而是量化工作流的不同阶段。
 
-### 10.1 质量指标
+### 9.3 AWQ Triton Kernel 解读
 
-| 指标 | 说明 |
+> 源码来自 vLLM 的 AWQ Triton 实现（`quantization/test_awq_triton.py`）。通过逐行分析这个真实的推理 kernel，理解 §9.2 中"量化融合到 kernel"具体是怎么做的。
+
+§5.2 介绍了 AWQ 算法（激活感知权重量化），本节聚焦它的 kernel 实现。AWQ 将 FP16 权重量化为 4-bit 非对称格式，8 个 4-bit 值打包进一个 int32：
+
+```
+原始权重:  W (K, N) float16     ← 占 K×N×2 bytes
+量化后:
+  qweight: (K, N/8)   int32     ← 每个 int32 = 8 个 4-bit 权重，压缩 4×
+  zeros:   (K/G, N/8) int32     ← 每组零点，同样打包
+  scales:  (K/G, N)   float16   ← 每组缩放因子
+```
+
+反量化公式（非对称量化）：$W_{\text{fp16}} = (W_{\text{int4}} - Z_{\text{int4}}) \times S_{\text{fp16}}$
+
+#### 9.3.1 Kernel 1: `awq_dequantize_kernel`
+
+将 `(K, N/8)` 的 int32 打包权重解压为 `(K, N)` 的 FP16 矩阵。
+
+**AWQ 的特殊打包顺序**：
+
+```python
+AWQ_ORDER = [0, 4, 1, 5, 2, 6, 3, 7]           # 打包时第 i 个 weight 放在第 AWQ_ORDER[i] 个 nibble
+AWQ_REVERSE_ORDER = [0, 2, 4, 6, 1, 3, 5, 7]   # 解包时的逆映射
+```
+
+这个顺序不是随意的——它配合 Triton 的 `tl.interleave` 硬件指令，使解包零开销。
+
+**核心解包流程**：
+
+```python
+# 1. 加载 (BY, BX) 个 int32
+iweights = tl.load(qweight_ptr + offsets)
+
+# 2. 三次 interleave 把每个 int32 复制 8 份 → (BY, BX*8)
+iweights = tl.interleave(iweights, iweights)   # [a,b] → [a,a,b,b]         ×2
+iweights = tl.interleave(iweights, iweights)   # → [a,a,a,a,b,b,b,b]       ×4
+iweights = tl.interleave(iweights, iweights)   # → [a×8, b×8, ...]          ×8
+
+# 3. 构造 shift 值：[0, 16, 4, 20, 8, 24, 12, 28] — 每个 nibble 的 bit 偏移
+reverse_awq_order_tensor = (
+    (tl.arange(0, 2) * 4)[None, :] + tl.arange(0, 4)[:, None]
+).reshape(8)                                    # = [0, 4, 1, 5, 2, 6, 3, 7]
+shifts = reverse_awq_order_tensor * 4           # = [0, 16, 4, 20, 8, 24, 12, 28]
+
+# 4. 移位提取 nibble
+iweights = (iweights >> shifts) & 0xF
+```
+
+对 8 份相同的 int32 各右移不同位数，再 `& 0xF` 取低 4 位：
+
+```
+int32 值: 0x76543210
+
+位置 0: >> 0  → nibble 0 → weight 0    (AWQ_ORDER[0] = 0)
+位置 1: >> 16 → nibble 4 → weight 1    (AWQ_ORDER[1] = 4)
+位置 2: >> 4  → nibble 1 → weight 2    (AWQ_ORDER[2] = 1)
+...
+结果: 8 个 weight 按正确顺序排列
+```
+
+**为什么 AWQ 用这个奇怪的顺序？** `interleave` ×3 产生的重复模式，配合 shift 序列 `[0,16,4,20,8,24,12,28]`，恰好让 8 个 nibble 按正确顺序输出。AWQ 的打包顺序是解包 shift 模式的**逆**。打包只做一次（离线），解包每次推理都做——复杂性放在打包端。
+
+**零点和缩放因子**：
+
+```python
+# zeros (K/G, N/8) 的解包方式与权重完全相同
+zeros = tl.load(zeros_ptr + zero_offsets)
+zeros = tl.interleave(zeros, zeros)   # ×3 → 解包
+zeros = (zeros >> shifts) & 0xF
+
+# scales (K/G, N) 已经是逐元素的，不需要解包
+scales = tl.load(scales_ptr + scale_offsets)
+
+# 反量化
+iweights = (iweights - zeros) * scales    # int32 → float → float16
+```
+
+零点每 `group_size` 行共享一行，通过 `pid_y * BLOCK_SIZE_Y // group_size` 索引到对应 group。
+
+#### 9.3.2 Kernel 2: `awq_gemm_kernel` — 融合反量化 + GEMM
+
+这是 §9.2 中"融合 kernel"的具体实现：$C_{M \times N} = A_{M \times K} \times \text{dequant}(B_{K \times N})$。
+
+**Grid 设计**：
+
+```python
+pid = tl.program_id(axis=0)         # M×N 维度的线性 CTA id
+pid_z = tl.program_id(1)            # Split-K 维度
+
+pid_m = pid // num_pid_n            # 行方向 tile 索引
+pid_n = pid % num_pid_n             # 列方向 tile 索引
+```
+
+```
+输出矩阵 C (M × N):                    K 维度拆分:
+     pid_n=0  pid_n=1  pid_n=2          pid_z=0 处理 K[0:BK]
+    ┌──────┬──────┬──────┐              pid_z=1 处理 K[BK:2BK]
+m=0 │pid=0 │pid=1 │pid=2 │              ...
+    ├──────┼──────┼──────┤              最后 result.sum(0) 归约
+m=1 │pid=3 │pid=4 │pid=5 │
+    └──────┴──────┴──────┘
+```
+
+**主循环——边解包边算**：
+
+```python
+for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)):
+    # 加载 A: (BM, BK) float16
+    a = tl.load(a_ptrs, mask=masks_a)
+
+    # 加载 B: (BK, BN/8) int32 → interleave ×3 → (BK, BN) int32
+    b = tl.load(b_ptrs, mask=masks_b)
+    b = tl.interleave(b, b)
+    b = tl.interleave(b, b)
+    b = tl.interleave(b, b)
+
+    # 加载当前 K 位置对应的 zeros 和 scales（按 group_size 索引）
+    zeros = tl.load(zeros_ptrs)     # (1, BN/8) → interleave ×3 → broadcast → (BK, BN)
+    scales = tl.load(scales_ptrs)   # (1, BN) → broadcast → (BK, BN)
+
+    # 融合解包 + 反量化
+    b = (b >> shifts) & 0xF
+    zeros = (zeros >> shifts) & 0xF
+    b = (b - zeros) * scales        # → float16
+
+    # 矩阵乘累加
+    accumulator = tl.dot(a, b, accumulator)
+
+    # 推进 K 指针（步长 = BK × SPLIT_K，跳过其他 pid_z 的条带）
+    a_ptrs += BLOCK_SIZE_K * SPLIT_K
+    b_ptrs += BLOCK_SIZE_K * SPLIT_K * (N // 8)
+```
+
+数据流：`b_int32 (BK, BN/8) → interleave ×3 → shift & mask → (b-zeros)*scales → dot(a, b) → accumulate`
+
+**Split-K 的作用**：当 M 很小（decode 阶段 batch=1）时，M 维度的 tile 数太少，SM 闲置。Split-K 把 K 维度也拆给多个 CTA 并行，最终由 Python 端 `result.sum(0)` 归约。代价是额外的 reduce 操作，但在小 batch 时远小于并行度提升的收益。
+
+**写回**：每个 `pid_z` 写到输出 tensor 的第 `pid_z` 个 slice（`c_ptr + pid_z * N * M`）。
+
+#### 9.3.3 性能分析
+
+**Dequantize Kernel**（A5000 实测）：
+
+| K | N | Group Size | Latency | 带宽利用率 |
+|---|---|---|---|---|
+| 4096 | 4096 | 128 | 0.064 ms | 85% |
+| 4096 | 11008 | 128 | 0.169 ms | 87% |
+| 8192 | 8192 | 128 | 0.250 ms | 88% |
+
+A5000 理论峰值 768 GB/s，kernel 达到 ~88% 利用率，接近 memory-bound 极限。
+
+**Fused GEMM vs 分步流水线**（A5000）：
+
+| M | K×N | Split-K | cuBLAS (FP16) | deq+mm | fused | fused vs deq+mm |
+|---|---|---|---|---|---|---|
+| 1 | 4096×4096 | 4 | 0.052 ms | 0.117 ms | 0.052 ms | **2.25×** |
+| 16 | 4096×4096 | 1 | 0.058 ms | 0.123 ms | 0.063 ms | **1.97×** |
+| 32 | 4096×11008 | 1 | 0.135 ms | 0.305 ms | 0.147 ms | **2.08×** |
+| 64 | 4096×4096 | 1 | 0.056 ms | 0.123 ms | 0.110 ms | 1.12× |
+| 128 | 4096×4096 | 1 | 0.065 ms | 0.129 ms | 0.208 ms | 0.62× |
+
+关键观察：
+- **M≤32（decode 阶段）**：Fused 比 deq+mm 快 **1.8-2.3×**。memory-bound 场景下读 4-bit 打包数据比读 16-bit 展开数据节省 4× 带宽，且省掉中间 tensor 分配
+- **M=1 + Split-K=4**：达到与 cuBLAS（预解压 FP16）**持平**的性能，但显存仅需 1/4
+- **M≥64（prefill 阶段）**：Fused 反而更慢——变成 compute-bound，cuBLAS 的 Tensor Core 利用率远高于边解包边算的开销
+- **结论**：AWQ fused GEMM 的甜区是**小 batch decode（M≤32）**，正是 LLM 自回归推理最常见的场景
+
+#### 9.3.4 设计总结
+
+| 设计选择 | 原因 |
 |---|---|
-| **PPL** | WikiText-2 / C4 上的 perplexity。最常用但不全面 |
-| **lm-eval-harness** | 多任务（ARC / HellaSwag / MMLU / WinoGrande …）。更贴近真实能力退化 |
-| **KLD** | 量化后 vs 原模型 logits 的 KL 散度。对离群误差更敏感（llama.cpp 社区常用） |
+| 4-bit 打包到 int32 | 减少 8× 显存占用和带宽需求 |
+| 非对称量化（有零点） | 4-bit 只有 16 个 level，零点避免浪费精度 |
+| AWQ 特殊 nibble 顺序 | 配合 `tl.interleave` 硬件指令，解包零开销 |
+| Per-group scales/zeros | 比 per-tensor 精度高，比 per-channel 存储小 |
+| Fused dequant + GEMM | 避免中间 FP16 权重 tensor 的显存分配和读写 |
+| Split-K | 小 batch 时增加 K 维度并行度，提升 SM 利用率 |
+| FP16 累加器 | 牺牲精度换速度（与标准 FP32 累加不同） |
 
-### 10.2 系统指标
+### 9.4 SageAttention — INT8 量化注意力
 
-| 指标 | 说明 |
+> 源码来自 SageAttention 项目（`quant_per_block.py` + `attn_qk_int8_per_block.py`）。§9.3 展示了权重量化的 kernel 融合，本节展示另一个融合方向：**将注意力计算中的 QK^T 矩阵乘量化为 INT8**，在 FlashAttention 框架内实现加速。
+
+**核心思路**：将 Q、K 按 block 量化为 INT8，利用 INT8 Tensor Core（吞吐量约为 FP16 的 2×）加速 $QK^T$ 计算，V 保持 FP16 不量化。
+
+```
+整体流程:
+Q, K (FP16) ──per_block_int8()──► Q_int8, K_int8, Q_scale, K_scale ──forward()──► O (FP16)
+```
+
+#### 9.4.1 Per-Block INT8 量化
+
+**量化 kernel `quant_per_block_int8_kernel`**：每个 CTA 处理一个 `[BLK, head_dim]` 的子矩阵。
+
+```python
+# 每个 CTA 的坐标
+off_blk = tl.program_id(0)    # 序列维度的 block 索引
+off_h = tl.program_id(1)      # head 索引
+off_b = tl.program_id(2)      # batch 索引
+
+# 加载 [BLK, head_dim] 的数据
+x = tl.load(input_ptrs, mask=offs_n[:, None] < L)
+x = x.to(tl.float32)
+x *= sm_scale                  # Q 侧乘以 1/√d × log₂(e)，K 侧 sm_scale=1.0
+
+# 对称量化：整个 block 共享一个 scale
+scale = tl.max(tl.abs(x)) / 127.
+
+# 手动四舍五入（Triton 的 to(int8) 是截断）
+x_int8 = x / scale
+x_int8 += 0.5 * tl.where(x_int8 >= 0, 1, -1)   # +0.5 再截断 = round
+x_int8 = x_int8.to(tl.int8)
+
+tl.store(output_ptrs, x_int8, mask=offs_n[:, None] < L)
+tl.store(scale_ptrs, scale)    # 每个 block 一个 FP32 scale
+```
+
+**sm_scale 融入量化的技巧**：Q 量化时预乘 `sm_scale × log₂(e) = 1/√d × 1.44269504`。这样反量化后 $Q_\text{int8} \cdot K_\text{int8}^T \times q_\text{scale} \times k_\text{scale}$ 直接得到 $QK^T / \sqrt{d} \times \log_2 e$，后续可以用硬件更快的 `exp2` 替代 `exp`：
+
+$$e^{x/\sqrt{d}} = 2^{x/\sqrt{d} \cdot \log_2 e}$$
+
+**与 AWQ 量化的对比**：
+
+| 维度 | SageAttention (Q/K 量化) | AWQ (权重量化) |
+|---|---|---|
+| 量化对象 | 运行时激活（Q, K） | 离线权重 |
+| 量化方式 | 对称（无零点） | 非对称（有零点） |
+| 粒度 | Per-block（128/64 tokens × head_dim） | Per-group（128 个权重） |
+| 不量化的部分 | V（保持 FP16） | 激活（保持 FP16） |
+
+Q/K 经过 LayerNorm 后分布近似对称，所以对称量化足够；AWQ 的权重分布不一定对称，需要零点。
+
+#### 9.4.2 INT8 注意力 kernel
+
+采用 FlashAttention 的 Q-stationary tiling 策略：外层固定一个 Q block，内层遍历所有 K/V block。
+
+**核心计算——INT8 矩阵乘 + 反量化**：
+
+```python
+# q: [BLOCK_M, HEAD_DIM] int8     k: [HEAD_DIM, BLOCK_N] int8（已转置）
+qk = tl.dot(q, k).to(tl.float32) * (q_scale * k_scale)
+```
+
+这一行完成了：
+1. `tl.dot(q, k)`：INT8 Tensor Core 矩阵乘，结果为 INT32
+2. `.to(tl.float32)`：转为 FP32
+3. `× (q_scale × k_scale)`：反量化为真实的 attention score（已包含 $1/\sqrt{d} \times \log_2 e$）
+
+**Online softmax（FlashAttention 算法）**：
+
+```python
+# 初始状态: m_i = -inf, l_i = 1.0, acc = 0
+
+for each K/V block:
+    # 1. 加载 K block → INT8 matmul → 反量化
+    qk = tl.dot(q, k).to(tl.float32) * (q_scale * k_scale)
+
+    # 2. 更新行最大值
+    m_ij = tl.maximum(m_i, tl.max(qk, 1))
+
+    # 3. 修正历史累积（最大值变化时需要缩放）
+    alpha = tl.math.exp2(m_i - m_ij)       # 修正因子
+    l_i = l_i * alpha + tl.sum(tl.math.exp2(qk - m_ij[:, None]), 1)
+    acc = acc * alpha[:, None]
+
+    # 4. P @ V（FP16 Tensor Core，不用 INT8）
+    p = tl.math.exp2(qk - m_ij[:, None])
+    v = tl.load(V_ptrs)                     # V 保持 FP16
+    acc += tl.dot(p.to(tl.float16), v)
+
+    m_i = m_ij
+
+# 最终归一化
+output = acc / l_i[:, None]
+```
+
+Online softmax 的精髓：当最大值从 $m_\text{old}$ 更新为 $m_\text{new}$ 时，历史累积需要乘以修正因子 $\alpha = 2^{m_\text{old} - m_\text{new}}$。如果最大值没变则 $\alpha = 1$；如果增大了则 $\alpha < 1$，缩小历史值。
+
+**GQA 支持**：K/V 的 head 索引用 `off_h // num_kv_groups`，多个 Q head 自然共享一个 KV head。
+
+**Mask 优化**：
+
+```python
+if mask.dtype </mark> tl.int1:           # Bool mask
+    if tl.max(mask_block) == 0:     # 整个 block 全被 mask
+        skip = True                  # 跳过全部计算！
+    else:
+        qk += tl.where(mask_block, 0, -1.0e6)
+else:                                # Float mask（加性）
+    qk += mask_block
+```
+
+Bool mask 支持 block 级跳过——当整个 `[BLOCK_M, BLOCK_N]` 都被 mask 时直接跳过，对稀疏 mask 有显著加速。
+
+#### 9.4.3 设计总结
+
+| 设计选择 | 原因 |
 |---|---|
-| **Tokens/s** | 区分 prefill / decode |
-| **TTFT** | 首 token 延迟（prefill latency） |
-| **峰值显存** | 模型 + KV cache + activation |
-| **量化耗时** | PTQ 本身的成本 |
-
-### 10.3 常见陷阱
-
-1. **只报 PPL 不报 downstream** → 隐藏指令遵循 / 推理 / 代码能力退化。
-2. **不控 batch size / seq len** → 不同 batch 下量化收益差异巨大。
-3. **不标 kernel / hardware** → 同一格式在不同 kernel 上性能差 2–3×。
-4. **校准集 = 评测集分布** → 高估泛化能力。
-
----
-
-## 11 方法定位速查
-
-| 方法 | 时机 | 量化对象 | 比特 | 需训练？ | 核心思想 |
-|---|---|---|---|---|---|
-| LLM.int8() | PTQ | W+A | 8 | 否 | 离群维度走 FP16，其余 INT8 |
-| SmoothQuant | PTQ | W+A | 8 | 否 | 等价缩放迁移激活难度到权重 |
-| GPTQ | PTQ | W | 3-4 | 否 | 近似二阶逐列量化 + 误差补偿 |
-| AWQ | PTQ | W | 4 | 否 | 激活感知等价缩放保护 salient channel |
-| QuaRot | PTQ | W+A+KV | 4 | 否 | 正交旋转分散离群 |
-| SpinQuant | PTQ | W+A+KV | 4 | 少量优化 | 学习最优旋转矩阵 |
-| KIVI | PTQ | KV | 2 | 否 | Key per-ch / Value per-tok 非对称量化 |
-| BitNet b1.58 | 从头训练 | W | 1.58 | 是 | 三值权重原生训练 |
-| 8-bit Optim | 训练期 | Optimizer state | 8 | — | Block-wise INT8 量化 m/v |
-| FP8 训练 | 训练期 | W+A+(Grad) | 8 | — | E4M3/E5M2 + scaling 策略 |
-| MARLIN | Kernel | W4×A16 | 4(W) | — | 异步 dequant + pipeline + Split-K |
+| Q/K 量化为 INT8，V 保持 FP16 | $QK^T$ 经过 softmax 平滑，对量化误差不敏感；V 的误差直接影响输出 |
+| Per-block 量化（BLKQ=128, BLKK=64） | 与 FlashAttention 分块大小对齐，每个 block 独立 scale |
+| 对称量化（无零点） | Q/K 经 LayerNorm 后分布对称，零点意义不大 |
+| sm_scale 融入 Q 量化 | 避免 attention kernel 中额外浮点乘法 |
+| `exp2` 代替 `exp` | 硬件原生支持 `exp2` 更快，配合 `log₂(e)` 预乘 |
+| Bool mask block 级跳过 | 整个 block 被 mask 时跳过全部计算，稀疏 mask 加速显著 |
+| P@V 用 FP16 而非 INT8 | 平衡精度与速度，只在 $QK^T$ 阶段使用 INT8 加速 |
