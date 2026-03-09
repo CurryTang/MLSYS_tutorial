@@ -1,101 +1,101 @@
 
-> [!info] 概述
-> 本教程详细介绍深度学习中常见的并行训练范式，包括数据并行（Data Parallelism）、全分片数据并行（FSDP）、张量并行（Tensor Parallelism）和流水线并行（Pipeline Parallelism）。内容基于 Google DeepMind 的 Scaling Book 改编，并结合 GPU 硬件特性和 Hugging Face Picotron 框架的实际实现进行讲解。
+> [!info] Overview
+> This tutorial provides a detailed introduction to common parallel training paradigms in deep learning, including data parallelism, fully sharded data parallelism (FSDP), tensor parallelism, and pipeline parallelism. The material is adapted from Google DeepMind's Scaling Book and explained together with GPU hardware characteristics and practical implementations in the Hugging Face Picotron framework.
 
 ---
 
-## 目录
+## Table of Contents
 
-1. [[#一、引言与背景]]
-2. [[#二、GPU 硬件基础与通信原语]]
-3. [[#三、分片矩阵与矩阵乘法]]
-4. [[#四、数据并行（Data Parallelism）]]
-5. [[#五、全分片数据并行（FSDP/ZeRO）]]
-6. [[#六、张量并行（Tensor Parallelism）]]
-7. [[#七、流水线并行（Pipeline Parallelism）]]
-8. [[#八、混合并行策略]]
-8½. [[#八½、N-D 并行全景：从单 GPU 视角理解 Transformer 的并行分解]]
-9. [[#九、Picotron 实战：从零构建分布式训练框架]]
-10. [[#十、总结与最佳实践]]
-11. [[#十一、练习题]]
+1. [[#1. Introduction and Background]]
+2. [[#2. GPU Hardware Fundamentals and Communication Primitives]]
+3. [[#3. Sharded Matrices and Matrix Multiplication]]
+4. [[#4. Data Parallelism]]
+5. [[#5. Fully Sharded Data Parallelism (FSDP/ZeRO)]]
+6. [[#6. Tensor Parallelism]]
+7. [[#7. Pipeline Parallelism]]
+8. [[#8. Hybrid Parallel Strategies]]
+8½. [[#8½. N-D Parallelism Panorama: Understanding Transformer Parallel Decomposition from a Single-GPU Perspective]]
+9. [[#9. Picotron Design Analysis]]
+10. [[#10. Summary and Best Practices]]
+11. [[#11. Exercises]]
 
 ---
 
-## 一、引言与背景
+## 1. Introduction and Background
 
-### 1.1 为什么需要分布式训练？
+### 1.1 Why Do We Need Distributed Training?
 
-当我们训练大型语言模型（LLM）时，面临以下核心挑战：
+When we train large language models (LLM), we face the following core challenges:
 
-> [!important] 核心挑战
-> 1. **内存限制**：模型参数、优化器状态和激活值无法装入单个 GPU 的显存
-> 2. **计算瓶颈**：单 GPU 的算力无法在合理时间内完成训练
-> 3. **通信开销**：多 GPU 之间的数据传输可能成为性能瓶颈
+> [!important] Key Challenges
+> 1. **Memory limits**: model parameters, optimizer states, and activations do not fit in the memory of a single GPU
+> 2. **Compute bottlenecks**: a single GPU does not provide enough compute to finish training in a reasonable time
+> 3. **Communication overhead**: data transfer across multiple GPUs can become a performance bottleneck
 
-例如，一个 70B 参数的模型：
-- 参数本身（bf16）：$70 \times 10^9 \times 2 = 140\text{GB}$
-- Adam 优化器状态（fp32）：$70 \times 10^9 \times 8 = 560\text{GB}$
-- 总计约 700GB，远超单个 H100（80GB）的显存
+For example, for a 70B-parameter model:
+- Parameters themselves (bf16): $70 \times 10^9 \times 2 = 140\text{GB}$
+- Adam optimizer states (fp32): $70 \times 10^9 \times 8 = 560\text{GB}$
+- Total: about 700 GB, far exceeding the memory of a single H100 (80 GB)
 
-### 1.2 符号约定
+### 1.2 Notation
 
-本教程使用以下符号表示：
+This tutorial uses the following notation:
 
-| 符号 | 含义 |
+| Symbol | Meaning |
 |------|------|
-| $D$ | `d_model`（隐藏层维度/残差流维度）|
-| $F$ | `d_ff`（前馈网络维度）|
-| $B$ | Batch size（批次中的 token 总数）|
-| $T$ | 序列长度 |
-| $L$ | 模型层数 |
-| $C$ | 每芯片 FLOPs/s |
-| $W$ | 网络带宽（双向）|
-| $X, Y, Z$ | 各网格轴上的芯片数量 |
+| $D$ | `d_model` (hidden dimension / residual stream dimension) |
+| $F$ | `d_ff` (feed-forward network dimension) |
+| $B$ | Batch size (total number of tokens in the batch) |
+| $T$ | Sequence length |
+| $L$ | Number of model layers |
+| $C$ | FLOPs/s per chip |
+| $W$ | Network bandwidth (bidirectional) |
+| $X, Y, Z$ | Number of chips on each grid axis |
 
-### 1.3 简化的 Transformer 层
+### 1.3 A Simplified Transformer Layer
 
-为简化分析，我们将 Transformer 层简化为 MLP 块的堆叠：
+To simplify the analysis, we approximate the Transformer layer as a stack of MLP blocks:
 
 ```
-输入: In[B, D]
+Input: In[B, D]
     ↓
-    ├─→ Win[D, F] → Tmp[B, F] (上投影)
+    ├─→ Win[D, F] → Tmp[B, F] (up projection)
     ↓
-    └─→ Wout[F, D] → Out[B, D] (下投影)
+    └─→ Wout[F, D] → Out[B, D] (down projection)
 ```
 
-> [!note] 注意
-> 对于大模型，Attention 只占约 1/3 的 FLOPs，MLP 占 2/3。因此这种简化是合理的近似。
+> [!note] Note
+> For large models, Attention only accounts for about 1/3 of FLOPs, and MLP accounts for 2/3. This simplification is therefore a reasonable approximation.
 
 ---
 
-## 二、GPU 硬件基础与通信原语
+## 2. GPU Hardware Fundamentals and Communication Primitives
 
-> **为什么要先了解硬件？** 所有并行策略的本质都是在**计算**和**通信**之间权衡。"这个策略值不值得用"取决于通信耗时是否能被计算隐藏——而这个比较，离不开 GPU 的算力（FLOPs/s）与互连带宽的具体数值。本节建立的硬件直觉，是整个并行分析框架的"单位换算基础"。
+> **Why understand the hardware first?** Every parallel strategy is fundamentally a trade-off between **computation** and **communication**. Whether a strategy is worthwhile depends on whether its communication cost can be hidden behind computation—and making that comparison requires the actual numerical values of GPU throughput (FLOPs/s) and interconnect bandwidth. The hardware intuition built in this section is the "unit-conversion foundation" for the entire parallel analysis framework.
 
-### 2.1 NVIDIA H100 硬件规格
+### 2.1 NVIDIA H100 Hardware Specs
 
-在深入并行策略之前，我们需要了解 GPU 的关键硬件参数：
+Before diving into parallel strategies, we need to understand the key hardware parameters of GPUs:
 
-| 规格 | H100 SXM | H100 PCIe | A100 |
+| Spec | H100 SXM | H100 PCIe | A100 |
 |------|----------|-----------|------|
-| 显存容量 | 80 GB HBM3 | 80 GB HBM2e | 80 GB HBM2e |
-| 显存带宽 | 3.35 TB/s | 2.0 TB/s | 2.0 TB/s |
-| FP16 算力 | 989 TFLOPS | 756 TFLOPS | 312 TFLOPS |
-| BF16 算力 | 989 TFLOPS | 756 TFLOPS | 312 TFLOPS |
-| FP8 算力 | 1,979 TFLOPS | 1,513 TFLOPS | - |
-| NVLink 带宽 | 900 GB/s | 600 GB/s (NVL) | 600 GB/s |
+| Memory capacity | 80 GB HBM3 | 80 GB HBM2e | 80 GB HBM2e |
+| Memory bandwidth | 3.35 TB/s | 2.0 TB/s | 2.0 TB/s |
+| FP16 throughput | 989 TFLOPS | 756 TFLOPS | 312 TFLOPS |
+| BF16 throughput | 989 TFLOPS | 756 TFLOPS | 312 TFLOPS |
+| FP8 throughput | 1,979 TFLOPS | 1,513 TFLOPS | - |
+| NVLink bandwidth | 900 GB/s | 600 GB/s (NVL) | 600 GB/s |
 
-> [!tip] 关键比值：算术强度
-> **算术强度** = $C / W_{mem}$ 表示每传输一个字节需要多少 FLOPs 才能"隐藏"传输延迟
+> [!tip] Key ratio: arithmetic intensity
+> **Arithmetic intensity** = $C / W_{mem}$ indicates how many FLOPs are needed per byte transferred to "hide" transfer latency
 > 
-> 对于 H100 SXM：
-> - 内存算术强度：$989 \times 10^{12} / 3.35 \times 10^{12} \approx 295$ (bf16)
-> - NVLink 算术强度：$989 \times 10^{12} / 9 \times 10^{11} \approx 1100$ (bf16)
+> For H100 SXM:
+> - Memory arithmetic intensity: $989 \times 10^{12} / 3.35 \times 10^{12} \approx 295$ (bf16)
+> - NVLink arithmetic intensity: $989 \times 10^{12} / 9 \times 10^{11} \approx 1100$ (bf16)
 
-### 2.2 GPU 拓扑结构
+### 2.2 GPU Topology
 
-现代数据中心 GPU 通常采用以下连接方式：
+Modern datacenter GPUs are typically connected as follows:
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -115,213 +115,213 @@
 └─────────────────────────────────────────────────────┘
 ```
 
-**三层带宽层次**：
-1. **节点内 NVLink**：~900 GB/s（H100 SXM）
-2. **节点间 InfiniBand**：~50-100 GB/s
-3. **数据中心网络**：~25 GB/s
+**Three bandwidth tiers**:
+1. **Intra-node NVLink**: ~900 GB/s (H100 SXM)
+2. **Inter-node InfiniBand**: ~50-100 GB/s
+3. **Datacenter network**: ~25 GB/s
 
-### 2.3 核心通信原语（Collective Operations）
+### 2.3 Core Communication Primitives (Collective Operations)
 
-分布式训练依赖于以下核心通信操作：
+Distributed training relies on the following core communication operations:
 
 #### 2.3.1 AllGather
 
-**功能**：收集所有设备上的分片，使每个设备都拥有完整数据
+**Function**: collect shards from all devices so every device has the full data
 
 ```
-设备 0: [A0]     →   设备 0: [A0, A1, A2, A3]
-设备 1: [A1]     →   设备 1: [A0, A1, A2, A3]
-设备 2: [A2]     →   设备 2: [A0, A1, A2, A3]
-设备 3: [A3]     →   设备 3: [A0, A1, A2, A3]
+Device 0: [A0]     →   Device 0: [A0, A1, A2, A3]
+Device 1: [A1]     →   Device 1: [A0, A1, A2, A3]
+Device 2: [A2]     →   Device 2: [A0, A1, A2, A3]
+Device 3: [A3]     →   Device 3: [A0, A1, A2, A3]
 ```
 
-**符号表示**：$\text{AllGather}_X([A_X, B]) \rightarrow [A, B]$
+**Notation**: $\text{AllGather}_X([A_X, B]) \rightarrow [A, B]$
 
-**耗时**：$T = \frac{V}{W_{双向}}$，其中 $V$ 是总数据量
+**Cost**: $T = \frac{V}{W_{bidirectional}}$, where $V$ is the total data volume
 
 
-> **AllGather 环形算法**：$N$ 个设备排成环，每个设备持有 $V/N$ 字节的数据。每一步向右发送当前块、接收左边的块。双向环可同时向左右传输：
+> **AllGather Ring Algorithm**: $N$ devices are arranged in a ring, each device holds $V/N$ bytes of data. Each step sends the current block to the right and receives the block to the left. The two-way ring transmits to the left and right simultaneously:
 > $$T_\text{hop} = \frac{2V}{N \cdot W_\text{ici}}, \quad T_\text{total} = \frac{N}{2} \cdot T_\text{hop} = \frac{V}{W_\text{ici}}$$
-> **关键洞察**：AllGather 时间与设备数 $N$ **无关**（带宽受限模式下）！
+> **Key Insight**: AllGather time is **irrelevant** to $N$ of devices (in bandwidth-limited mode)!
 
-**延迟修正**：当每跳数据量很小时，每跳延迟 $T_\text{min} \approx 1\,\mu\text{s}$ 成为瓶颈：
+**Latency correction**: when the data volume per hop is small, the per-hop latency $T_\text{min} \approx 1\,\mu\text{s}$ becomes the bottleneck:
 
 $$T_\text{hop} = \max\!\left[T_\text{min},\ \frac{2V}{N \cdot W_\text{ici}}\right] \quad \Rightarrow \quad T_\text{total} = \max\!\left[\frac{T_\text{min} \cdot N}{2},\ \frac{V}{W_\text{ici}}\right]$$
 
-对于 TPU v5e（$W_\text{ici} = 4.5 \times 10^{10}$ B/s），**延迟阈值约为 45 kB**：小于此大小的数组是延迟受限的。
+For TPU v5e ($W_\text{ici} = 4.5 \times 10^{10}$ B/s), the latency threshold is around 45 kB: arrays smaller than this size are latency bound.
 
-**多轴 AllGather**：对多个网格轴 $\{X_1, X_2, \ldots\}$ 同时 AllGather，带宽成比例增加：
+**Multi-axis AllGather**: if AllGather runs simultaneously over multiple mesh axes $\{X_1, X_2, \ldots\}$, the effective bandwidth increases proportionally:
 
 $$T_\text{total} = \max\!\left[\frac{T_\text{min} \cdot \sum |X_i|}{2},\ \frac{V}{W_\text{ici} \cdot N_\text{axes}}\right]$$
 
-![AllGather 实测带宽（TPU v5e 8×16）：在 10 MB 以上可达约 95% 峰值](https://jax-ml.github.io/scaling-book/assets/img/all-gather-bandwidth.png)
+![AllGather measured bandwidth (TPU v5e 8×16): about 95% peak above 10 MB](https://jax-ml.github.io/scaling-book/assets/img/all-gather-bandwidth.png)
 
-> [!example] AllGather 时间估算
+> [!example] AllGather time estimate
 >
-> 网格：TPU v5e，`{'X': 8, 'Y': 4}`，ICI 双向带宽 $W = 4.5 \times 10^{10}$ B/s
+> Grid: TPU v5e, `{'X': 8, 'Y': 4}`, ICI two-way bandwidth $W = 4.5 \times 10^{10}$ B/s
 >
-> **(a)** `AllGather_Y([E_Y, F])`，$E = 2048$，$F = 8192$，bfloat16
-> - 每设备持有 `bf16[512, 8192]` = 8.4 MB，总阵列 33.6 MB
-> - 时间（带宽受限）：$T = 33.6\text{ MB} / 4.5 \times 10^{10} \approx 747\,\mu\text{s}$（实测含开销约 680 μs）
+> **(a)** `AllGather_Y([E_Y, F])`, $E = 2048$, $F = 8192$, bfloat16
+> - holds `bf16[512, 8192]` = 8.4 MB per device, total array 33.6 MB
+> - Time (bandwidth limited): $T = 33.6\text{ MB} / 4.5 \times 10^{10} \approx 747\,\mu\text{s}$ (actual measurement includes overhead of about 680 μs)
 >
-> **(b)** 同样设置，$E = 256$，$F = 256$
-> - 每设备持有 `bf16[64, 256]` = 32 kB < 45 kB 阈值 → **延迟受限**
-> - 时间：$T \approx T_\text{min} \times (Y/2) = 1\,\mu\text{s} \times 2 = 2\,\mu\text{s}$（实测约 8 μs）
+> **(b)** Same settings, $E = 256$, $F = 256$
+> - `bf16[64, 256]` = 32 kB < 45 kB threshold held per device → **Latency bound**
+> - Time: $T \approx T_\text{min} \times (Y/2) = 1\,\mu\text{s} \times 2 = 2\,\mu\text{s}$ (actually measured about 8 μs)
 
 #### 2.3.2 ReduceScatter
 
-**功能**：先规约（求和），再分散到各设备
+**Function**: first reduce (sum), then scatter across devices
 
 ```
-设备 0: [A0, B0, C0, D0]   →   设备 0: [A0+A1+A2+A3]
-设备 1: [A1, B1, C1, D1]   →   设备 1: [B0+B1+B2+B3]
-设备 2: [A2, B2, C2, D2]   →   设备 2: [C0+C1+C2+C3]
-设备 3: [A3, B3, C3, D3]   →   设备 3: [D0+D1+D2+D3]
+Device 0: [A0, B0, C0, D0]   →   Device 0: [A0+A1+A2+A3]
+Device 1: [A1, B1, C1, D1]   →   Device 1: [B0+B1+B2+B3]
+Device 2: [A2, B2, C2, D2]   →   Device 2: [C0+C1+C2+C3]
+Device 3: [A3, B3, C3, D3]   →   Device 3: [D0+D1+D2+D3]
 ```
 
-**符号表示**：$\text{ReduceScatter}_{X,K}([A, K]\{U_X\}) \rightarrow [A, K_X]$
+**Notation**: $\text{ReduceScatter}_{X,K}([A, K]\{U_X\}) \rightarrow [A, K_X]$
 
-**耗时**：与 AllGather 相同
-> **ReduceScatter 与 AllGather 的对偶关系**（Kronecker 积视角）：
+**Cost**: same as AllGather
+> **Dual relationship between ReduceScatter and AllGather** (Kronecker product perspective):
 >
-> 定义广播算子 $\text{broadcast} = \mathbf{u} \otimes I_n$，规约算子 $\text{reduce} = \mathbf{u}^T \otimes I_n$（$\mathbf{u} = (1,\ldots,1)^T$），则：
+> Define the broadcast operator $\text{broadcast} = \mathbf{u} \otimes I_n$, and the reduction operator $\text{reduce} = \mathbf{u}^T \otimes I_n$ ($\mathbf{u} = (1,\ldots,1)^T$), then:
 > - $\text{AllGather} = \text{broadcast} \otimes I_p$
 > - $\text{ReduceScatter} = \text{reduce} \otimes I_p$
 >
-> 由于 $(\mathbf{u} \otimes I_n)^T = \mathbf{u}^T \otimes I_n$，有 $\text{AllGather}^T = \text{ReduceScatter}$。
+> Since $(\mathbf{u} \otimes I_n)^T = \mathbf{u}^T \otimes I_n$, we have $\text{AllGather}^T = \text{ReduceScatter}$.
 >
-> 这意味着**反向传播中 AllGather 的梯度是 ReduceScatter**，反之亦然——这是数学必然，不是巧合。
+> This means that the gradient of AllGather in backpropagation is ReduceScatter and vice versa - this is a mathematical necessity, not a coincidence.
 
 #### 2.3.3 AllReduce
 
-**功能**：对所有设备上的数据求和，结果复制到所有设备
+**Function**: sum the data across all devices and replicate the result to every device
 
 ```
-设备 0: [A0]   →   设备 0: [A0+A1+A2+A3]
-设备 1: [A1]   →   设备 1: [A0+A1+A2+A3]
-设备 2: [A2]   →   设备 2: [A0+A1+A2+A3]
-设备 3: [A3]   →   设备 3: [A0+A1+A2+A3]
+Device 0: [A0]   →   Device 0: [A0+A1+A2+A3]
+Device 1: [A1]   →   Device 1: [A0+A1+A2+A3]
+Device 2: [A2]   →   Device 2: [A0+A1+A2+A3]
+Device 3: [A3]   →   Device 3: [A0+A1+A2+A3]
 ```
 
-> [!important] 关键关系
+> [!important] Key relationship
 > **AllReduce = ReduceScatter + AllGather**
 > 
-> 因此 AllReduce 的耗时是 AllGather 的 2 倍：$T = \frac{2V}{W}$
+> Therefore, AllReduce takes 2 times as much time as AllGather: $T = \frac{2V}{W}$
 
 #### 2.3.4 AllToAll
 
-**功能**：转置分片维度
+**Function**: transpose the sharded dimension
 
 ```
-设备 0: [A0, B0]   →   设备 0: [A0, A1]
-设备 1: [A1, B1]   →   设备 1: [B0, B1]
+Device 0: [A0, B0]   →   Device 0: [A0, A1]
+Device 1: [A1, B1]   →   Device 1: [B0, B1]
 ```
 
-**符号表示**：$\text{AllToAll}_{X, J}([A, B_X]) \rightarrow [A_X, B]$
+**Notation**: $\text{AllToAll}_{X, J}([A, B_X]) \rightarrow [A_X, B]$
 
-**耗时**：约为 AllGather 的 1/4
+**Cost**: about one-quarter of AllGather
 
-> **为什么 AllToAll 比 AllGather 快 4 倍？**（双向环）
+> **Why is AllToAll 4 times faster than AllGather? **(two-way ring)
 >
-> - **AllGather**：每块数据需到达所有 $N-1$ 个其他设备，单向环每条链路的总传输量 $\propto V(1-1/N)$
-> - **AllToAll**：设备 $i$ 的数据块只需发给设备 $j$（走 $j-i$ 步），总链路负载 $\propto V \cdot \frac{N(N-1)/2}{N^2} \approx V/2$
-> - 单向比：AllToAll/AllGather $= 1/2$
+> - **AllGather**: Each piece of data needs to reach all $N-1$ other devices, the total transmission volume of each link in the one-way ring $\propto V(1-1/N)$
+> - **AllToAll**: The data block of device $i$ only needs to be sent to device $j$ (taking $j-i$ steps), the total link load $\propto V \cdot \frac{N(N-1)/2}{N^2} \approx V/2$
+> - One-way ratio: AllToAll/AllGather $= 1/2$
 >
-> 双向优化时：AllGather 仅快 2 倍（两个方向各分担一半流量）；AllToAll 快 4 倍（每块走最短路径 $\min(j-i, N-(j-i))$，平均距离再减半）：
-> $$T_\text{AllToAll} = \frac{T_\text{AllGather}}{4} \quad \text{（双向环）}$$
+> When optimizing in both directions: AllGather is only 2 times faster (each direction shares half of the traffic); AllToAll is 4 times faster (each block takes the shortest path $\min(j-i, N-(j-i))$, and the average distance is further halved):
+> $$T_\text{AllToAll} = \frac{T_\text{AllGather}}{4} \quad \text{(bidirectional ring)}$$
 
-#### 2.3.5 通信操作总结
+#### 2.3.5 Summary of Communication Operations
 
-| 操作 | 描述 | 符号 | 耗时 |
+| Operation | Description | Symbol | Time consuming |
 |------|------|------|------|
-| AllGather | 收集分片，移除下标 | $[A_X, B] → [A, B]$ | $V / W$ |
-| ReduceScatter | 规约并分散 | $[A, B]\{U_X\} → [A_X, B]$ | $V / W$ |
-| AllReduce | 全规约 | $[A_X, B]\{U_Y\} → [A_X, B]$ | $2V / W$ |
-| AllToAll | 转置分片 | $[A, B_X] → [A_X, B]$ | $V / (4W)$ |
+| AllGather | Collect shards, remove subscripts | $[A_X, B] → [A, B]$ | $V / W$ |
+| ReduceScatter | Reduce and scatter | $[A, B]\{U_X\} → [A_X, B]$ | $V / W$ |
+| AllReduce | Full Reduce | $[A_X, B]\{U_Y\} → [A_X, B]$ | $2V / W$ |
+| AllToAll | Transpose shards | $[A, B_X] → [A_X, B]$ | $V / (4W)$ |
 
-![四种集合通信原语对比示意](https://jax-ml.github.io/scaling-book/assets/img/all-collectives.png)
+![Comparison of four collective communication primitives](https://jax-ml.github.io/scaling-book/assets/img/all-collectives.png)
 
 ---
 
-## 三、分片矩阵与矩阵乘法
+## 3. Sharded Matrices and Matrix Multiplication
 
-> **为什么从分片矩阵乘法入手？** LLM 的绝大部分计算量（约 90%）来自矩阵乘法（QKV 投影、MLP 层等）。一旦掌握了"如何高效乘以分片矩阵"，就能系统地推导出所有并行策略——数据并行、张量并行、FSDP 本质上都是矩阵乘法分片的不同选择，对应不同的通信-计算权衡。原始教材在此给出了完整的分片理论：[Sharded Matrices and How to Multiply Them](https://jax-ml.github.io/scaling-book/sharding/)。
+> **Why start with sharded matrix multiplication?** The vast majority of LLM compute (about 90%) comes from matrix multiplication (QKV projections, MLP layers, and so on). Once you understand how to multiply sharded matrices efficiently, you can systematically derive all parallel strategies—data parallelism, tensor parallelism, and FSDP are all fundamentally different sharding choices for matrix multiplication, each corresponding to a different communication-computation trade-off. The original material develops the full theory here: [Sharded Matrices and How to Multiply Them](https://jax-ml.github.io/scaling-book/sharding/).
 
-### 3.1 分片符号系统
+### 3.1 Sharding Notation System
 
-我们使用**命名轴符号**来描述张量如何在设备网格上分片：
+We use named-axis notation to describe how tensors are sharded over the device mesh:
 
-![分片示例：全局形状 (4,128) 的数组在 4 个设备上，每设备局部形状 (2,64)](https://jax-ml.github.io/scaling-book/assets/img/sharding-example.png)
+![Sharding example: array of global shape (4,128) on 4 devices, per-device local shape (2,64)](https://jax-ml.github.io/scaling-book/assets/img/sharding-example.png)
 
-- **设备网格（Device Mesh）**：定义物理设备的组织方式
+- **Device Mesh**: defines how physical devices are organized
   ```python
-  mesh = DeviceMesh("cuda", (4, 2))  # 4×2 的设备网格
+  mesh = DeviceMesh("cuda", (4, 2))  # 4×2 device mesh
   mesh = DeviceMesh("cuda", (4, 2), mesh_dim_names=("X", "Y"))
   ```
 
-- **分片规范（Sharding Spec）**：描述张量各维度如何映射到网格轴
+- **Sharding Spec**: describes how each tensor dimension maps to a mesh axis
 
-  > **符号直觉**：I、J、K… 是张量的**逻辑维度名**；X、Y、Z… 是设备网格的**物理轴名**。下标把两者绑定在一起：
+  > **Notation intuition**: I, J, K, ... are the tensor's **logical dimension names**, while X, Y, Z, ... are the device mesh's **physical axis names**. A subscript binds the two together:
   > ```
-  > A  [  I_X  ,  J_Y  ]
-  > ↑     ↑  ↑    ↑  ↑
-  > 数组  维度 物理轴 维度 物理轴
-  >      (行) (沿X切) (列) (沿Y切)
+> A [ I_X , J_Y ]
+> ↑ ↑ ↑ ↑ ↑
+> array dimension physical axis dimension physical axis
+> (row) (cut along X) (column) (cut along Y)
   > ```
-  > 没有下标（如 `J`）= 该维度**不切**，每台设备上完整复制。
+  > No subscript (for example `J`) means that dimension is **not sharded** and is fully replicated on every device.
 
   ```
-  A[I_X, J_Y]  # I 维度沿 X 轴分片，J 维度沿 Y 轴分片
-  A[I_XY, J]   # I 维度沿 X 和 Y 轴展平后分片
-  A[I, J]      # 完全复制（无分片）
+  A[I_X, J_Y]  # I dimension sharded along X, J dimension sharded along Y
+  A[I_XY, J]   # I dimension sharded across the flattened X and Y axes
+  A[I, J]      # fully replicated (no sharding)
   ```
 
-> [!example] 分片示例
+> [!example] Sharding example
 >
-> 对于形状为 `[1024, 4096]` 的张量，网格为 `{'X': 8, 'Y': 2}`：
+> For a tensor of shape `[1024, 4096]` on a mesh `{'X': 8, 'Y': 2}`:
 >
-> | 分片规范 | 每设备形状 | 总内存倍数 |
+> | Sharding spec | Per-device shape | Total memory multiplier |
 > |----------|-----------|-----------|
 > | $A[I, J]$ | [1024, 4096] | 16× |
 > | $A[I_X, J]$ | [128, 4096] | 2× |
 > | $A[I_X, J_Y]$ | [128, 2048] | 1× |
 > | $A[I_{XY}, J]$ | [64, 4096] | 1× |
 >
-> **总内存倍数 = 没有被分片的网格轴的设备数之积**（即数据被复制的份数）。用到的轴做分片（不复制），没用到的轴在每个设备上存完整数据（复制）：
-> - $A[I, J]$：X 和 Y 都没用 → 复制 8×2 = **16 份**
-> - $A[I_X, J]$：X 用于分片 I，Y 没用 → 复制 1×2 = **2 份**
-> - $A[I_X, J_Y]$：X、Y 都用于分片 → 复制 1×1 = **1 份**
-> - $A[I_{XY}, J]$：X 和 Y 都用于分片 I → 复制 1×1 = **1 份**
+> **Total memory multiplier = the product of the device counts along mesh axes that are not used for sharding** (that is, the number of replicas). Axes used for sharding do not replicate the data; unused axes store the full tensor on each device and therefore replicate it:
+> - $A[I, J]$: neither X nor Y is used → replicated 8×2 = **16 copies**
+> - $A[I_X, J]$: X shards I and Y is unused → replicated 1×2 = **2 copies**
+> - $A[I_X, J_Y]$: both X and Y are used for sharding → replicated 1×1 = **1 copy**
+> - $A[I_{XY}, J]$: both X and Y shard I → replicated 1×1 = **1 copy**
 
-**JAX 代码示例**：
+**JAX code example**:
 
 ```python
 import jax
 import jax.numpy as jnp
 
-# 创建 4×2 设备网格（需要 8 个设备）
+# Create a 4×2 device mesh (requires 8 devices)
 assert len(jax.devices()) == 8
 mesh = jax.make_mesh(axis_shapes=(4, 2), axis_names=('X', 'Y'))
 
-# 定义分片规范工具函数
+# Define a sharding-spec helper
 def P(*args):
     return jax.NamedSharding(mesh, jax.sharding.PartitionSpec(*args))
 
-# 创建分片数组（JAX 自动处理通信，对用户透明）
+# Create sharded arrays (JAX handles communication automatically and transparently)
 A = jnp.zeros((8, 2048), dtype=jnp.bfloat16, device=P('X', 'Y'))   # A[I_X, J_Y]
 B = jnp.zeros((2048, 8192), dtype=jnp.bfloat16, device=P(None, 'Y'))  # B[J, K_Y]
 
-# 分片矩阵乘法（JAX 编译器自动插入必要的集合通信）
+# Sharded matrix multiplication (JAX automatically inserts required collectives)
 y = jax.jit(
     lambda A, B: jnp.einsum('BD,DF->BF', A, B),
     out_shardings=P('X', 'Y')
 )(A, B)
 ```
 
-> [!note] JAX 的分片透明性
-> 分片数组与普通数组行为完全相同——可以做任意运算，JAX 编译器自动推断并插入通信原语。
+> [!note] JAX sharding transparency
+> Sharded arrays behave exactly like ordinary arrays: you can apply arbitrary operations, and the JAX compiler automatically infers and inserts the required communication primitives.
 
-**PyTorch 等价实现**（`DTensor`，PyTorch 2.0+）：
+**PyTorch equivalent** (`DTensor`, PyTorch 2.0+):
 
 ```python
 import torch
@@ -329,184 +329,184 @@ import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import distribute_tensor, Shard, Replicate
 
-# 初始化进程组（需要 8 个进程）
+# Initialize the process group (requires 8 processes)
 dist.init_process_group(backend="nccl")
 
-# 创建 4×2 设备网格
+# Create a 4×2 device mesh
 mesh = init_device_mesh("cuda", (4, 2), mesh_dim_names=("X", "Y"))
 
-# A[I_X, J_Y]：第 0 维沿 X 分片，第 1 维沿 Y 分片
+# A[I_X, J_Y]: dimension 0 sharded along X, dimension 1 sharded along Y
 A = distribute_tensor(
     torch.zeros(8, 2048, dtype=torch.bfloat16),
     mesh,
     placements=[Shard(0), Shard(1)]
 )
 
-# B[J, K_Y]：第 0 维在 X 上复制，第 1 维沿 Y 分片
+# B[J, K_Y]: dimension 0 replicated across X, dimension 1 sharded along Y
 B = distribute_tensor(
     torch.zeros(2048, 8192, dtype=torch.bfloat16),
     mesh,
     placements=[Replicate(), Shard(1)]
 )
 
-# 分片矩阵乘法（DTensor 自动推断通信并插入）
-y = torch.einsum('BD,DF->BF', A, B)  # y 的分片自动为 [Shard(0), Shard(1)]
+# Sharded matrix multiplication (DTensor automatically infers and inserts communication)
+y = torch.einsum('BD,DF->BF', A, B)  # y is automatically sharded as [Shard(0), Shard(1)]
 ```
 
-> [!note] JAX ↔ PyTorch DTensor 对应关系
+> [!note] JAX ↔ PyTorch DTensor correspondence
 > | JAX `PartitionSpec` | PyTorch `placements` |
 > |---------------------|----------------------|
 > | `P('X', 'Y')` | `[Shard(0), Shard(1)]` |
 > | `P(None, 'Y')` | `[Replicate(), Shard(1)]` |
 > | `P(None, None)` | `[Replicate(), Replicate()]` |
-> | `{U_X}`（部分和） | `[Partial(), ...]` |
+> | `{U_X}` (partial sum) | `[Partial(), ...]` |
 
-> [!example] Pop Quiz 1：2D 分片内存计算
+> [!example] Pop Quiz 1: 2D sharded-memory calculation
 >
-> 数组 `fp32[1024, 4096]`，分片规范 $A[I_{XY}, J]$，网格 `{'X': 8, 'Y': 2}`
+> Array `fp32[1024, 4096]`, sharding spec $A[I_{XY}, J]$, mesh `{'X': 8, 'Y': 2}`
 >
-> - 每设备本地形状：`fp32[64, 4096]`（$1024 / (8 \times 2) = 64$）
-> - 每设备内存：$64 \times 4096 \times 4 = 1\text{ MiB}$
-> - H100 加载时间（3.35 TB/s）：$10^6 / 3.35 \times 10^{12} \approx 0.3\,\mu\text{s}$（实际含开销更长）
+> - Per-device local shape: `fp32[64, 4096]` ($1024 / (8 \times 2) = 64$)
+> - Per-device memory: $64 \times 4096 \times 4 = 1\text{ MiB}$
+> - H100 load time (3.35 TB/s): $10^6 / 3.35 \times 10^{12} \approx 0.3\,\mu\text{s}$ (longer in practice once overhead is included)
 
-> [!example] Pop Quiz 2：复制分片的总内存
+> [!example] Pop Quiz 2: total memory with replicated sharding
 >
-> 数组 `int8[128, 2048]`，分片规范 $A[I_{XY}, J]$，网格 `{'X': 2, 'Y': 8, 'Z': 2}`（共 32 设备）
+> Array `int8[128, 2048]`, sharding spec $A[I_{XY}, J]$, mesh `{'X': 2, 'Y': 8, 'Z': 2}` (32 devices total)
 >
-> - 分片仅作用于 X 和 Y 轴（共 16 个设备），**Z 轴（2 个设备）完全复制**
-> - 每设备本地形状：`int8[8, 2048]`（$128 / (2 \times 8) = 8$）
-> - 每设备内存：$8 \times 2048 \times 1 = 16\text{ KiB}$
-> - **总内存**：$16\text{ KiB} \times 32\text{ 设备} = 512\text{ KiB}$（原始 256 KiB 的 2 倍，因 Z 轴复制了一份）
+> - Sharding only uses the X and Y axes (16 devices total), so the **Z axis (2 devices) is fully replicated**
+> - Per-device local shape: `int8[8, 2048]` ($128 / (2 \times 8) = 8$)
+> - Per-device memory: $8 \times 2048 \times 1 = 16\text{ KiB}$
+> - **Total memory**: $16\text{ KiB} \times 32\text{ devices} = 512\text{ KiB}$ (twice the original 256 KiB because the Z axis introduces one extra replica)
 
-### 3.2 分片矩阵乘法的四种情况
+### 3.2 Four Cases of Sharded Matrix Multiplication
 
-当执行分片矩阵乘法 $C = A \cdot B$ 时，通信需求取决于分片方式：
+When performing sharded matrix multiplication $C = A \cdot B$, the communication pattern depends on how the inputs are sharded:
 
-#### 情况 1：收缩维度均未分片
+#### Case 1: Neither contraction dimension is sharded
 
 $$A[I_X, J] \cdot B[J, K_Y] \rightarrow C[I_X, K_Y]$$
 
-**无需通信**！每个设备可以独立完成本地乘法。
+**No communication required.** Each device can perform the local multiplication independently.
 
 ```python
-# PyTorch 示例
+# PyTorch example
 # A: [batch/X, d_model], B: [d_model, d_ff/Y] → C: [batch/X, d_ff/Y]
 local_C = torch.matmul(local_A, local_B)
 ```
 
-#### 情况 2：一个输入的收缩维度被分片
+#### Case 2: The contraction dimension of one input is sharded
 
 $$A[I, J_X] \cdot B[J, K] \rightarrow C[I, K]$$
 
-**需要 AllGather**：先收集 A，再本地乘法
+**Requires AllGather**: first gather A, then perform the local multiplication
 
 ```python
-# 先 AllGather A
+# First AllGather A
 full_A = all_gather(local_A, dim=1)  # [I, J_X] → [I, J]
-# 再本地乘法
+# Then local multiplication
 local_C = torch.matmul(full_A, local_B)
 ```
 
-#### 情况 3：两个输入的收缩维度沿同一轴分片
+#### Case 3: Both inputs have the contraction dimension sharded along the same axis
 
 $$A[I, J_X] \cdot B[J_X, K] \rightarrow C[I, K]\{U_X\}$$
 
-**本地乘法产生部分和，需要 AllReduce**：
+**Local multiplication produces partial sums, so AllReduce is required**:
 
 ```python
-# 本地乘法（部分和）
-partial_C = torch.matmul(local_A, local_B)  # 每设备得到部分结果
-# AllReduce 求和
+# Local multiplication (partial sums)
+partial_C = torch.matmul(local_A, local_B)  # each device gets a partial result
+# AllReduce sum
 full_C = all_reduce(partial_C, op=SUM)
 ```
 
-> [!note] 优化：用 ReduceScatter 代替 AllReduce
-> 如果后续需要分片结果，可以用 ReduceScatter：
+> [!note] Optimization: use ReduceScatter instead of AllReduce
+> If you need a sharded result afterward, you can use ReduceScatter:
 > $$C[I, K]\{U_X\} \xrightarrow{\text{ReduceScatter}} C[I, K_X]$$
-> 这样节省了一半的通信量。
+> This saves half the communication volume.
 
-#### 情况 4：两个非收缩维度沿同一轴分片（非法）
+#### Case 4: Two non-contraction dimensions are sharded along the same axis (invalid)
 
-$$A[I_X, J] \cdot B[J, K_X] \rightarrow C[I_X, K_X] \quad \text{❌ 非法！}$$
+$$A[I_X, J] \cdot B[J, K_X] \rightarrow C[I_X, K_X] \quad \text{❌ Invalid!}$$
 
-**必须先 AllGather 其中一个输入**：
+**You must AllGather one of the inputs first**:
 
 ```python
-# 选项 1：AllGather A
+# Option 1: AllGather A
 full_A = all_gather(local_A, dim=0)
 local_C = torch.matmul(full_A, local_B)  # C[I, K_X]
 
-# 选项 2：AllGather B
+# Option 2: AllGather B
 full_B = all_gather(local_B, dim=1)
 local_C = torch.matmul(local_A, full_B)  # C[I_X, K]
 ```
 
-### 3.3 通信-计算重叠（Collective Matmul）
+### 3.3 Communication-Computation Overlap (Collective Matmul)
 
-关键优化：**在通信进行时执行计算**
+The key optimization is to **perform computation while communication is in flight**.
 
 ```
-时间线：
-├── AllGather 块 0 ──┬── AllGather 块 1 ──┬── AllGather 块 2 ──┤
+Timeline:
+├── AllGather chunk 0 ──┬── AllGather chunk 1 ──┬── AllGather chunk 2 ──┤
                      │                    │                    │
-                     └── MatMul 块 0 ─────┴── MatMul 块 1 ─────┴── MatMul 块 2
+                     └── MatMul chunk 0 ─────┴── MatMul chunk 1 ─────┴── MatMul chunk 2
 ```
 
-在 PyTorch 中，这通过 CUDA 流实现：
+In PyTorch, this is implemented via CUDA streams:
 
 ```python
 import torch
 import torch.distributed as dist
 
-# 创建专用的通信流
+# Create a dedicated communication stream
 comm_stream = torch.cuda.Stream()
 comp_stream = torch.cuda.current_stream()
 
-# 将张量分块
+# Chunk the tensor
 chunks = tensor.chunk(num_chunks, dim=0)
 
 for i, chunk in enumerate(chunks):
-    # 在通信流上启动 AllGather
+    # Launch AllGather on the communication stream
     with torch.cuda.stream(comm_stream):
         gathered_chunk = all_gather_async(chunk)
     
-    # 同时在计算流上处理上一块
+    # Process the previous chunk on the compute stream at the same time
     if i > 0:
         result_chunks[i-1] = compute(gathered_chunks[i-1])
     
-    # 等待当前块的 AllGather 完成
+    # Wait for the current chunk's AllGather to finish
     comp_stream.wait_stream(comm_stream)
     gathered_chunks[i] = gathered_chunk
 ```
 
 ---
 
-## 四、数据并行（Data Parallelism）
+## 4. Data Parallelism
 
-> **Motivation**：数据并行是最自然的并行方式——把数据集分割，每个 GPU 持有完整模型、独立完成前向和反向传播，最后通过 AllReduce 同步梯度。优点是实现简单（PyTorch DDP 只需一行包装），前向传播完全零通信。核心问题是：梯度 AllReduce 的通信开销何时成为瓶颈？答案取决于每 GPU 的 batch size 与硬件算力/带宽比值的关系。
+> **Motivation**: Data parallelism is the most natural form of parallelism: split the dataset, let each GPU hold a full copy of the model, run forward and backward passes independently, and finally synchronize gradients with AllReduce. Its advantages are simplicity of implementation (PyTorch DDP is essentially a one-line wrapper) and zero communication in the forward pass. The key question is: when does gradient AllReduce become the bottleneck? The answer depends on the relationship between per-GPU batch size and the hardware compute-to-bandwidth ratio.
 
-> [!note] 与第二、三章的关系
-> 第二章给了**词汇**（AllGather、AllReduce 等原语及其开销），第三章给了**语法**（给定一种分片，判断需要哪个原语）。从第四章开始，我们把这套工具用于具体问题：为 Transformer 选择一种分片方案 → 用第三章规则推导需要什么通信 → 用第二章公式算通信耗时 → 与计算耗时比较。**这就是每一种并行策略的统一分析框架，后续各章都沿用它。**
+> [!note] Relationship to Chapters 2 and 3
+> Chapter 2 provides the **vocabulary** (primitives such as AllGather and AllReduce, plus their costs), while Chapter 3 provides the **grammar** (given a sharding pattern, determine which primitive is required). Starting in Chapter 4, we apply this toolkit to concrete problems: choose a sharding scheme for the Transformer → use the rules from Chapter 3 to derive the required communication → use the formulas from Chapter 2 to estimate communication time → compare against compute time. **This is the unified analysis framework for every parallel strategy, and the rest of the tutorial follows it.**
 
-数据并行的分片选择：**B（batch）沿 X 分片，权重完全复制**。
+Sharding selection for data parallelism: **B (batch) sharding along X, weights fully replicated**.
 
-| | 前向传播 | 反向传播 |
+| | Forward pass | Backward pass |
 |--|---------|---------|
-| 分片形式 | $\text{In}[B_X, D] \cdot W[D, F]$ | 梯度 $\nabla W[D,F]\ \{U_X\}$ |
-| 对应第三章情况 | 情况 1（收缩维度 D 均未分片）→ **无需通信** | 部分和需归约 → **AllReduce** |
-| 通信开销 | 0 | $4DF / W$ |
+| Sharding form | $\text{In}[B_X, D] \cdot W[D, F]$ | Gradient $\nabla W[D,F]\ \{U_X\}$ |
+| Corresponding case from Chapter 3 | Case 1 (the contraction dimension D is unsharded) → **No communication required** | Partial sums must be reduced → **AllReduce** |
+| Communication overhead | 0 | $4DF / W$ |
 
-后续章节（FSDP、TP）本质上只是换了一种分片选择，通信原语随之变化，框架完全相同。
+The following chapters (FSDP and TP) simply change the sharding choice. The communication primitives then change accordingly, but the analysis framework stays the same.
 
-### 4.1 基本原理
+### 4.1 Basic Principle
 
-**数据并行**是最简单的并行策略：
+**Data parallelism** is the simplest parallel strategy:
 
 $$\text{In}[B_X, D] \cdot_D W_\text{in}[D, F] \cdot_F W_\text{out}[F, D] \rightarrow \text{Out}[B_X, D]$$
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                    数据并行示意图                          │
+│                  Data Parallelism Diagram                 │
 ├──────────────────────────────────────────────────────────┤
 │                                                          │
 │   GPU 0              GPU 1              GPU 2            │
@@ -516,106 +516,106 @@ $$\text{In}[B_X, D] \cdot_D W_\text{in}[D, F] \cdot_F W_\text{out}[F, D] \righta
 │  └───┬───┘          └───┬───┘          └───┬───┘         │
 │      ↓                  ↓                  ↓              │
 │  ┌───────┐          ┌───────┐          ┌───────┐         │
-│  │ 完整  │          │ 完整  │          │ 完整  │         │
-│  │ 权重  │          │ 权重  │          │ 权重  │         │
+│  │  Full  │         │  Full  │         │  Full  │        │
+│  │Weights │         │Weights │         │Weights │        │
 │  │ (W)   │          │ (W)   │          │ (W)   │         │
 │  └───────┘          └───────┘          └───────┘         │
 │      ↓                  ↓                  ↓              │
 │  ┌───────┐          ┌───────┐          ┌───────┐         │
-│  │梯度 0 │←─────────┼──AllReduce──────→│梯度 2 │         │
+│  │Grad 0 │←─────────┼──AllReduce──────→│Grad 2 │         │
 │  └───────┘          └───────┘          └───────┘         │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```
 
-### 4.2 算法详解
+### 4.2 Algorithm Details
 
-**前向传播**（无通信）：
+**Forward pass** (no communication):
 
 ```python
 def forward_pass(input_shard, W_in, W_out):
     # input_shard: [B/X, D]
-    # W_in, W_out: 完整复制
+    # W_in, W_out: fully replicated
     tmp = input_shard @ W_in       # [B/X, F]
     output = tmp @ W_out           # [B/X, D]
     return output
 ```
 
-**反向传播**（需要 AllReduce）：
+**Backward pass** (requires AllReduce):
 
 ```python
 def backward_pass(dL_dOutput, input_shard, tmp, W_in, W_out):
-    # 计算局部梯度
-    dL_dW_out_local = tmp.T @ dL_dOutput        # [F, D] 部分和
+    # Compute local gradients
+    dL_dW_out_local = tmp.T @ dL_dOutput        # [F, D] partial sum
     dL_dTmp = dL_dOutput @ W_out.T              # [B/X, F]
-    dL_dW_in_local = input_shard.T @ dL_dTmp    # [D, F] 部分和
+    dL_dW_in_local = input_shard.T @ dL_dTmp    # [D, F] partial sum
     dL_dInput = dL_dTmp @ W_in.T                # [B/X, D]
     
-    # AllReduce 梯度（可与下一层计算重叠）
-    dL_dW_out = all_reduce(dL_dW_out_local)     # [F, D] 完整梯度
-    dL_dW_in = all_reduce(dL_dW_in_local)       # [D, F] 完整梯度
+    # AllReduce gradients (can overlap with the next layer's compute)
+    dL_dW_out = all_reduce(dL_dW_out_local)     # [F, D] full gradient
+    dL_dW_in = all_reduce(dL_dW_in_local)       # [D, F] full gradient
     
     return dL_dInput, dL_dW_in, dL_dW_out
 ```
 
-### 4.3 通信分析
+### 4.3 Communication Analysis
 
-每层需要 2 次 AllReduce：
+Each layer requires 2 AllReduces:
 
 $$T_\text{comms} = \frac{2 \times 2 \times 2 \times D \times F}{W_\text{NVLink}} = \frac{8DF}{W}$$
 
-计算时间：
+Compute time:
 
 $$T_\text{math} = \frac{8 \times B \times D \times F}{X \times C}$$
 
-> [!important] 计算瓶颈条件
-> 当 $T_\text{math} > T_\text{comms}$ 时，我们是**计算受限**的（理想状态）：
+> [!important] Compute-bound condition
+> When $T_\text{math} > T_\text{comms}$, the system is compute-bound (the ideal regime):
 > 
 > $$\frac{B}{X} > \frac{C}{W}$$
 > 
-> 对于 H100 SXM：$C/W \approx 989 \times 10^{12} / 9 \times 10^{11} \approx 1100$
+> For H100 SXM: $C/W \approx 989 \times 10^{12} / 9 \times 10^{11} \approx 1100$
 > 
-> 即**每 GPU 的 batch size 需要大于 ~1100 tokens** 才能高效利用计算资源。
+> That is, the batch size on each GPU must exceed roughly 1100 tokens to utilize compute resources efficiently.
 
-### 4.4 PyTorch DDP 实现
+### 4.4 PyTorch DDP Implementation
 
 ```python
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 
-# 初始化进程组
+# Initialize the process group
 dist.init_process_group(backend="nccl")
 local_rank = int(os.environ["LOCAL_RANK"])
 torch.cuda.set_device(local_rank)
 
-# 包装模型
+# Wrap the model
 model = MyModel().cuda()
 model = DDP(model, device_ids=[local_rank])
 
-# 训练循环 - DDP 自动处理梯度同步
+# Training loop - DDP handles gradient synchronization automatically
 for batch in dataloader:
     optimizer.zero_grad()
     loss = model(batch).loss
-    loss.backward()  # DDP 在这里自动 AllReduce 梯度
+    loss.backward()  # DDP automatically AllReduces gradients here
     optimizer.step()
 ```
 
 ---
 
-## 五、全分片数据并行（FSDP/ZeRO）
+## 5. Fully Sharded Data Parallelism (FSDP/ZeRO)
 
-### 5.1 动机与原理
+### 5.1 Motivation and Principle
 
-**FSDP**（Fully Sharded Data Parallel）也称为 **ZeRO-3**，解决了纯数据并行的内存限制：
+**FSDP** (Fully Sharded Data Parallel), also known as **ZeRO-3**, addresses the memory limitations of pure data parallelism:
 
 $$\text{In}[B_X, D] \cdot_D W_\text{in}[D_X, F] \cdot_F W_\text{out}[F, D_X] \rightarrow \text{Out}[B_X, D]$$
 
-核心思想：**参数、梯度和优化器状态都沿数据并行维度分片**
+Core idea: **parameters, gradients, and optimizer states are all sharded along the data-parallel dimension**.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                    FSDP 示意图                            │
+│                       FSDP Diagram                        │
 ├──────────────────────────────────────────────────────────┤
 │                                                          │
 │   GPU 0              GPU 1              GPU 2            │
@@ -624,73 +624,73 @@ $$\text{In}[B_X, D] \cdot_D W_\text{in}[D_X, F] \cdot_F W_\text{out}[F, D_X] \ri
 │  └───┬───┘          └───┬───┘          └───┬───┘         │
 │      │                  │                  │              │
 │  ┌───┴───┐          ┌───┴───┐          ┌───┴───┐         │
-│  │W 分片0│          │W 分片1│          │W 分片2│         │
+│  │W shard0│         │W shard1│         │W shard2│        │
 │  │ (1/3) │          │ (1/3) │          │ (1/3) │         │
 │  └───────┘          └───────┘          └───────┘         │
 │      │                  │                  │              │
 │      ├──────────AllGather────────────────┤              │
 │      ↓                  ↓                  ↓              │
 │  ┌───────┐          ┌───────┐          ┌───────┐         │
-│  │完整 W │          │完整 W │          │完整 W │         │
-│  │(临时) │          │(临时) │          │(临时) │         │
+│  │ full W │         │ full W │         │ full W │        │
+│  │(temp.) │         │(temp.) │         │(temp.) │        │
 │  └───┬───┘          └───┬───┘          └───┬───┘         │
-│      ↓ 前向计算          ↓                  ↓              │
-│      ↓ 丢弃完整 W        ↓                  ↓              │
+│      ↓ Forward compute   ↓                  ↓              │
+│      ↓ Discard full W    ↓                  ↓              │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```
 
-### 5.2 ZeRO 的三个阶段：精确内存分析
+### 5.2 Three Phases of ZeRO: Accurate Memory Analysis
 
-混合精度训练下，每个参数的内存占用（16 bytes/param）：
+Under mixed-precision training, the memory footprint per parameter is 16 bytes/parameter:
 
 ```
-每个参数的内存拆解：
+Memory breakdown per parameter:
 
-  bf16 参数    fp32 梯度    fp32 master   fp32 m      fp32 v
+  bf16 param   fp32 grad    fp32 master   fp32 m      fp32 v
   ┌─────────┐ ┌─────────┐  ┌─────────┐  ┌─────────┐ ┌─────────┐
   │  2 bytes│ │  4 bytes│  │  4 bytes│  │  4 bytes│ │  4 bytes│
   └─────────┘ └─────────┘  └──────────────────────────────────┘
-   参数本身     梯度         ←─────── Adam 优化器状态：12 bytes ────────→
+   parameter    gradient     ←──────── Adam optimizer states: 12 bytes ────────→
 ```
 
-以 **7B 参数模型，N=8 GPU** 为例（纯 DDP 需 112 GB/GPU）：
+Take a **7B-parameter model with N=8 GPUs** as an example (pure DDP requires 112 GB/GPU):
 
 ```
-                    参数(2B)    梯度(4B)    优化器(12B)   每GPU总计
+                    Param(2B)   Grad(4B)    Optimizer(12B) Per-GPU Total
 ─────────────────────────────────────────────────────────────────
-DDP（不分片）     14 GB       28 GB       84 GB         126 GB  ❌
-ZeRO-1（分片OS） 14 GB       28 GB       84/8=10.5 GB  52.5 GB
-ZeRO-2（分片G+OS）14 GB      28/8=3.5 GB 84/8=10.5 GB  28  GB
+DDP (unsharded)    14 GB       28 GB       84 GB         126 GB  ❌
+ZeRO-1 (shard OS)  14 GB       28 GB       84/8=10.5 GB  52.5 GB
+ZeRO-2 (shard G+OS)14 GB      28/8=3.5 GB 84/8=10.5 GB  28  GB
 ZeRO-3/FSDP      14/8=1.75GB 28/8=3.5 GB 84/8=10.5 GB  15.75GB ✓
 ─────────────────────────────────────────────────────────────────
-注意：激活值所有阶段都不分片（需要单独用激活重计算节省）
+Note: activations are not sharded in any stage (use activation recomputation separately to save memory)
 ```
 
-| 阶段 | 分片内容 | 通信增加 | 推荐场景 |
+| Stage | What is sharded | Additional communication | Recommended scenario |
 |------|----------|----------|----------|
-| ZeRO-1 | 优化器状态 | 无额外通信 | OS 是瓶颈 |
-| ZeRO-2 | + 梯度 | 无额外通信 | 梯度也撑不下 |
-| ZeRO-3 (FSDP) | + 参数 | 前向多 2×AllGather | 参数都放不下 |
+| ZeRO-1 | Optimizer states | No additional communication | Optimizer state is the bottleneck |
+| ZeRO-2 | + Gradients | No additional communication | Gradients also no longer fit |
+| ZeRO-3 (FSDP) | + Parameters | Two extra `AllGather`s in the forward pass | Even parameters do not fit |
 
-### 5.4 通信分析
+### 5.4 Communication Analysis
 
-与纯数据并行相比：
+Compared to pure data parallelism:
 
-| 操作 | 数据并行 | FSDP |
+| Operation | Data Parallelism | FSDP |
 |------|----------|------|
-| 前向通信 | 0 | 2 × AllGather(W) |
-| 反向通信 | 2 × AllReduce(∇W) | 2 × AllGather(W) + 2 × ReduceScatter(∇W) |
-| 总通信量 | $4 \times 2DF$ | $4 \times 2DF$ |
+| Forward communication | 0 | 2 × AllGather(W) |
+| Backward communication | 2 × AllReduce(∇W) | 2 × AllGather(W) + 2 × ReduceScatter(∇W) |
+| Total traffic | $4 \times 2DF$ ​​| $4 \times 2DF$ ​​|
 
-> [!important] 关键洞察
-> FSDP 的总通信量与纯数据并行**相同**！
+> [!important] Key insight
+> The total communication volume of FSDP is **the same** as in pure data parallelism.
 > 
-> 因为 AllReduce = AllGather + ReduceScatter
+> This is because AllReduce = AllGather + ReduceScatter.
 > 
-> 但 FSDP 大幅减少了内存使用。
+> But FSDP dramatically reduces memory usage.
 
-### 5.5 PyTorch FSDP 实现
+### 5.5 PyTorch FSDP Implementation
 
 ```python
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -698,20 +698,20 @@ from torch.distributed.fsdp import ShardingStrategy, MixedPrecision
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 import functools
 
-# 定义包装策略
+# Define the wrapping policy
 auto_wrap_policy = functools.partial(
     transformer_auto_wrap_policy,
     transformer_layer_cls={TransformerBlock}
 )
 
-# 混合精度配置
+# Mixed-precision configuration
 mp_policy = MixedPrecision(
     param_dtype=torch.bfloat16,
     reduce_dtype=torch.float32,
     buffer_dtype=torch.bfloat16
 )
 
-# 包装模型
+# Wrap the model
 model = FSDP(
     model,
     sharding_strategy=ShardingStrategy.FULL_SHARD,  # ZeRO-3
@@ -720,7 +720,7 @@ model = FSDP(
     device_id=torch.cuda.current_device(),
 )
 
-# 训练循环
+# Training loop
 for batch in dataloader:
     optimizer.zero_grad()
     loss = model(batch).loss
@@ -728,81 +728,81 @@ for batch in dataloader:
     optimizer.step()
 ```
 
-### 5.6 FSDP 通信时间线
+### 5.6 FSDP Communication Timeline
 
-FSDP 把通信均摊到整个前反向过程，而 DDP 只在反向结束后一次性通信：
-
-```
-DDP（朴素）：
-前向 ──────────────────────────────────────────── 反向 ──────────── AllReduce ──▶
-
-FSDP：
-前向：[AG W1][compute][free W1][AG W2][compute][free W2]...
-反向：[AG W_L][compute][RS ∇W_L][free][AG W_{L-1}][compute][RS ∇W_{L-1}]...
-
-AG = AllGather（重建权重）  RS = ReduceScatter（归约+分片梯度）
-free = 立即释放完整权重（这是内存节省的关键）
-```
-
-**FSDP 通信量 = DDP 通信量**，但分散在更多时间点上，更容易与计算重叠。
-
-### 5.7 ZeRO++：通信量再减半
-
-ZeRO-3 的通信瓶颈在跨节点 AllGather（节点间带宽只有节点内的 1/10）。ZeRO++ 的三个优化：
+FSDP spreads communication across the full forward/backward pass, whereas DDP communicates in a single burst after the backward pass finishes:
 
 ```
-ZeRO++ 优化 1：量化 AllGather（qG）
-  bf16 权重 → int8 量化 → 跨节点 AllGather（数据量减半）→ 反量化
-  代价：精度轻微损失
+DDP (naive):
+Forward ──────────────────────────────────────── Backward ────────── AllReduce ──▶
 
-ZeRO++ 优化 2：分层 AllGather（hpZ）
-  先节点内 AllGather（NVLink，快）→ 每节点各自完成本节点的计算
-  代价：节点内显存多用 tp× 的权重
+FSDP:
+Forward: [AG W1][compute][free W1][AG W2][compute][free W2]...
+Backward:[AG W_L][compute][RS ∇W_L][free][AG W_{L-1}][compute][RS ∇W_{L-1}]...
 
-ZeRO++ 优化 3：量化 ReduceScatter（qRS）
-  梯度量化后传输 → 反量化后存储
-  代价：梯度精度损失（一般影响不大）
+AG = AllGather (reconstruct weights)  RS = ReduceScatter (reduce + shard gradients)
+free = immediately release full weights (the key to memory savings)
 ```
 
-### 5.8 面试常见问题
+**FSDP communication volume = DDP communication volume**, but it is distributed across more points in time, making it easier to overlap with computation.
 
-> [!question] FSDP 省不了激活值的内存，怎么办？
-> 激活值（每个 batch 的中间结果）在所有 ZeRO 阶段都不分片，仍然是 per-GPU 的完整值。需要单独应用**激活重计算（gradient checkpointing）**：前向时不保存激活，反向时重新计算。代价是额外 33% 的计算量，换来大量激活内存。
+### 5.7 ZeRO++: Communication volume halved again
 
-> [!question] 什么时候选 FSDP，什么时候选 TP？
-> - FSDP：解决内存问题，通信在反向传播（大 batch 时高效）
-> - TP：解决小 batch 时的计算效率，通信在每个 matmul（需 NVLink）
-> - 实践：先用 FSDP，如果每 GPU batch size < 1000 tokens，再加 TP
+The communication bottleneck in ZeRO-3 is cross-node AllGather, since inter-node bandwidth is only about one-tenth of intra-node bandwidth. ZeRO++ introduces three optimizations:
 
-### 5.9 何时使用 FSDP
+```
+ZeRO++ optimization 1: quantized AllGather (qG)
+  bf16 weights → int8 quantization → cross-node AllGather (half the data volume) → dequantization
+  Cost: slight accuracy loss
 
-> [!tip] FSDP 适用场景
-> - 模型大小超过单 GPU 显存
-> - 每 GPU batch size 足够大（$B/X > C/W$）
-> - 需要在不修改模型代码的情况下扩展
+ZeRO++ optimization 2: hierarchical AllGather (hpZ)
+  First do intra-node AllGather (NVLink, fast) → each node completes its own local computation
+  Cost: uses tp× more weight memory within each node
 
-> [!warning] FSDP 的限制
-> - 计算瓶颈条件与数据并行相同
-> - 对于 H100：每 GPU batch size > 1100 tokens
-> - 如需更小的 batch size，需要结合张量并行
+ZeRO++ optimization 3: quantized ReduceScatter (qRS)
+  Gradients are transmitted after quantization → stored after dequantization
+  Cost: gradient precision loss (usually not a major issue)
+```
+
+### 5.8 Interview FAQs
+
+> [!question] FSDP does not reduce activation memory. What should I do?
+> Activations (the intermediate results for each batch) are not sharded in any ZeRO stage and therefore remain full-sized on each GPU. You need to apply **activation recomputation (gradient checkpointing)** separately: do not save activations in the forward pass, and recompute them during the backward pass. The cost is about 33% extra compute in exchange for a large reduction in activation memory.
+
+> [!question] When should I choose FSDP, and when should I choose TP?
+> - FSDP: solves memory problems, with communication mainly in the backward pass; efficient for large batches
+> - TP: improves efficiency for small batches, but communicates at every matmul; requires NVLink
+> - In practice: start with FSDP, and add TP if the per-GPU batch size is below about 1000 tokens
+
+### 5.9 When to Use FSDP
+
+> [!tip] Good use cases for FSDP
+> - Model size exceeds single GPU memory
+> - Per-GPU batch size is large enough ($B/X > C/W$)
+> - You want to scale without modifying model code
+
+> [!warning] Limitations of FSDP
+> - The compute-bound condition is the same as for data parallelism
+> - On H100: batch size must exceed about 1100 tokens per GPU
+> - If you need a smaller batch size, you must combine it with tensor parallelism
 
 ---
 
-## 六、张量并行（Tensor Parallelism）
+## 6. Tensor Parallelism
 
-> **Motivation**：FSDP 的效率条件是每 GPU batch size > $C/W \approx 1100$ tokens。在推理场景（$B=1$）或 batch 很小时，这个条件很难满足，FSDP 变成通信受限。张量并行换了一个思路：**不切数据，切权重**——把 FFN 的宽度维度 $F$ 或注意力头数沿设备分片。这样效率条件变为 $F > Y \times C/W$，即使 $B=1$ 也能高效利用算力。代价是每个矩阵乘法都需要通信，因此 TP 必须放在高带宽的节点内 NVLink 上。
+> **Motivation**: FSDP is efficient only when the per-GPU batch size exceeds roughly $C/W \approx 1100$ tokens. In inference ($B=1$) or other small-batch regimes, that condition is hard to satisfy, and FSDP becomes communication-bound. Tensor parallelism takes a different approach: **do not shard the data; shard the weights**—split the FFN width dimension $F$ or the number of attention heads across devices. Then the efficiency condition becomes $F > Y \times C/W$, so compute can still be utilized efficiently even when $B=1$. The trade-off is that every matrix multiplication requires communication, so TP must run over high-bandwidth intra-node NVLink.
 
-### 6.1 基本原理
+### 6.1 Basic Principle
 
-**张量并行**（也称为 Megatron 分片）将模型的维度分片：
+**Tensor parallelism** (also known as Megatron sharding) shards model dimensions:
 
 $$\text{In}[B, D_Y] \cdot_D W_\text{in}[D, F_Y] \cdot_F W_\text{out}[F_Y, D] \rightarrow \text{Out}[B, D_Y]$$
 
-核心思想：**分片模型维度而非数据维度**
+Core idea: **shard model dimensions rather than data dimensions**.
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                   张量并行示意图                          │
+│                 Tensor Parallelism Diagram                │
 ├──────────────────────────────────────────────────────────┤
 │                                                          │
 │        Input [B, D]                                      │
@@ -813,105 +813,105 @@ $$\text{In}[B, D_Y] \cdot_D W_\text{in}[D, F_Y] \cdot_F W_\text{out}[F_Y, D] \ri
 │            │              │                               │
 │            ↓              ↓                               │
 │   ┌────────────┐  ┌────────────┐                         │
-│   │W_in[D,F/2] │  │W_in[D,F/2] │   (列并行)              │
+│   │W_in[D,F/2] │  │W_in[D,F/2] │   (column parallel)    │
 │   └──────┬─────┘  └─────┬──────┘                         │
 │          ↓              ↓                                 │
 │   Tmp[B, F/2]    Tmp[B, F/2]                             │
 │          │              │                                 │
 │          ↓              ↓                                 │
 │   ┌────────────┐  ┌────────────┐                         │
-│   │W_out[F/2,D]│  │W_out[F/2,D]│   (行并行)              │
+│   │W_out[F/2,D]│  │W_out[F/2,D]│   (row parallel)       │
 │   └──────┬─────┘  └─────┬──────┘                         │
 │          │              │                                 │
 │          └──ReduceScatter──┐                             │
 │                    ↓                                      │
-│            Out[B, D/2] (分片)                            │
+│            Out[B, D/2] (sharded)                         │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```
 
-### 6.2 ReduceScatter 在 TP 中的具体过程
+### 6.2 How ReduceScatter Works in TP
 
-行并行乘法后，每个 GPU 持有**部分和**（partial sum），需要合并。以 tp=2、输出维度 D=4 为例：
-
-```
-行并行矩阵乘完成后，每个 GPU 各自算了一部分：
-
-GPU 0 的 partial: Tmp0[B, F/2] @ W0[F/2, D] = C0[B, D=4]
-GPU 1 的 partial: Tmp1[B, F/2] @ W1[F/2, D] = C1[B, D=4]
-
-                C0          C1          真正的 Out = C0 + C1
-GPU 0 持有: [1, 2, 3, 4]              → [1+5, 2+6, 3+7, 4+8] = [6, 8, 10, 12]
-GPU 1 持有:             [5, 6, 7, 8]    (每个位置都是两个 GPU 的贡献之和)
-```
-
-**AllReduce 做法**（Megatron 原版）：每个 GPU 把自己的 partial 广播给对方，然后各自相加 → 两个 GPU 都得到完整的 [6,8,10,12]，内存浪费一倍。
-
-**ReduceScatter 做法**（SP 版本）：把输出 D 维度切开，每个 GPU 只负责求和自己那段：
+After a row-parallel multiplication, each GPU holds a partial sum that must be merged. Take `tp=2` and output dimension `D=4` as an example:
 
 ```
-步骤 1：交换数据
-  GPU 0 把 C0 的后半 [3,4] 发给 GPU 1
-  GPU 1 把 C1 的前半 [5,6] 发给 GPU 0
+After the row-parallel matmul, each GPU has computed one part:
 
-步骤 2：各自在本地相加负责的那段
-  GPU 0 的前半：[1,2] + [5,6] = [6, 8]       ← 前 D/2 的正确答案
-  GPU 1 的后半：[3,4] + [7,8] = [10, 12]      ← 后 D/2 的正确答案
+GPU 0 partial: Tmp0[B, F/2] @ W0[F/2, D] = C0[B, D=4]
+GPU 1 partial: Tmp1[B, F/2] @ W1[F/2, D] = C1[B, D=4]
 
-结果：
-  GPU 0 持有 Out[B, :D/2] = [6, 8]    （SP 状态：按 D 分片）
-  GPU 1 持有 Out[B, D/2:] = [10, 12]
+                C0          C1          True Out = C0 + C1
+GPU 0 holds: [1, 2, 3, 4]             → [1+5, 2+6, 3+7, 4+8] = [6, 8, 10, 12]
+GPU 1 holds:            [5, 6, 7, 8]   (each position is the sum of contributions from both GPUs)
 ```
 
-**关键**：ReduceScatter 同时完成了两件事：① 把部分和加起来（Reduce），② 把结果按 D 维分片存储（Scatter）。这正好对应了进入下一层 LayerNorm 所需的 SP 状态，一步操作、两个目的、零额外通信。
+**AllReduce approach** (original Megatron): each GPU broadcasts its partial result to the other, then both GPUs add the two partials together → both GPUs get the full `[6, 8, 10, 12]`, doubling memory usage.
 
-### 6.3 列并行与行并行
+**ReduceScatter approach** (SP version): split the output along the D dimension, and let each GPU sum only the slice it is responsible for:
 
-#### 列并行（Column Parallel）
+```
+Step 1: Exchange data
+  GPU 0 sends the second half of C0, [3,4], to GPU 1
+  GPU 1 sends the first half of C1, [5,6], to GPU 0
 
-将权重矩阵沿列分割：
+Step 2: Locally add the slice each GPU is responsible for
+  GPU 0 first half: [1,2] + [5,6] = [6, 8]       ← correct answer for the first D/2
+  GPU 1 second half: [3,4] + [7,8] = [10, 12]    ← correct answer for the second D/2
+
+Result:
+  GPU 0 holds Out[B, :D/2] = [6, 8]    (SP state: sharded along D)
+  GPU 1 holds Out[B, D/2:] = [10, 12]
+```
+
+**Key point**: ReduceScatter does two things at once: ① it sums the partial results (**Reduce**), and ② it stores the output in sharded form (**Scatter**). This exactly matches the SP state required by the next LayerNorm: one communication, two purposes, zero extra cost.
+
+### 6.3 Column Parallelism and Row Parallelism
+
+#### Column Parallel
+
+Split the weight matrix along columns:
 
 $$W = [W_0 | W_1 | ... | W_{n-1}]$$
 
-- 输入：复制到所有 GPU
-- 输出：每 GPU 持有输出的一部分
-- 无需通信（直到需要完整输出）
+- Input: copied to all GPUs
+- Output: Each GPU holds a portion of the output
+- No communication required (until full output is required)
 
-#### 行并行（Row Parallel）
+#### Row Parallel
 
-将权重矩阵沿行分割：
+Split the weight matrix along the rows:
 
 $$W = \begin{bmatrix} W_0 \\ W_1 \\ \vdots \\ W_{n-1} \end{bmatrix}$$
 
-- 输入：必须已分片
-- 输出：需要 AllReduce 或 ReduceScatter 汇总
+- Input: must be sharded
+- Output: Requires AllReduce or ReduceScatter aggregation
 
-### 6.3 MLP 层的张量并行
+### 6.3 Tensor Parallelism in the MLP Layer
 
-Transformer 的 MLP 完美适配列并行 + 行并行的组合：
+The Transformer's MLP maps naturally onto a column-parallel + row-parallel decomposition:
 
 ```
 ┌─────────────────────────────────────────────────┐
-│              MLP 张量并行                        │
+│              MLP Tensor Parallelism              │
 ├─────────────────────────────────────────────────┤
 │                                                 │
 │   Input [B, D]                                  │
 │       │                                         │
-│       │ (复制)                                   │
+│       │ (replicated)                             │
 │       ↓                                         │
 │   ┌───────────┐     ┌───────────┐              │
-│   │ W_up      │     │ W_gate    │  (列并行)     │
+│   │ W_up      │     │ W_gate    │  (column parallel) │
 │   │ [D, F/Y]  │     │ [D, F/Y]  │              │
 │   └─────┬─────┘     └─────┬─────┘              │
 │         │                 │                     │
 │         ↓                 ↓                     │
 │   hidden [B, F/Y]   gate [B, F/Y]              │
 │         │                 │                     │
-│         └────── × ────────┘  (逐元素)           │
+│         └────── × ────────┘  (element-wise)     │
 │                 │                               │
 │                 ↓                               │
 │         ┌─────────────┐                        │
-│         │ W_down      │  (行并行)               │
+│         │ W_down      │  (row parallel)         │
 │         │ [F/Y, D]    │                        │
 │         └──────┬──────┘                        │
 │                │                               │
@@ -921,24 +921,24 @@ Transformer 的 MLP 完美适配列并行 + 行并行的组合：
 │         AllReduce / ReduceScatter              │
 │                │                               │
 │                ↓                               │
-│         Output [B, D] 或 [B, D_Y]               │
+│         Output [B, D] or [B, D_Y]               │
 │                                                 │
 └─────────────────────────────────────────────────┘
 ```
 
-### 6.4 注意力层的张量并行
+### 6.4 Tensor Parallelism in the Attention Layer
 
 ```
 ┌─────────────────────────────────────────────────┐
-│           Attention 张量并行                     │
+│           Attention Tensor Parallelism           │
 ├─────────────────────────────────────────────────┤
 │                                                 │
 │   Input [B, S, D]                               │
 │       │                                         │
-│       │ (复制)                                   │
+│       │ (replicated)                             │
 │       ↓                                         │
 │   ┌─────┐  ┌─────┐  ┌─────┐                    │
-│   │ W_Q │  │ W_K │  │ W_V │   (列并行)          │
+│   │ W_Q │  │ W_K │  │ W_V │   (column parallel) │
 │   │[D,H]│  │[D,H]│  │[D,H]│   H = n_heads/Y    │
 │   └──┬──┘  └──┬──┘  └──┬──┘                    │
 │      │        │        │                        │
@@ -951,7 +951,7 @@ Transformer 的 MLP 完美适配列并行 + 行并行的组合：
 │        Attn_out [B, S, H]                       │
 │              │                                  │
 │          ┌───┴───┐                             │
-│          │ W_O   │  (行并行)                    │
+│          │ W_O   │  (row parallel)              │
 │          │[H, D] │                             │
 │          └───┬───┘                             │
 │              │                                  │
@@ -963,22 +963,22 @@ Transformer 的 MLP 完美适配列并行 + 行并行的组合：
 └─────────────────────────────────────────────────┘
 ```
 
-### 6.5 算法详解
+### 6.5 Algorithm Details
 
 ```python
 def tensor_parallel_forward(input_shard, W_in, W_out):
     """
-    input_shard: [B, D/Y] - 沿 D 维度分片
-    W_in: [D, F/Y] - 列并行
-    W_out: [F/Y, D] - 行并行
+    input_shard: [B, D/Y] - sharded along the D dimension
+    W_in: [D, F/Y] - column parallel
+    W_out: [F/Y, D] - row parallel
     """
-    # AllGather 输入
+    # AllGather the input
     input_full = all_gather(input_shard, dim=-1)  # [B, D]
     
-    # 列并行矩阵乘法（无通信）
+    # Column-parallel matmul (no communication)
     tmp = input_full @ W_in  # [B, F/Y]
     
-    # 行并行矩阵乘法（产生部分和）
+    # Row-parallel matmul (produces partial sums)
     output_partial = tmp @ W_out  # [B, D] {U_Y}
     
     # ReduceScatter
@@ -987,102 +987,102 @@ def tensor_parallel_forward(input_shard, W_in, W_out):
     return output_shard
 ```
 
-### 6.6 通信分析
+### 6.6 Communication Analysis
 
 $$T_\text{math} = \frac{4BDF}{Y \cdot C}$$
 
 $$T_\text{comms} = \frac{4BD}{W}$$
 
-> [!important] 计算瓶颈条件
+> [!important] Compute-bound condition
 > $$\frac{F}{Y \cdot C} > \frac{1}{W} \Rightarrow F > Y \cdot \frac{C}{W}$$
 > 
-> 对于 H100 SXM：$C/W \approx 1100$
+> For H100 SXM: $C/W \approx 1100$
 > 
-> 因此 $Y < F / 1100$
+> Therefore $Y < F / 1100$
 > 
-> 对于 LLaMA-70B（$F \approx 28672$）：$Y_\text{max} \approx 26$
+> For LLaMA-70B ($F \approx 28672$): $Y_\text{max} \approx 26$
 
-> [!tip] 关键区别
-> - **数据并行**：batch size 受限
-> - **张量并行**：模型维度受限，与 batch size 无关
+> [!tip] Key difference
+> - **Data parallelism**: limited by batch size
+> - **Tensor parallelism**: limited by model width, independent of batch size
 
-### 6.7 残差连接的处理
+### 6.7 Residual Connections
 
-TP 中最微妙的设计点：**残差路径（x + sublayer(x)）如何保持正确**。
+The subtlest design point in TP is **how to keep the residual path (`x + sublayer(x)`) correct**.
 
 ```
-标准 Transformer 层（TP=2）：
+Standard Transformer layer (TP=2):
 
-x [B,S,D]（复制）
+x [B,S,D] (replicated)
 │
-├──────────────────────────────────────┐  ← 残差分支（不动）
+├──────────────────────────────────────┐  ← residual branch (unchanged)
 │                                      │
 ▼                                      │
-LayerNorm（本地，无通信）               │
+LayerNorm (local, no communication)    │
 │                                      │
 ▼ AllGather(SP) → [B, S/cp, D]        │
 │                                      │
-├── Q_proj[D, D/2] → Q[B,S,D/2]      │  ← ColumnParallel：本地矩阵乘，无通信
+├── Q_proj[D, D/2] → Q[B,S,D/2]      │  ← ColumnParallel: local matmul, no communication
 ├── K_proj[D, D/2] → K[B,S,D/2]      │
 └── V_proj[D, D/2] → V[B,S,D/2]      │
          │                             │
-     Attention（本地，各 GPU 算 D/2 的头）│
+     Attention (local, each GPU computes D/2 heads) │
          │                             │
-     O_proj[D/2, D]（行并行）          │
+     O_proj[D/2, D] (row parallel)    │
          │                             │
-     ReduceScatter → [B, S/(cp·sp), D]│  ← 求和部分积，同时进入 SP
+     ReduceScatter → [B, S/(cp·sp), D]│  ← sum partial products and enter SP at the same time
          │                             │
-         └──────────── + ─────────────┘  ← 残差相加（均在 SP 状态，形状匹配）
+         └──────────── + ─────────────┘  ← residual addition (both in SP state, shapes match)
                        │
                   [B, S/(cp·sp), D]
 
-关键：RowParallel 的 ReduceScatter 输出形状与残差完全一致，直接相加，无需额外通信
+Key point: the RowParallel ReduceScatter output has exactly the same shape as the residual, so they can be added directly with no extra communication
 ```
 
-### 6.8 为什么 TP 必须在节点内
+### 6.8 Why TP Must Stay Within a Node
 
-TP 每个 Transformer 层产生 **2 次** 集合通信（Attention 和 MLP 各一次），32 层模型每次前向传播有 **64 次** 通信轮次。
+TP incurs **2** collective communications per Transformer layer (one for Attention and one for the MLP), so a 32-layer model performs **64** communication rounds per forward pass.
 
 ```
-通信延迟估算（每次 AllGather，数据 [B,S,D] = 128×4096×8192×2 = 8MB）：
+Communication latency estimate (per AllGather, data [B,S,D] = 128×4096×8192×2 = 8MB):
 
-NVLink  (900 GB/s)：8MB / 900GB/s ≈ 9μs   ← 可接受
-InfiniBand (25 GB/s)：8MB / 25GB/s ≈ 320μs ← 每层 640μs，32层 = 20ms
-单层计算时间（H100）：~2ms（B=128 时）
-→ 跨节点 TP：通信时间 >> 计算时间，完全不可行
+NVLink  (900 GB/s): 8MB / 900GB/s ≈ 9μs    ← acceptable
+InfiniBand (25 GB/s): 8MB / 25GB/s ≈ 320μs ← 640μs per layer, 32 layers = 20ms
+Single-layer compute time (H100): ~2ms (when B=128)
+→ Cross-node TP: communication time >> compute time, completely impractical
 ```
 
-### 6.9 面试常见问题
+### 6.9 Interview FAQs
 
-> [!question] 列并行和行并行的通信模式有什么区别？
-> - **列并行**（按输出维度切）：输入复制，本地矩阵乘，输出天然分片 → **前向无通信**
-> - **行并行**（按输入维度切）：输入已分片（来自上一列并行），本地矩阵乘产生部分和 → **前向需 ReduceScatter**
-> - 反向传播中两者互换：列并行反向需 AllReduce，行并行反向需 AllGather
+> [!question] What is the difference between column-parallel and row-parallel communication patterns?
+> - **Column parallel** (split by output dimension): input is replicated, local matrix multiplication runs independently, and output is naturally sharded → **no communication in the forward pass**
+> - **Row parallel** (split by input dimension): input is already sharded (from the previous column-parallel layer), local matrix multiplication produces partial sums → **the forward pass requires ReduceScatter**
+> - In backpropagation, the two swap roles: column parallel backward needs AllReduce, while row parallel backward needs AllGather
 
-> [!question] TP 的上限是多少？不能无限增加 TP 度吗？
-> 效率条件：$F > Y \times C/W$，即 $Y < F / (C/W)$。H100 上 $C/W \approx 1100$，LLaMA-70B 的 $F = 28672$，所以理论上限 $Y \approx 26$，实践中通常最多用到 8（一个节点内的 GPU 数）。超过这个值，通信时间 > 计算时间。
+> [!question] What is the upper limit of TP? Why not increase TP indefinitely?
+> The efficiency condition is $F > Y \times C/W$, that is, $Y < F / (C/W)$. On H100, $C/W \approx 1100$, and for LLaMA-70B, $F = 28672$, so the theoretical upper limit is $Y \approx 26$. In practice, people usually stop at 8 (the number of GPUs in a node). Beyond that, communication time exceeds compute time.
 
-> [!question] TP 如何处理 Embedding 层？
-> Embedding 表 $[V, D]$ 很大（LLaMA-3：128K × 8K ≈ 2GB）。Vocab Parallel 让每个 GPU 持有 $[V/\text{tp}, D]$。前向时每个 GPU 查自己的词表段（不在自己段的 token 查到 0），然后 AllReduce 得到完整 embedding。LM Head 与 Embedding 共享权重（transposed），可以直接重用分片，无需额外通信。
+> [!question] How does TP handle the embedding layer?
+> The embedding table $[V, D]$ is large (for LLaMA-3: 128K × 8K ≈ 2 GB). Vocab Parallel lets each GPU hold $[V/\text{tp}, D]$. In the forward pass, each GPU looks up only its own vocabulary range (tokens outside that range contribute 0), then an AllReduce produces the full embedding. The LM head shares weights with the embedding matrix (transposed), so it can reuse the same sharding without extra communication.
 
-> [!question] TP 和 FSDP 能同时用吗？如何组合？
-> 可以，这是最常见的组合。设 TP=t，FSDP=d，总 GPU 数 = t×d。
-> 每个 FSDP 组内的 t 个 GPU 做 TP（节点内 NVLink），d 个 FSDP 组之间做 DP（跨节点 InfiniBand）。
-> FSDP 看到的"权重"是 TP 已经分片后的 1/t，再在 d 个设备上分片存储，总每 GPU 权重 = 1/(t×d)。
+> [!question] Can TP and FSDP be used together? How are they combined?
+> Yes—this is the most common combination. Let TP=`t` and FSDP=`d`, so the total number of GPUs is `t×d`.
+> The `t` GPUs inside each FSDP group run TP (intra-node NVLink), while the `d` FSDP groups run data parallelism across nodes (InfiniBand).
+> From FSDP's perspective, the "weight" is already reduced to `1/t` by TP; it is then sharded again across `d` devices, so each GPU stores `1/(t×d)` of the original weights.
 
 ---
 
-## 七、流水线并行（Pipeline Parallelism）
+## 7. Pipeline Parallelism
 
-> **Motivation**：TP 和 FSDP 都需要高带宽连接（节点内 NVLink ~900 GB/s），不适合跨节点通信（节点间 InfiniBand ~200 Gb/s，慢约 10-100 倍）。当模型规模需要跨多个节点时，流水线并行是更好的选择：**按层将模型切段分配到不同节点，只在段边界传输激活值**（数据量远小于权重），将对跨节点带宽的需求降到最低。代价是引入"流水线气泡"（GPU 等待时间），需通过微批次调度来缓解。
+> **Motivation**: Both TP and FSDP require high-bandwidth links (intra-node NVLink ~900 GB/s) and are therefore ill-suited to cross-node communication (inter-node InfiniBand ~200 Gb/s, roughly 10-100× slower). When the model must span multiple nodes, pipeline parallelism is often the better option: **partition the model by layers across nodes and communicate only activations at stage boundaries**. Since activations are much smaller than weights, this minimizes cross-node bandwidth demand. The trade-off is the introduction of "pipeline bubbles" (GPU idle time), which must be mitigated with microbatch scheduling.
 
-### 7.1 基本原理
+### 7.1 Basic Principle
 
-**流水线并行**将模型的层分配到不同设备：
+**Pipeline parallelism** distributes the layers of the model to different devices:
 
 ```
 ┌──────────────────────────────────────────────────────────┐
-│                  流水线并行示意图                         │
+│                 Pipeline Parallelism Diagram              │
 ├──────────────────────────────────────────────────────────┤
 │                                                          │
 │   GPU 0         GPU 1         GPU 2         GPU 3       │
@@ -1091,48 +1091,48 @@ InfiniBand (25 GB/s)：8MB / 25GB/s ≈ 320μs ← 每层 640μs，32层 = 20ms
 │  │ 0-7  │      │ 8-15 │      │16-23 │      │24-31 │     │
 │  └──────┘      └──────┘      └──────┘      └──────┘     │
 │     ↑                                          │         │
-│     │               反向传播                    │         │
+│     │               Backward pass               │         │
 │     └──────────────────────────────────────────┘         │
 │                                                          │
 └──────────────────────────────────────────────────────────┘
 ```
 
-### 7.2 流水线气泡：根本原因
+### 7.2 Pipeline Bubbles: Root Cause
 
-**气泡（bubble）= GPU 因等待上下游数据而空闲的时间**。
+**Bubble = time the GPU is idle waiting for upstream and downstream data**.
 
-以 P=4 个阶段，单个 batch 为例：
+Take P=4 stages and a single batch as an example:
 
 ```
-时间轴（每格 = 1 个前向或反向的时间单位）：
+Timeline (each cell = 1 unit of forward or backward time):
 
          1    2    3    4    5    6    7    8
 GPU 0: [ F0 ]                         [ B0 ]
 GPU 1:        [ F0 ]              [ B0 ]
 GPU 2:               [ F0 ]  [ B0 ]
 GPU 3:                    [ F0 ][ B0 ]
-             ←──── 气泡 ────→
-             GPU 0 做完 F0 后
-             必须等 GPU 3 算完才能反向
+             ←──── bubble ────→
+             After GPU 0 finishes F0,
+             it must wait for GPU 3 to finish before backpropagating
 
-气泡来源：
-  - 热身阶段：GPU 0 把数据交给 GPU 1，然后只能等
-  - 冷却阶段：GPU 3 把梯度传回 GPU 2，GPU 2 传给 GPU 1...
-  - GPU 0 等到梯度传回才能做 B0，期间完全空闲
+Bubble sources:
+  - Warm-up phase: GPU 0 passes data to GPU 1, then can only wait
+  - Cool-down phase: GPU 3 passes gradients back to GPU 2, GPU 2 passes them to GPU 1...
+  - GPU 0 must wait for the gradients to return before it can do B0, so it is completely idle meanwhile
 ```
 
-**气泡比例（单 batch 时最严重）** = $(P-1)$ 个空闲单元 / $2P$ 个总单元 = $(P-1)/2P \approx 50\%$
+**Bubble ratio (the most serious in a single batch)** = $(P-1)$ idle units / $2P$ total units = $(P-1)/2P \approx 50\%$
 
 ---
 
-### 7.3 解法：微批次（Microbatch）+ 调度策略
+### 7.3 Solution: Microbatches + Scheduling
 
-把一个 batch 拆成 $M$ 个微批次（microbatch），让流水线在热身/冷却期间保持忙碌：
+Split a batch into $M$ microbatches to keep the pipeline busy during the warm-up/cool-down period:
 
-#### GPipe / AFAB（All-Forward-All-Backward）
+#### GPipe / AFAB (All-Forward-All-Backward)
 
 ```
-P=4 个阶段，M=4 个微批次，每格代表一个 F 或 B：
+P=4 stages, M=4 microbatches, each cell represents one F or B:
 
          1    2    3    4    5    6    7    8    9   10   11
 GPU 0: [ F0 ][ F1 ][ F2 ][ F3 ]  .    .    . [ B3 ][ B2 ][ B1 ][ B0 ]
@@ -1140,120 +1140,120 @@ GPU 1:        [ F0 ][ F1 ][ F2 ][ F3 ]  .    .    . [ B3 ][ B2 ][ B1 ][ B0 ]
 GPU 2:               [ F0 ][ F1 ][ F2 ][ F3 ]  .    .    . [ B3 ][ B2 ][ B1 ][ B0 ]
 GPU 3:                     [ F0 ][ F1 ][ F2 ][ F3 ][ B3 ][ B2 ][ B1 ][ B0 ]
                                                ↑
-                                           GPU 3 最后一个 F 完成
-                                           立刻开始 B（无气泡！）
+                                           GPU 3 finishes the last F
+                                           and starts B immediately (no bubble!)
 
-气泡（.）只在 GPU 0 的 F3 结束后到 B3 开始前 = P-1 = 3 单元
-总时间 = M + (P-1) + M = 2M + (P-1) = 11 单元
-理想时间 = 2M = 8 单元
-气泡比例 = (P-1)/(2M+P-1) ≈ P/(2M)    → M=4,P=4 时 ≈ 27%
+Bubble (.) exists only between the end of GPU 0's F3 and the start of B3 = P-1 = 3 units
+Total time = M + (P-1) + M = 2M + (P-1) = 11 units
+Ideal time = 2M = 8 units
+Bubble ratio = (P-1)/(2M+P-1) ≈ P/(2M)    → for M=4,P=4, about 27%
 
-⚠️ 内存问题：GPU 0 在做 B 之前，M=4 个微批次的激活值全部堆在显存里
-→ 激活内存 ∝ M × layer_size（随 M 线性增长）
+⚠️ Memory issue: before GPU 0 starts B, the activations of all M=4 microbatches accumulate in memory
+→ Activation memory ∝ M × layer_size (grows linearly with M)
 ```
 
-#### 1F1B（One-Forward-One-Backward）
+#### 1F1B (One-Forward-One-Backward)
 
-**核心思路：一旦能做 B 就立刻做 B，不等所有 F 做完。**
+**Core idea: as soon as a backward step can run, run it immediately instead of waiting for all forward steps to finish.**
 
 ```
-P=4，M=8（微批次），每格 = 1 个 F 或 B：
+P=4, M=8 (microbatches), each cell = 1 F or B:
 
-         热身期          稳态（1F1B 交替）            冷却期
+         Warm-up        Steady state (alternating 1F1B)     Cool-down
          ←──P-1──→   ←──────── M=8 ────────→   ←──P-1──→
 GPU 0: [F0][F1][F2][F3][B0][F4][B1][F5][B2][F6][B3][F7][B4][B5][B6][B7]
 GPU 1:     [F0][F1][F2][B0][F3][B1][F4][B2][F5][B3][F6][B4][B5][B6][B7]
 GPU 2:         [F0][F1][B0][F2][B1][F3][B2][F4][B3][F5][B4][B5][B6][B7]
 GPU 3:             [F0][B0][F1][B1][F2][B2][F3][B3][F4][B4][B5][B6][B7]
                                                               ↑
-                                                      稳态中 GPU 0 始终在工作
-气泡 = 热身期 GPU 3 等待 + 冷却期 GPU 0 等待 ≈ (P-1) 单元（前后各一半）
+                                                      In steady state, GPU 0 is always busy
+Bubble = GPU 3 waiting in warm-up + GPU 0 waiting in cool-down ≈ (P-1) units (half before, half after)
 
-气泡比例 = (P-1)/(M+P-1) ≈ P/M（与 M 成反比，M 越大越好）
+Bubble ratio = (P-1)/(M+P-1) ≈ P/M (inversely proportional to M; larger M is better)
 
-内存优势：任意时刻，每个 GPU 最多只有 P 个微批次的激活值在显存中
-→ 激活内存 ∝ P × layer_size（与 M 无关！）
+Memory advantage: at any time, each GPU stores activations for at most P microbatches
+→ Activation memory ∝ P × layer_size (independent of M!)
 ```
 
-**GPipe vs 1F1B 对比：**
+**GPipe vs 1F1B comparison:**
 
 ```
-                   气泡比例          激活内存
-GPipe（AFAB）     (P-1)/(2M+P-1)   M × 层激活
-1F1B              (P-1)/(M+P-1)    P × 层激活  ← 内存大幅节省
+                   Bubble ratio      Activation memory
+GPipe (AFAB)      (P-1)/(2M+P-1)   M × layer activations
+1F1B              (P-1)/(M+P-1)    P × layer activations  ← large memory savings
 ```
 
-> 1F1B 气泡略大，但激活内存从 $O(M)$ 降到 $O(P)$，**在大模型训练中 $M \gg P$，内存节省远比气泡重要**。
+> 1F1B bubble is slightly larger, but the activation memory is reduced from $O(M)$ to $O(P)$, **In large model training $M \gg P$, the memory saving is far more important than the bubble**.
 
 ---
 
-### 7.4 Interleaved 1F1B（虚拟阶段）
+### 7.4 Interleaved 1F1B (Virtual Stage)
 
-**问题**：即使有 M 个微批次，气泡比例 $(P-1)/M$ 在 P 大时仍明显（如 P=16，M=32，气泡 ≈ 47%）。
+**Question**: Even if there are M micro-batches, the bubble ratio $(P-1)/M$ is still significant when P is large (such as P=16, M=32, bubbles ≈ 47%).
 
-**解法**：每个 GPU 承担 $V$ 个**不连续的虚拟阶段**（interleaved chunks），等效把 P 分成更细的流水线：
+**Solution**: Each GPU undertakes $V$ **discontinuous virtual stages** (interleaved chunks), which is equivalent to dividing P into finer pipelines:
 
 ```
-标准 1F1B（P=4，每 GPU 1 段连续层）：
+Standard 1F1B (P=4, 1 contiguous layer chunk per GPU):
 GPU 0: Layer 0-7    GPU 1: Layer 8-15   GPU 2: Layer 16-23  GPU 3: Layer 24-31
 
-Interleaved 1F1B（P=4，V=2，每 GPU 2 段不连续层）：
-GPU 0: Layer 0-3 和 Layer 16-19
-GPU 1: Layer 4-7 和 Layer 20-23
-GPU 2: Layer 8-11 和 Layer 24-27
-GPU 3: Layer 12-15 和 Layer 28-31
+Interleaved 1F1B (P=4, V=2, 2 non-contiguous layer chunks per GPU):
+GPU 0: Layer 0-3 and Layer 16-19
+GPU 1: Layer 4-7 and Layer 20-23
+GPU 2: Layer 8-11 and Layer 24-27
+GPU 3: Layer 12-15 and Layer 28-31
 
-→ 等效流水线深度变为 P×V=8，气泡比例缩小 V 倍：
-  气泡 = (P-1)/(V×M+P-1) ≈ P/(V×M)
+→ The effective pipeline depth becomes P×V=8, reducing the bubble ratio by a factor of V:
+  Bubble = (P-1)/(V×M+P-1) ≈ P/(V×M)
 ```
 
-**代价**：每个微批次要经过 $V$ 次额外的阶段切换 → **P2P 通信次数增加 $V$ 倍**。
+**Cost**: Each micro-batch has to go through $V$ additional stage switches → **The number of P2P communications increases by $V$ times**.
 
 ```
-权衡：
-  V=1（标准）：气泡 P/M，通信 2×P次/microbatch
-  V=2：气泡 P/(2M)，通信 4×P次/microbatch
-  V=4：气泡 P/(4M)，通信 8×P次/microbatch
+Trade-off:
+  V=1 (standard): bubble P/M, communication 2×P times per microbatch
+  V=2: bubble P/(2M), communication 4×P times per microbatch
+  V=4: bubble P/(4M), communication 8×P times per microbatch
 
-实践：通常 V=2 或 V=4，更大的 V 通信开销过重。
+In practice: V=2 or V=4 is common; larger V incurs too much communication overhead.
 ```
 
 ---
 
-### 7.5 面试常见问题
+### 7.5 Interview FAQs
 
-> [!question] 气泡的本质是什么？如何量化？
-> 气泡是流水线热身/冷却期间的 GPU 空闲。标准 1F1B 的气泡比例 = $(P-1)/(M+P-1)$。要使气泡 < 5%，需要 $M > 20(P-1) \approx 20P$。例如 PP=8 时，需要 160 个微批次。
+> [!question] What is the nature of pipeline bubbles, and how can we quantify them?
+> Bubbles are GPU idles during pipeline warm-up/cool-down periods. Standard 1F1B bubble ratio = $(P-1)/(M+P-1)$. For bubbles < 5%, $M > 20(P-1) \approx 20P$ is required. For example, when PP=8, 160 micro-batches are required.
 
-> [!question] 1F1B 相比 GPipe 的核心优势是什么？
-> **不是气泡（两者相近），而是激活内存**。GPipe 需要同时保存 M 个微批次的激活值（$O(M)$ 内存），1F1B 稳态时只有 P 个激活值在飞行中（$O(P)$ 内存）。大模型训练中通常 $M \gg P$，节省激活内存至关重要。
+> [!question] What is the core advantage of 1F1B over GPipe?
+> **Not bubbles (the two are similar), but activated memory**. GPipe needs to save the activation values ​​of M micro-batches at the same time ($O(M)$ memory), and in the steady state of 1F1B, only P activation values ​​are in flight ($O(P)$ memory). In large model training, usually $M \gg P$, saving activation memory is crucial.
 
-> [!question] PP 的阶段间传递什么数据？大小是多少？
-> 前向：激活值 $[B/\text{dp}, S/\text{cp}, D]$，大小 $= B \cdot S \cdot D \cdot 2$ 字节（bf16）。反向：同形状的梯度。相比权重大小（几 GB），这通常只有几 MB，这就是为什么 PP 可以用低带宽的跨节点互连。
+> [!question] What data is exchanged between PP stages, and how large is it?
+> Forward: activation value $[B/\text{dp}, S/\text{cp}, D]$, size $= B \cdot S \cdot D \cdot 2$ bytes (bf16). Reverse: Gradient of the same shape. This is typically only a few MB compared to the weight size (several GB), which is why PP can be interconnected with low bandwidth across nodes.
 
-> [!question] 怎么选择 M（微批次数量）和 P（流水线阶段数）？
-> - 增大 M：减少气泡，但每个微批次 batch size 变小（可能影响统计效率）
-> - 增大 P：可以训练更大的模型，但气泡增大，需要同步增大 M
-> - 经验法则：$M \geq 4P$（使气泡 < 25%），通常 $M = 8P$ 到 $M = 16P$
+> [!question] How should I choose `M` (number of microbatches) and `P` (number of pipeline stages)?
+> - Increase M: reduce bubbles, but the batch size of each micro-batch becomes smaller (may affect statistical efficiency)
+> - Increase P: A larger model can be trained, but as the bubbles increase, M needs to be increased simultaneously
+> - Rule of thumb: $M \geq 4P$ (make bubbles < 25%), typically $M = 8P$ to $M = 16P$
 
-> [!question] Interleaved 1F1B 的气泡公式和代价？
-> 气泡比例 $(P-1)/(V \cdot M + P-1) \approx P/(VM)$，缩小 $V$ 倍。代价：每个微批次的 P2P 通信次数增加 $V$ 倍（更多阶段边界）。实践中 $V = 2$ 是常见选择，平衡气泡与通信开销。
+> [!question] What is the bubble formula for interleaved 1F1B, and what is its cost?
+> Bubble ratio $(P-1)/(V \cdot M + P-1) \approx P/(VM)$, reduced by $V$ times. Cost: $V$ times more P2P communications per micro-batch (more stage boundaries). In practice $V = 2$ is a common choice, balancing bubbles and communication overhead.
 
-### 7.6 1F1B 调度伪代码
+### 7.6 1F1B Scheduling Pseudocode
 
 ```
-# 每个 stage 的调度逻辑（伪代码）
+# Scheduling logic for each stage (pseudocode)
 
-warmup_steps = P - my_rank - 1   # rank 越小，热身越长
+warmup_steps = P - my_rank - 1   # smaller rank means longer warm-up
 
-# 热身阶段：只做前向，填充流水线
+# Warm-up phase: forward only, fill the pipeline
 for i in 0..warmup_steps:
     x = recv_forward() if not first_stage else microbatch[i]
     y = forward(x)
     send_forward(y) if not last_stage
-    save(x, y)                   # 保存激活用于反向
+    save(x, y)                   # save activations for backward
 
-# 稳态阶段：1F1B 交替
+# Steady-state phase: alternate 1F1B
 for i in warmup_steps..M:
     x = recv_forward() if not first_stage else microbatch[i]
     y = forward(x)
@@ -1263,7 +1263,7 @@ for i in warmup_steps..M:
     dx = backward(saved_x, saved_y, dy)
     send_backward(dx) if not first_stage
 
-# 冷却阶段：只做反向，排空流水线
+# Cool-down phase: backward only, drain the pipeline
 for i in 0..warmup_steps:
     dy = recv_backward() if not last_stage else loss_grad
     dx = backward(saved_x, saved_y, dy)
@@ -1271,21 +1271,21 @@ for i in 0..warmup_steps:
 
 optimizer.step()
 
-# 注意：first_stage/last_stage 直接从数据集/loss 获取梯度
-# 其余阶段只做 recv/send，对数据来源无感知（模块化设计）
+# Note: first_stage/last_stage get data or loss gradients directly
+# Other stages only do recv/send and remain agnostic to the data source (modular design)
 ```
 
 ---
 
-## 八、混合并行策略
+## 8. Hybrid Parallel Strategies
 
-### 8.1 3D 并行
+### 8.1 3D Parallelism
 
-实际训练大模型时，通常组合多种并行策略：
+When actually training large models, multiple parallel strategies are usually combined:
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│                     3D 并行示意图                             │
+│                    3D Parallelism Diagram                    │
 ├──────────────────────────────────────────────────────────────┤
 │                                                              │
 │                    ┌─────────────────────────────────────┐   │
@@ -1314,190 +1314,190 @@ optimizer.step()
 │                    │  └──────┘       └──────┘             │   │
 │                    └─────────────────────────────────────┘   │
 │                                                              │
-│  总 GPU 数 = DP × PP × TP = 2 × 2 × 2 = 8                    │
+│  Total GPUs = DP × PP × TP = 2 × 2 × 2 = 8                  │
 │                                                              │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-### 8.2 FSDP + TP 组合
+### 8.2 FSDP + TP Combination
 
-最常用的组合是 FSDP（数据并行）+ 张量并行：
+The most commonly used combination is FSDP (data parallelism) + tensor parallelism:
 
 $$\text{In}[B_X, D_Y] \cdot_D W_\text{in}[D_X, F_Y] \cdot_F W_\text{out}[F_Y, D_X] \rightarrow \text{Out}[B_X, D_Y]$$
 
-**优势**：
+**Advantages**:
 
-- FSDP 移动权重，TP 移动激活值
-- 随着 TP 增加，FSDP 的 AllGather 变小（因为激活值被分片）
-- 随着 FSDP 增加，TP 的 AllGather 变小（因为 batch 被分片）
+- FSDP movement weight, TP movement activation value
+- As TP increases, FSDP's AllGather becomes smaller (because activation values ​​are fragmented)
+- As FSDP increases, TP’s AllGather becomes smaller (because the batch is fragmented)
 
-### 8.3 最优配置
+### 8.3 Optimal Configuration
 
-**目标**：最小化通信时间，保持计算瓶颈
+**Goal**: Minimize communication time, maintain computational bottlenecks
 
 $$T_\text{FSDP comms} = \frac{4DF}{Y \cdot W \cdot M_X}$$
 
 $$T_\text{TP comms} = \frac{4BD}{X \cdot W \cdot M_Y}$$
 
-**最优 FSDP 规模**：
+**Optimal FSDP size**:
 
 $$X_\text{opt} = \sqrt{\frac{B}{F} \cdot \frac{M_X}{M_Y} \cdot N}$$
 
-其中 $N$ 是总 GPU 数。
+where $N$ is the total number of GPUs.
 
-> [!example] 配置示例
-> 对于 LLaMA-70B（$F \approx 28672$），$B = 2M$ tokens，$N = 64$ GPUs：
+> [!example] Configuration example
+> For LLaMA-70B ($F \approx 28672$), $B = 2M$ tokens, $N = 64$ GPUs:
 > 
 > $$X_\text{opt} = \sqrt{\frac{2 \times 10^6}{28672} \cdot 1 \cdot 64} \approx 67$$
 > 
-> 选择 $X = 64$（FSDP），$Y = 1$（无 TP）
+> Select $X = 64$ (FSDP), $Y = 1$ (no TP)
 
-### 8.4 Picotron 中的进程组管理
+### 8.4 Process Group Management in Picotron
 
-Picotron 使用 `ProcessGroupManager` 统一管理 4D 并行的进程组分配。设备排列顺序为 `DP → CP → TP → PP`，每个 rank 的坐标可由整除取模直接算出；各维度的通信组通过枚举其他维度的所有组合来创建。具体设计细节见 [[#九、Picotron 实战：从零构建分布式训练框架]] §9.2。
+Picotron uses `ProcessGroupManager` to uniformly manage 4D parallel process group allocation. The arrangement order of the devices is `DP → CP → TP → PP`. The coordinates of each rank can be directly calculated by taking the modulus of integer division; the communication group of each dimension is created by enumerating all combinations of other dimensions. For specific design details, see [[#9, Picotron Practical Combat: Building a Distributed Training Framework from Scratch]] §9.2.
 
 ---
 
-## 八½、N-D 并行全景：从单 GPU 视角理解 Transformer 的并行分解
+## 8½. N-D Parallelism Panorama: Understanding Transformer Parallel Decomposition from a Single-GPU Perspective
 
-> 本节内容参考了 Ailing Zhang 的博客 [Visualizing Parallelism in Transformer](https://ailzhang.github.io/posts/distributed-compute-in-transformer/)，提供了一种从**单个 GPU 内部**看并行的直觉视角。前面各节分别讲了 DP、FSDP、TP、PP，但实际训练大模型时，一个 Transformer 前向传播中**同时交织着 5-6 种并行策略**。本节把它们统一起来。
+> This section draws on Ailing Zhang's blog [Visualizing Parallelism in Transformer](https://ailzhang.github.io/posts/distributed-compute-in-transformer/), which offers an intuitive way to understand parallelism from the perspective of a **single GPU**. Earlier sections treated DP, FSDP, TP, and PP separately, but in real large-model training a single Transformer forward pass typically interleaves **5-6 parallel strategies at once**. This section unifies them.
 
-### 8½.1 "本地形状"思维：站在单 GPU 内部看世界
+### 8½.1 "Local Shape" Thinking: Seeing the World from Inside a Single GPU
 
-理解并行的黄金法则：**想象你自己就在一块 GPU 里面**。你手上只有全局张量的一个分片，你需要知道：
-- 我手上的数据是什么形状？
-- 要完成我的计算，我缺什么？需要和谁通信？
+The golden rule for understanding parallelism is: **imagine yourself inside a single GPU**. You only hold one shard of the global tensor, and you need to know:
+- What is the shape of the data I currently hold?
+- What am I missing to complete my computation, and who do I need to communicate with?
 
-**本地激活形状公式**：
+**Local activation shape formula**:
 
 $$\text{local shape} = \left[\frac{B}{\text{dp}}, \; \frac{S}{\text{cp} \times \text{sp}}, \; D\right]$$
 
-- $B / \text{dp}$：数据并行分了 batch
-- $S / (\text{cp} \times \text{sp})$：Context Parallel 和 Sequence Parallel 共同分了序列
-- $D$：隐藏维度保持完整（TP 分的是权重的 F 维度，不是 D）
+- $B / \text{dp}$: data parallelism shards the batch
+- $S / (\text{cp} \times \text{sp})$: Context Parallel and Sequence Parallel jointly shard the sequence
+- $D$: the hidden dimension stays intact (TP shards the weight's F dimension, not D)
 
-每种并行策略切分的维度不同，这就是它们可以正交组合的原因：
+Each parallel strategy cuts into different dimensions, which is why they can be combined orthogonally:
 
-| 符号 | 并行策略 | 分片什么？ | 作用于哪些层？ |
+| Symbol | Parallel strategy | What is sharded? | Which layers does it apply to? |
 |------|---------|-----------|-------------|
-| dp | Data Parallel | Batch ($B$) | 所有层 |
-| tp | Tensor Parallel | 权重的 FFN/Head 维度 ($F$, $n\_heads$) | Attention, MLP |
-| sp | Sequence Parallel | 激活值的序列维度 ($S$)，**仅在 element-wise 操作中** | LayerNorm, Dropout, 残差连接 |
-| cp | Context Parallel | 序列维度 ($S$)，**在 Attention QKV 计算中** | Attention |
-| ep | Expert Parallel | 专家数量 ($E$) | MoE 层 |
-| vp | Vocab Parallel | 词表维度 ($V$) | Embedding, Loss |
+| dp | Data Parallel | Batch ($B$) | All layers |
+| tp | Tensor Parallel | FFN/Head dimensions of weights ($F$, $n\_heads$) | Attention, MLP |
+| sp | Sequence Parallel | Sequence dimension of activations ($S$), **only in element-wise operations** | LayerNorm, Dropout, residual connections |
+| cp | Context Parallel | Sequence dimension ($S$), **in Attention QKV calculation** | Attention |
+| ep | Expert Parallel | Number of experts ($E$) | MoE layers |
+| vp | Vocab Parallel | Vocabulary Dimension ($V$) | Embedding, Loss |
 
-### 8½.2 Sequence Parallel (SP)：TP 的天然搭档
+### 8½.2 Sequence Parallel (SP): A natural partner for TP
 
-**问题**：张量并行（TP）只能分片矩阵乘法操作（因为矩阵乘可以按维度拆分）。但 Transformer 中还有大量 **element-wise 操作**（LayerNorm, Dropout, 残差连接, 激活函数），这些操作的权重很小甚至没有权重，不值得做 TP。在纯 TP 中，这些操作只能在**完整的、未分片的激活值**上执行——浪费了显存。
+**Problem**: Tensor Parallel (TP) can only shard matrix-multiplication operations, because matrix multiplication can be split along a dimension. But Transformers also contain many **element-wise operations** (LayerNorm, Dropout, residual additions, activation functions). These operations have very small weights or no weights at all, so TP is not worthwhile for them. In pure TP, such operations can only run on **full, unsharded activations**, which wastes memory.
 
-**SP 的解决方案**：在 element-wise 操作中，**沿序列维度分片激活值**。
+**SP solution**: for element-wise operations, **shard activations along the sequence dimension**.
 
-关键洞察：element-wise 操作是逐元素独立的（每个位置的计算不依赖其他位置），所以每个 GPU 只处理自己那一段序列即可，不需要通信。
+Key insight: element-wise operations are independent across positions, so each GPU can process only its local sequence slice with no communication.
 
 ```
-TP 区域（矩阵乘法）          SP 区域（element-wise）
+TP region (matrix multiplication)   SP region (element-wise)
 ┌────────────────┐          ┌────────────────┐
-│ 每 GPU 持有完整 S │          │ 每 GPU 持有 S/sp │
-│ 权重按 F 分片     │   ←→    │ 激活按 S 分片     │
-│ AllGather(sp)   │  转换    │ ReduceScatter   │
+│ Each GPU holds full S │       │ Each GPU holds S/sp │
+│ Weights sharded by F  │  ←→   │ Activations sharded by S │
+│ AllGather(sp)         │ convert │ ReduceScatter       │
 └────────────────┘          └────────────────┘
 ```
 
-**SP 和 TP 之间的转换**：
-- **进入 TP 区域**（如 Attention, MLP 的矩阵乘）：需要 `AllGather(sp)` 把序列拼回完整
-- **离开 TP 区域**（回到 LayerNorm 等）：用 `ReduceScatter` 把 TP 的部分和求和，同时沿序列维度分散
+**Converting between SP and TP**:
+- **Entering the TP region** (for example, the matrix multiplies in Attention or the MLP): use `AllGather(sp)` to reconstruct the full sequence
+- **Leaving the TP region** (back to LayerNorm and other element-wise ops): use `ReduceScatter` to both sum TP partials and scatter along the sequence dimension
 
-巧妙之处：TP 的行并行层本身就需要 `ReduceScatter`（求和部分积），SP 只是让这个 ReduceScatter **同时完成了序列分片**——一个通信操作，两个目的，零额外开销。
+The clever part is that TP's row-parallel layer already needs `ReduceScatter` to sum partial products. SP simply makes that same `ReduceScatter` **also perform sequence sharding**—one communication, two purposes, zero extra overhead.
 
-### 8½.3 Context Parallel (CP)：长序列的救星
+### 8½.3 Context Parallel (CP): The savior of long sequences
 
-**问题**：Self-Attention 的计算和内存复杂度是 $O(S^2)$。当序列很长（如 128K tokens）时，即使其他维度都分了，Attention 的 $S \times S$ 矩阵依然巨大。SP 只能在 element-wise 操作中分序列，Attention 中**每个位置需要看到所有其他位置**，不能简单按 S 切分。
+**Problem**: The compute and memory complexity of Self-Attention is $O(S^2)$. When the sequence is very long (for example, 128K tokens), the $S \times S$ attention matrix is still huge even if other dimensions are sharded. SP can only shard the sequence in element-wise operations. Inside Attention, **each position must see all other positions**, so you cannot simply split along S.
 
-**CP 的解决方案**：在 Attention 计算中也按序列分片，但使用 **Ring Attention** 机制——每个 GPU 持有 $S/\text{cp}$ 段 Query，通过**环形传递 KV 块**逐步完成完整的注意力计算。
+**CP solution**: also shard along the sequence dimension inside Attention, but use **Ring Attention**—each GPU holds a `Query` slice of length $S/\text{cp}$ and completes full attention by **circulating KV blocks around a ring**.
 
 ```
 GPU 0: Q[0:S/4]     GPU 1: Q[S/4:S/2]    GPU 2: Q[S/2:3S/4]   GPU 3: Q[3S/4:S]
       │                    │                     │                    │
-      └── Ring: 传递 KV ──→ ──→ ──→ ──→ ──→ ──→ ──→ ──→ ──→ ──→ ──→─┘
+      └── Ring: pass KV ──→ ──→ ──→ ──→ ──→ ──→ ──→ ──→ ──→ ──→ ──→─┘
 ```
 
-每一步，每个 GPU 用自己的 Q 和当前收到的 KV 块计算局部注意力，然后把 KV 传给环中下一个 GPU。经过 cp 轮传递后，每个 GPU 就看到了完整的 KV，注意力计算完成。
+At each step, each GPU computes local attention using its own Q and the KV block it currently holds, then forwards that KV block to the next GPU in the ring. After `cp` rounds, every GPU has seen the full KV set, and attention is complete.
 
-**CP vs SP 的区别**：
-- **SP**：分序列维度，用于 element-wise 操作（LayerNorm, Dropout），不需要跨位置通信
-- **CP**：分序列维度，用于 Attention 计算，通过 Ring Attention 实现跨位置的 KV 共享
+**CP vs. SP**:
+- **SP**: shards the sequence dimension for element-wise operations (LayerNorm, Dropout), with no cross-position communication
+- **CP**: shards the sequence dimension for Attention, using Ring Attention to share KV across positions
 
-两者分的都是 $S$ 维度，所以在本地形状公式中它们相乘：$S / (\text{cp} \times \text{sp})$。
+Both are divided into $S$ dimensions, so they are multiplied in the local shape formula: $S / (\text{cp} \times \text{sp})$.
 
-### 8½.4 Expert Parallel (EP)：MoE 的专属并行
+### 8½.4 Expert Parallel (EP): MoE’s exclusive parallelism
 
-**Mixture of Experts (MoE)** 模型中，MLP 层被替换为多个 "专家"（每个专家是一个独立的 MLP），每个 token 只激活其中 top-k 个专家。
+In **Mixture of Experts (MoE)** models, the MLP layer is replaced by multiple "experts" (each expert is an independent MLP), and each token activates only its top-k experts.
 
-**EP 的做法**：将不同的专家放在不同的 GPU 上。
+**EP approach**: place different experts on different GPUs.
 
 ```
-Token 路由（Router）决定每个 token 去哪个专家
+Token routing (Router) decides which expert each token goes to
          │
-    AllToAll(ep)         ← 把 token 发给对应的专家所在的 GPU
+    AllToAll(ep)         ← send tokens to the GPUs hosting the corresponding experts
          │
-    各 GPU 独立计算      ← 每个 GPU 上的专家处理分配到的 token
-    （可内部用 TP）
+    Each GPU computes independently ← experts on each GPU process their assigned tokens
+    (can use TP internally)
          │
-    AllToAll(ep)         ← 把计算结果发回 token 原来所在的 GPU
+    AllToAll(ep)         ← send the computed results back to the GPUs where the tokens originated
          │
-    继续后续计算
+    Continue subsequent computation
 ```
 
-**核心通信**：两次 `AllToAll`——一次发 token 给专家，一次取回结果。AllToAll 是一种"转置"操作：输入按 token 分片，输出按 expert 分片（或反过来）。
+**Core communication**: two `AllToAll`s—one to send tokens to experts, and one to send results back. AllToAll is a "transpose" operation: input is sharded by token while output is sharded by expert, or vice versa.
 
-**EP 的瓶颈**：AllToAll 需要**所有 GPU 之间两两通信**（不像 AllGather/ReduceScatter 可以用 Ring 优化），网络互连是主要瓶颈。这就是为什么 MoE 模型虽然参数量大（激活参数少），但通信成本可能反而更高。
+**EP bottleneck**: AllToAll requires **pairwise communication among all GPUs** (unlike AllGather/ReduceScatter, which can be optimized with rings), so the network becomes the main bottleneck. This is why MoE models can have lower active parameter counts but still incur very high communication cost.
 
-### 8½.5 Vocab Parallel (VP)：Embedding 和 Loss 的分片
+### 8½.5 Vocab Parallel (VP): Sharding of Embedding and Loss
 
-LLM 的词表通常很大（LLaMA 3: 128K），Embedding 表的大小为 $V \times D$（128K × 8K ≈ 1GB bf16），完全复制到每个 GPU 不划算。
+LLM vocabularies are usually large (for example, LLaMA 3: 128K). The embedding table has size $V \times D$ (128K × 8K ≈ 1 GB in bf16), so fully replicating it on every GPU is inefficient.
 
-**VP 的做法**：每个 GPU 只持有词表的一段 $[V/\text{vp}]$。
+**VP approach**: each GPU holds only a shard of the vocabulary, $[V/\text{vp}]$.
 
-**Embedding 前向**：
+**Embedding forward**:
 ```
 Input token IDs: [B, S]
          │
-    每个 GPU 查自己的 Embedding 分片（不属于自己的 token 得到 0）
+    Each GPU looks up its own embedding shard (tokens not owned by it get 0)
          │
-    ReduceScatter         ← 求和得到完整 embedding，同时切换到 SP 分片
+    ReduceScatter         ← sum to obtain the full embedding while switching to SP sharding
          │
-    Output: [B, S/sp, D]  ← 进入 SP 状态
+    Output: [B, S/sp, D]  ← enter the SP state
 ```
 
-**Loss 计算**（Cross-Entropy with VP）：
+**Loss computation** (Cross-Entropy with VP):
 
-Cross-Entropy 需要对整个词表做 softmax，但每个 GPU 只有 $V/\text{vp}$ 个 logits。需要额外通信来计算全局的 softmax 分母：
+Cross-Entropy requires a softmax over the full vocabulary, but each GPU has only $V/\text{vp}$ logits. Additional communication is therefore required to compute the global softmax denominator:
 
 ```
 local logits: [B, S, V/vp]
          │
-    AllReduce(max)        ← 找到全局最大值（数值稳定性）
-    AllReduce(sum)        ← 计算全局 exp-sum（softmax 分母）
+    AllReduce(max)        ← find the global maximum (numerical stability)
+    AllReduce(sum)        ← compute the global exp-sum (softmax denominator)
          │
-    本地计算 log-softmax   ← 用全局统计量在本地完成
+    Local log-softmax     ← complete locally using the global statistics
          │
-    AllReduce(sum)        ← 汇总 loss
+    AllReduce(sum)        ← aggregate the loss
 ```
 
-原博客有一些很好的图，可以参考 [Ailing Zhang 的博客](https://ailzhang.github.io/posts/distributed-compute-in-transformer/)， 比如**完整 Transformer 并行全景图**（包含所有层的通信模式）：
+The original blog contains several excellent figures; see [Ailing Zhang's blog](https://ailzhang.github.io/posts/distributed-compute-in-transformer/) for the **complete Transformer parallelism panorama**, which shows the communication patterns across all layers:
 
-![完整 Transformer 并行全景：DP/TP/SP/CP/EP/VP 交织](https://ailzhang.github.io/posts/distributed-compute-in-transformer/overview.svg)
+![Complete Transformer parallel panorama: DP/TP/SP/CP/EP/VP interleaving](https://ailzhang.github.io/posts/distributed-compute-in-transformer/overview.svg)
 
-## 九、Picotron 设计解析
+## 9. Picotron Design Analysis
 
-[Picotron](https://github.com/huggingface/picotron) 是 HuggingFace 的教育用 4D 并行框架，核心设计哲学：**每种并行策略是独立正交的维度，通过进程组组合，互不干扰**。
+[Picotron](https://github.com/huggingface/picotron) is Hugging Face's educational 4D parallel framework. Its core design philosophy is: **each parallel strategy is an independent orthogonal dimension, and process groups compose them without interference**.
 
 ---
 
-### 9.1 核心抽象：4D 设备网格
+### 9.1 Core Abstraction: 4D Device Grid
 
-所有进程排列在一个 4D 网格上，每个进程有唯一的坐标 `(dp, tp, pp, cp)`：
+All processes are arranged on a 4D grid, and each process has a unique coordinate `(dp, tp, pp, cp)`:
 
 ```
                     PP Stage 0          PP Stage 1
@@ -1510,62 +1510,62 @@ local logits: [B, S, V/vp]
                       Node 0              Node 1
 ```
 
-**每种并行对应网格的一个切面：**
+**Each type of parallelism corresponds to one slice of the grid:**
 
 ```
-TP 组  = 同一行 (相同 dp, pp, cp，不同 tp) → 节点内高带宽
-DP 组  = 同一列 (相同 tp, pp, cp，不同 dp) → 跨节点
-PP 组  = 深度方向 (相同 dp, tp, cp，不同 pp) → 点对点
+TP group = same row (same dp, pp, cp; different tp) → high bandwidth within a node
+DP group = same column (same tp, pp, cp; different dp) → cross-node
+PP group = depth direction (same dp, tp, cp; different pp) → point-to-point
 ```
 
-**rank 映射公式**（Picotron 约定顺序：dp → cp → tp → pp）：
+**Rank mapping formula** (Picotron convention: `dp → cp → tp → pp`):
 
 ```
 global_rank = dp * (cp*tp*pp) + cp * (tp*pp) + tp * pp + pp_rank
 ```
-### 9.2 进程组管理器（ProcessGroupManager）
+### 9.2 Process Group Manager (ProcessGroupManager)
 
-每个进程启动时，根据自己的 `global_rank` 计算出 4 个坐标，并加入对应的通信子组：
+When a process starts, it computes its 4 coordinates from its `global_rank` and joins the corresponding communication subgroups:
 
 ```
-# 伪代码
+# Pseudocode
 class ProcessGroupManager:
     def __init__(dp, tp, pp, cp):
         rank = dist.get_rank()
 
-        # 解算坐标
+        # Decode coordinates
         self.dp_rank = rank // (cp*tp*pp)
         self.cp_rank = (rank // (tp*pp)) % cp
         self.tp_rank = (rank // pp) % tp
         self.pp_rank = rank % pp
 
-        # 为每个维度创建子通信组
-        self.dp_group = new_group([所有相同(tp,pp,cp)位置的rank])
-        self.tp_group = new_group([所有相同(dp,pp,cp)位置的rank])
-        self.pp_group = new_group([所有相同(dp,tp,cp)位置的rank])
+        # Create subgroup communicators for each dimension
+        self.dp_group = new_group([ranks with the same (tp,pp,cp) position])
+        self.tp_group = new_group([ranks with the same (dp,pp,cp) position])
+        self.pp_group = new_group([ranks with the same (dp,tp,cp) position])
 ```
 
-进程之后只需调用 `pgm.tp_group`、`pgm.dp_group` 等，不需要知道全局 rank。
-### 9.3 TP 设计：模型手术
+After that, the process only needs to use `pgm.tp_group`, `pgm.dp_group`, and so on, without reasoning about global ranks directly.
+### 9.3 TP Design: Model Surgery
 
-TP 不修改训练循环，而是**替换模型的线性层**，让每层天然支持分片计算：
+TP does not modify the training loop. Instead, it **replaces the model's linear layers** so that each layer natively supports sharded computation:
 
 ```
-原始模型                          TP 改造后
+Original model                    After TP transformation
 ─────────────────────────────────────────────────────────
 Linear(D → F)          →    ColumnParallelLinear(D → F/tp)
-                                  （无通信，输出天然分片）
+                                  (no communication, output is naturally sharded)
 
 Linear(F → D)          →    RowParallelLinear(F/tp → D)
-                                  （ReduceScatter 求和）
+                                  (ReduceScatter summation)
 ─────────────────────────────────────────────────────────
 ```
 
-**前向传播数据流（tp=4 为例）：**
+**Forward data flow (using `tp=4` as an example):**
 
 ```
-输入 x[B, D]  ──────────────────────────────────────────
-              ↓ 复制到 4 个 GPU（或 AllGather 自 SP）
+Input x[B, D] ──────────────────────────────────────────
+              ↓ Replicated to 4 GPUs (or AllGathered from SP)
   GPU0: x[B,D]   GPU1: x[B,D]   GPU2: x[B,D]   GPU3: x[B,D]
       │               │               │               │
       ▼ W_in[D,F/4]   ▼               ▼               ▼
@@ -1576,179 +1576,178 @@ Linear(F → D)          →    RowParallelLinear(F/tp → D)
       └───────────────┴───────────────┴───────────────┘
                           ReduceScatter
                               ↓
-                      [B, D/4]（继续 SP 状态）
+                      [B, D/4] (continue in the SP state)
 ```
 
-**层替换伪代码：**
+**Layer replacement pseudocode:**
 ```
-# 遍历模型所有层，就地替换
+# Iterate over all model layers and replace in place
 for layer in model.layers:
-    layer.mlp.gate_proj  = ColumnParallel(原层)   # 列并行
-    layer.mlp.up_proj    = ColumnParallel(原层)
-    layer.mlp.down_proj  = RowParallel(原层)       # 行并行
-    layer.attn.q/k/v     = ColumnParallel(原层)
-    layer.attn.o_proj    = RowParallel(原层)
+    layer.mlp.gate_proj  = ColumnParallel(original_layer)   # column parallel
+    layer.mlp.up_proj    = ColumnParallel(original_layer)
+    layer.mlp.down_proj  = RowParallel(original_layer)      # row parallel
+    layer.attn.q/k/v     = ColumnParallel(original_layer)
+    layer.attn.o_proj    = RowParallel(original_layer)
 ```
-### 9.4 DP 设计：桶式梯度 AllReduce
+### 9.4 DP Design: Bucketed Gradient AllReduce
 
-朴素做法：等所有层反向结束，一次 AllReduce 全部梯度 → 通信和计算完全串行。
+Naive approach: wait for the backward pass of all layers to finish, then AllReduce all gradients at once → communication and computation are completely serialized.
 
-Picotron 的做法：**把参数按大小分成 Bucket，反向时某个 Bucket 的梯度一凑齐就立刻异步 AllReduce**，与后续层的反向计算重叠：
+Picotron's approach: **group parameters into buckets by size, and trigger asynchronous AllReduce** as soon as a bucket's gradients are ready during backward, overlapping communication with the backward compute of later layers:
 
 ```
-反向传播顺序（从后往前）：
+Backward order (from back to front):
 
-时间 ──────────────────────────────────────────────────────────────▶
+Time ──────────────────────────────────────────────────────────────▶
 
-Layer N 反向: ████████
+Layer N backward: ████████
               └──▶ Bucket 3 AllReduce: ░░░░░░░░░░░░
-Layer N-1 反向:         ████████
+Layer N-1 backward:         ████████
                         └──▶ Bucket 2 AllReduce: ░░░░░░░░░░░░
-Layer N-2 反向:                     ████████
+Layer N-2 backward:                     ████████
                                     └──▶ Bucket 1 AllReduce: ░░░░░░
                                                      ↑
-                                              ████ = 计算
-                                              ░░░░ = 通信（异步）
+                                              ████ = compute
+                                              ░░░░ = communication (async)
 ```
 
-**关键设计：按反向顺序分桶**（最后一层的参数放第一个 Bucket），确保梯度一产生就能立刻触发通信。
+**Key design: Bucketing in reverse order** (the parameters of the last layer are placed in the first Bucket) to ensure that communication can be triggered immediately as soon as the gradient is generated.
 
 ```
-# 伪代码
-params_reversed = reversed(model.parameters())  # 反向传播顺序
+# Pseudocode
+params_reversed = reversed(model.parameters())  # backward order
 for param in params_reversed:
-    当前桶.add(param)
-    if 当前桶.size > BUCKET_SIZE:
-        新建下一个桶
+    current_bucket.add(param)
+    if current_bucket.size > BUCKET_SIZE:
+        create_next_bucket()
 
-# 注册钩子：梯度就绪时触发
+# Register hooks: trigger when gradients are ready
 for param in bucket:
     param.register_hook(lambda:
-        if bucket完整: async AllReduce(bucket.grads)
+        if bucket.is_full(): async AllReduce(bucket.grads)
     )
 ```
 
 ---
 
-### 9.5 PP 设计：阶段切分 + 1F1B 调度
+### 9.5 PP Design: Stage Partitioning + 1F1B Scheduling
 
-**阶段切分**：把模型的 L 层均匀分配给 pp 个阶段，每个进程只存 L/pp 层：
+**Stage partitioning**: distribute the model's `L` layers evenly across `pp` stages, so each process stores only `L/pp` layers:
 
 ```
-32 层模型，pp=4：
+32-layer model, pp=4:
 
 Stage 0 (GPU0): Layer  0-7   ──send_fwd──▶
 Stage 1 (GPU1): Layer  8-15             ──send_fwd──▶
 Stage 2 (GPU2): Layer 16-23                         ──send_fwd──▶
-Stage 3 (GPU3): Layer 24-31  (计算 loss)
+Stage 3 (GPU3): Layer 24-31  (compute loss)
                                          ◀──send_bwd──
                              ◀──send_bwd──
                  ◀──send_bwd──
 ```
 
-进程间只传激活值（前向）和梯度（反向），数据量 = `[B/dp, S/cp, D]`，远小于权重。
+Only activation values ​​(forward) and gradients (reverse) are transferred between processes, and the amount of data = `[B/dp, S/cp, D]`, which is much smaller than the weight.
 
-**1F1B 调度**（见第七章 §7.3）：核心思路是让每个 stage 在稳态时交替做前向和反向，最小化 GPU 空闲气泡。Picotron 直接实现了这个调度器，PP 的使用者只需提供 `forward_step` 和 `loss_fn`。
+**1F1B scheduling** (see Chapter 7 §7.3): in steady state, each stage alternates between forward and backward work to minimize GPU idle bubbles. Picotron implements this scheduler directly; PP users only need to provide `forward_step` and `loss_fn`.
 
 ---
 
-### 9.6 四种并行的正交性总结
+### 9.6 Orthogonality of the Four Parallel Dimensions
 
 ```
 ┌─────────────┬──────────────┬────────────────┬──────────────────┐
-│             │  切分什么    │  通信在哪里     │  通信频率        │
+│             │ What is split│ Where comm happens│ Comm frequency │
 ├─────────────┼──────────────┼────────────────┼──────────────────┤
-│ DP          │  Batch (B)   │  DP 组内        │  每步一次        │
-│             │              │  AllReduce ∇W   │  （反向结束后）   │
+│ DP          │  Batch (B)   │  Within DP group │  Once per step   │
+│             │              │  AllReduce ∇W   │  (after backward) │
 ├─────────────┼──────────────┼────────────────┼──────────────────┤
-│ TP          │  权重维度    │  TP 组内         │  每层两次        │
-│             │  (F, heads)  │  AllGather/RS   │  （每个矩阵乘）   │
+│ TP          │  Weight dims │  Within TP group │  Twice per layer │
+│             │  (F, heads)  │  AllGather/RS   │  (per matmul)    │
 ├─────────────┼──────────────┼────────────────┼──────────────────┤
-│ PP          │  模型层数    │  相邻 Stage 间  │  每个微批次       │
-│             │              │  点对点 Send/Recv│                 │
+│ PP          │  Model depth │ Between adjacent │  Per microbatch  │
+│             │              │  P2P Send/Recv  │                  │
 ├─────────────┼──────────────┼────────────────┼──────────────────┤
-│ CP          │  序列长度(S) │  CP 组内        │  每层 Attention  │
-│             │              │  Ring KV传递    │  一次            │
+│ CP          │  Sequence S  │  Within CP group │  Once per attn layer │
+│             │              │  Ring KV passing│                  │
 └─────────────┴──────────────┴────────────────┴──────────────────┘
 
-放置原则：
-  TP → 节点内（通信最频繁，需要 NVLink 高带宽）
-  PP → 节点间（通信量最少，InfiniBand 够用）
-  DP → 任意（AllReduce 可与反向重叠）
-  CP → 节点内优先（Ring Attention 延迟敏感）
+Placement principles:
+  TP → within node (most frequent communication, needs high-bandwidth NVLink)
+  PP → across nodes (least communication, InfiniBand is sufficient)
+  DP → anywhere (AllReduce can overlap with backward)
+  CP → prefer within node (Ring Attention is latency-sensitive)
 ```
 
 ---
 
-## 十、总结与最佳实践
+## 10. Summary and Best Practices
 
-### 10.1 并行策略选择指南
+### 10.1 Parallel Strategy Selection Guide
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│                    并行策略决策树                              │
+│                  Parallel Strategy Decision Tree             │
 ├───────────────────────────────────────────────────────────────┤
 │                                                               │
-│  模型能装入单 GPU？                                            │
+│  Does the model fit on a single GPU?                         │
 │       │                                                       │
-│       ├── 是 → 使用数据并行 (DDP)                              │
+│       ├── Yes → use data parallelism (DDP)                   │
 │       │                                                       │
-│       └── 否 → 模型参数 + 优化器 > 单 GPU 显存？                │
+│       └── No → model parameters + optimizer > single-GPU memory? │
 │                    │                                          │
-│                    ├── 是 → 使用 FSDP (ZeRO-3)                 │
+│                    ├── Yes → use FSDP (ZeRO-3)               │
 │                    │        │                                 │
-│                    │        └── 每 GPU batch size > C/W?      │
+│                    │        └── per-GPU batch size > C/W?    │
 │                    │                  │                       │
-│                    │                  ├── 是 → 纯 FSDP        │
+│                    │                  ├── Yes → pure FSDP    │
 │                    │                  │                       │
-│                    │                  └── 否 → FSDP + TP      │
+│                    │                  └── No → FSDP + TP     │
 │                    │                                          │
-│                    └── 否 → 使用张量并行 (TP)                   │
+│                    └── No → use tensor parallelism (TP)      │
 │                                                               │
-│  跨节点训练？                                                  │
+│  Multi-node training?                                        │
 │       │                                                       │
-│       └── 考虑添加流水线并行 (PP)                               │
-│           - PP 放在节点间（低带宽）                             │
-│           - TP 放在节点内（高带宽 NVLink）                      │
+│       └── Consider adding pipeline parallelism (PP)          │
+│           - Place PP across nodes (low bandwidth)            │
+│           - Place TP within nodes (high-bandwidth NVLink)    │
 │                                                               │
 └───────────────────────────────────────────────────────────────┘
 ```
 
-reference
+References
 
-**分片与通信原语**
-- Austin et al. (2025) [How to Scale Your Model](https://jax-ml.github.io/scaling-book/) — 本教程第二、三章主要参考，系统介绍分片矩阵乘法理论
-- Gibiansky (2017) [Bringing HPC Techniques to Deep Learning](https://andrew.gibiansky.com/blog/machine-learning/baidu-allreduce/) — Ring AllReduce 算法，第二章通信原语基础
+**Sharding and Communication Primitives**
+- Austin et al. (2025) [How to Scale Your Model](https://jax-ml.github.io/scaling-book/) — the main reference for Chapters 2 and 3 of this tutorial, with a systematic treatment of sharded matrix multiplication
+- Gibiansky (2017) [Bringing HPC Techniques to Deep Learning](https://andrew.gibiansky.com/blog/machine-learning/baidu-allreduce/) — the Ring AllReduce algorithm and the Chapter 2 communication-primitives background
 
-**数据并行 / FSDP**
-- Rajbhandari et al. (2020) [ZeRO: Memory Optimizations Toward Training Trillion Parameter Models](https://arxiv.org/abs/1910.02054) — ZeRO-1/2/3，第五章基础
-- Zhao et al. (2023) [PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel](https://arxiv.org/abs/2304.11277) — PyTorch FSDP 实现细节
+**Data Parallelism / FSDP**
+- Rajbhandari et al. (2020) [ZeRO: Memory Optimizations Toward Training Trillion Parameter Models](https://arxiv.org/abs/1910.02054) — ZeRO-1/2/3, foundational for Chapter 5
+- Zhao et al. (2023) [PyTorch FSDP: Experiences on Scaling Fully Sharded Data Parallel](https://arxiv.org/abs/2304.11277) — PyTorch FSDP implementation details
 
-**张量并行 / 序列并行**
-- Shoeybi et al. (2019) [Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism](https://arxiv.org/abs/1909.08053) — 列并行 + 行并行，第六章基础
-- Korthikanti et al. (2022) [Reducing Activation Recomputation in Large Transformer Models](https://arxiv.org/abs/2205.05198) — Sequence Parallel（SP）与 TP 的结合，第八½章 SP 节参考
+**Tensor Parallelism / Sequence Parallelism**
+- Shoeybi et al. (2019) [Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism](https://arxiv.org/abs/1909.08053) — column parallelism + row parallelism, foundational for Chapter 6
+- Korthikanti et al. (2022) [Reducing Activation Recomputation in Large Transformer Models](https://arxiv.org/abs/2205.05198) — Sequence Parallel (SP) combined with TP; referenced in Chapter 8½'s SP discussion
 
-**流水线并行**
-- Huang et al. (2019) [GPipe: Efficient Training of Giant Neural Networks using Pipeline Parallelism](https://arxiv.org/abs/1811.06965) — GPipe / AFAB 调度
-- Narayanan et al. (2021) [Memory-Efficient Pipeline-Parallel DNN Training](https://arxiv.org/abs/2104.04473) — 1F1B 调度，第七章参考
+**Pipeline Parallelism**
+- Huang et al. (2019) [GPipe: Efficient Training of Giant Neural Networks using Pipeline Parallelism](https://arxiv.org/abs/1811.06965) — GPipe / AFAB scheduling
+- Narayanan et al. (2021) [Memory-Efficient Pipeline-Parallel DNN Training](https://arxiv.org/abs/2104.04473) — 1F1B scheduling, referenced in Chapter 7
 
 **Context Parallel / Ring Attention**
-- Liu et al. (2023) [Ring Attention with Blockwise Transformers for Near-Infinite Context](https://arxiv.org/abs/2310.01889) — 第八½章 CP 节参考
+- Liu et al. (2023) [Ring Attention with Blockwise Transformers for Near-Infinite Context](https://arxiv.org/abs/2310.01889) — referenced in Chapter 8½'s CP discussion
 
-**Collective Matmul（通信-计算重叠）**
-- Wang et al. (2022) [Overlap Communication with Dependent Computation via Decomposition in Large Deep Learning Models](https://dl.acm.org/doi/10.1145/3567955.3567959) — 第三章 collective matmul 参考
+**Collective Matmul (Communication-Computation Overlap)**
+- Wang et al. (2022) [Overlap Communication with Dependent Computation via Decomposition in Large Deep Learning Models](https://dl.acm.org/doi/10.1145/3567955.3567959) — referenced in Chapter 3 on collective matmul
 
-### 代码实现
-- [Picotron](https://github.com/huggingface/picotron) — 本教程参考的教育用 4D 并行框架
-- [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) — NVIDIA 官方 TP/PP 实现
-- [DeepSpeed](https://github.com/microsoft/DeepSpeed) — ZeRO 系列实现
-- [PyTorch DTensor](https://pytorch.org/docs/stable/distributed.tensor.html) — PyTorch 分片张量 API（第三章代码示例）
-- [Mosaic GPU Collective Matmul](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html) — JAX Pallas collective matmul 实现
+### Code Implementations
+- [Picotron](https://github.com/huggingface/picotron) — the educational 4D parallel framework referenced throughout this tutorial
+- [Megatron-LM](https://github.com/NVIDIA/Megatron-LM) — NVIDIA official TP/PP implementation
+- [DeepSpeed](https://github.com/microsoft/DeepSpeed) — ZeRO series implementation
+- [PyTorch DTensor](https://pytorch.org/docs/stable/distributed.tensor.html) — PyTorch sharded tensor API (used in the Chapter 3 code examples)
+- [Mosaic GPU Collective Matmul](https://docs.jax.dev/en/latest/pallas/gpu/collective_matmul.html) — JAX Pallas collective matmul implementation
 
-### 在线资源
-- [How To Scale Your Model (JAX Scaling Book)](https://jax-ml.github.io/scaling-book/) — 本教程主要参考
-- [Visualizing Parallelism in Transformer](https://ailzhang.github.io/posts/distributed-compute-in-transformer/) — Ailing Zhang (Meta PyTorch)，第八½章主要参考，包含 overview / embedding / attention / mlp / moe / loss 六张 SVG 全景图
-- [Picotron Tutorial Playlist](https://www.youtube.com/playlist?list=PL-_armZiJvAnhcRr6yTJ0__f3Oi-LLi9S) — 配套视频教程
+### Online Resources
+- [How To Scale Your Model (JAX Scaling Book)](https://jax-ml.github.io/scaling-book/) — the primary reference for this tutorial
+- [Visualizing Parallelism in Transformer](https://ailzhang.github.io/posts/distributed-compute-in-transformer/) — Ailing Zhang (Meta PyTorch), the main reference for Chapter 8½, including six SVG overviews covering overview / embedding / attention / mlp / moe / loss
+- [Picotron Tutorial Playlist](https://www.youtube.com/playlist?list=PL-_armZiJvAnhcRr6yTJ0__f3Oi-LLi9S) — accompanying video tutorial
 
 ---
-

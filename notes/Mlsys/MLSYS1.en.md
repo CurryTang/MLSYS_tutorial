@@ -5,10 +5,10 @@
 ```
 project/
 ├── csrc/
-│   ├── kernels.cpp     # C++ 声明 + pybind11 绑定
-│   └── kernels.cu      # CUDA 内核实现
-├── setup.py            # 使用 setuptools 编译扩展
-└── main.py             # import 编译好的模块
+│   ├── kernels.cpp     # C++ declarations + pybind11 bindings
+│   └── kernels.cu      # CUDA kernel implementation
+├── setup.py            # Build the extension with setuptools
+└── main.py             # import the compiled module
 ```
 
 > [!tip]
@@ -25,14 +25,14 @@ When compiling a CUDA kernel using PyTorch JIT, you need to divide the code into
 ```cpp
 #include <torch/extension.h>
 
-// 函数声明
+// Function declaration
 torch::Tensor vector_add(torch::Tensor a, torch::Tensor b);
 ```
 
 **CUDA source code (cuda_sources)** - Contains kernel definitions and wrapper functions that call the kernel:
 
 ```cuda
-// 内核定义
+// Kernel definition
 __global__ void vector_add_kernel(
     const float* a, const float* b, float* c, int n
 ) {
@@ -42,7 +42,7 @@ __global__ void vector_add_kernel(
     }
 }
 
-// 包装函数（必须在 .cu 文件中，因为使用了 <<<>>> 语法）
+// Wrapper function (must be in the .cu file because it uses the <<<>>> syntax)
 torch::Tensor vector_add(torch::Tensor a, torch::Tensor b) {
     auto c = torch::empty_like(a);
     int n = a.numel();
@@ -67,14 +67,14 @@ from torch.utils.cpp_extension import load_inline
 
 module = load_inline(
     name='cuda_kernels',
-    cpp_sources=cpp_source,        # 只有声明
-    cuda_sources=full_cuda_source,  # 内核 + 包装函数
+    cpp_sources=cpp_source,        # declarations only
+    cuda_sources=full_cuda_source,  # kernel + wrapper function
     functions=['vector_add'],
     verbose=False,
     extra_cuda_cflags=['-O3', '--use_fast_math'],
 )
 
-# 使用编译好的内核
+# Use the compiled kernel
 a = torch.randn(1024, device='cuda')
 b = torch.randn(1024, device='cuda')
 c = module.vector_add(a, b)
@@ -88,12 +88,12 @@ NVIDIA GPUs use a hierarchical parallel architecture:
 
 ```
 GPU
-├── SM (Streaming Multiprocessor) × N    # 多个流式多处理器
-│   ├── CUDA Cores × M                   # 每个 SM 有多个 CUDA 核心
-│   ├── Shared Memory                    # 片上共享内存（快）
-│   ├── L1 Cache                         # 一级缓存
-│   └── Warp Scheduler                   # 线程束调度器
-└── Global Memory (HBM/GDDR)             # 全局显存（慢）
+├── SM (Streaming Multiprocessor) × N    # Multiple streaming multiprocessors
+│   ├── CUDA Cores × M                   # Each SM has multiple CUDA cores
+│   ├── Shared Memory                    # On-chip shared memory (fast)
+│   ├── L1 Cache                         # Level-1 cache
+│   └── Warp Scheduler                   # Warp scheduler
+└── Global Memory (HBM/GDDR)             # Global device memory (slow)
 ```
 
 **Key concepts**:
@@ -107,9 +107,9 @@ GPU
 CUDA organizes threads into a three-layer structure, corresponding to the hardware:
 
 ```
-Grid (网格)
-├── Block 0                    # 线程块，映射到 SM
-│   ├── Thread 0..31  (Warp 0) # 线程，映射到 CUDA Core
+Grid
+├── Block 0                    # Thread block, mapped to an SM
+│   ├── Thread 0..31  (Warp 0) # Threads, mapped to CUDA cores
 │   ├── Thread 32..63 (Warp 1)
 │   └── ...
 ├── Block 1
@@ -143,7 +143,7 @@ __global__ void vector_add_kernel(
 ```
 idx = blockIdx.x * blockDim.x + threadIdx.x
 
-例如：blocks=4, threads=256, 总共 1024 个线程
+Example: blocks=4, threads=256, for a total of 1024 threads
 Block 0: idx = 0*256 + 0..255  = 0..255
 Block 1: idx = 1*256 + 0..255  = 256..511
 Block 2: idx = 2*256 + 0..255  = 512..767
@@ -156,7 +156,7 @@ Block 3: idx = 3*256 + 0..255  = 768..1023
 
 ```cuda
 int threads = 256;
-int blocks = (n + threads - 1) / threads;  // 向上取整
+int blocks = (n + threads - 1) / threads;  // Round up
 vector_add_kernel<<<blocks, threads>>>(a, b, c, n);
 ```
 
@@ -168,7 +168,7 @@ vector_add_kernel<<<blocks, threads>>>(a, b, c, n);
 ```
 n=1000, threads=256
 blocks = (1000 + 255) / 256 = 4
-总线程数 = 4 * 256 = 1024 >= 1000 ✓
+Total threads = 4 * 256 = 1024 >= 1000 ✓
 ```
 
 ### Execution process
@@ -176,13 +176,13 @@ blocks = (1000 + 255) / 256 = 4
 ```
 CPU                          GPU
  │                            │
- ├─ 分配 GPU 内存 ────────────►│
- ├─ 拷贝数据到 GPU ───────────►│
- ├─ 启动 kernel ──────────────►├─ 调度 blocks 到 SMs
- │                            ├─ 每个 SM 执行 warps
- │                            ├─ 线程并行计算
- ├─ 等待完成 ◄────────────────┤
- ├─ 拷贝结果回 CPU ◄──────────┤
+ ├─ Allocate GPU memory ──────►│
+ ├─ Copy data to GPU ─────────►│
+ ├─ Launch kernel ────────────►├─ Schedule blocks onto SMs
+ │                            ├─ Each SM executes warps
+ │                            ├─ Threads compute in parallel
+ ├─ Wait for completion ◄─────┤
+ ├─ Copy results to CPU ◄─────┤
  │                            │
 ```
 

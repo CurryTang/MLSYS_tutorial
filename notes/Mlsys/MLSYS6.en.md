@@ -1,174 +1,174 @@
-# Memory-Bound Kernel optimization
+# Optimizing Memory-Bound Kernels
 
-This lecture inherits the three parallel primitives of Reduce, Histogram, and Scan from the previous two lectures. The common feature of these three is that the arithmetic intensity is extremely low, and they are all memory-bound kernels. For this type of kernel, the optimization goal is always to maximize effective bandwidth utilization.
+This lecture builds on the three parallel primitives from the previous two lectures: Reduce, Histogram, and Scan. What they share is extremely low arithmetic intensity, so they are all memory-bound kernels. For kernels in this category, the optimization goal is always to **maximize effective bandwidth utilization**.
 
-This lecture refines the optimization techniques used scatteredly in the previous lectures into a set of general analysis framework, so that they can be migrated to any memory-bound kernel.
+This lecture distills the optimization techniques used piecemeal in earlier lectures into a general analytical framework that can be transferred to any memory-bound kernel.
 
 ---
 
-## 1. Roofline analysis: identify performance bottlenecks
+## 1. Roofline Analysis: Identifying the Performance Bottleneck
 
-The first step in optimizing any kernel is to establish an upper bound on performance. The Roofline model gives the following relationship:
+The first step in optimizing any kernel is to establish its performance upper bound. The Roofline model gives the following relationship:
 
 $$P \le \min(\pi,\ \beta \cdot I), \quad I = \frac{\text{FLOPs}}{\text{Bytes}}$$
 
-- $\pi$: GPU peak computing power (FLOP/s)
+- $\pi$: peak GPU compute throughput (FLOP/s)
 - $\beta$: memory bandwidth (Byte/s)
-- $I$: Arithmetic intensity (FLOP/Byte)
+- $I$: arithmetic intensity (FLOP/Byte)
 - $I_{ridge} = \pi / \beta$: ridge point
 
-When $I \ll I_{ridge}$, the performance of the kernel is limited by the memory bandwidth rather than the computing power.
+When $I \ll I_{ridge}$, kernel performance is limited by memory bandwidth rather than compute throughput.
 
-> [!tip]Roofline meaning
-> Roofline transforms optimization problems into quantifiable analysis: how far the current performance is from the theoretical bound and what category the bottleneck belongs to. Without this benchmark, there is no basis for choosing the optimization direction.
+> [!tip] Why Roofline matters
+> Roofline turns optimization into a quantifiable analysis problem: how far current performance is from the theoretical upper bound, and what kind of bottleneck is responsible. Without this baseline, there is no solid basis for choosing an optimization direction.
 
-**Example**: The Reduce kernel in the previous lecture reads N floats (4N bytes), performs N-1 additions, $I \approx 0.25$ FLOP/Byte. A100's $I_{ridge} > 100$, which is two orders of magnitude different, is typical memory-bound.
+**Example**: The Reduce kernel from the previous lecture reads N floats (4N bytes) and performs N-1 additions, so $I \approx 0.25$ FLOP/Byte. On an A100, $I_{ridge} > 100$, a gap of more than two orders of magnitude, making it a textbook memory-bound kernel.
 
 ---
 
-## 2. Five core principles of Memory-Bound optimization
+## 2. Five Core Principles for Memory-Bound Optimization
 
-After summarizing the optimization experience of various kernels such as transpose, stencil, SpMV, histogram, and compaction, the following five general principles can be extracted:
+Summarizing optimization experience across kernels such as transpose, stencil, SpMV, histogram, and compaction, we can extract the following five general principles:
 
 ### Principle A: Byte Accounting
 
-Before optimization, it is necessary to accurately calculate the total memory traffic of the kernel. This step determines whether subsequent optimization targets the real bottleneck.
+Before optimizing, you need an accurate estimate of the kernel's total memory traffic. This step determines whether subsequent optimization work is actually targeting the real bottleneck.
 
-Calculation rules: **Add the number of bytes of all read and write operations**. The essence of the atomic operation is read-modify-write, and its memory traffic needs to be calculated as 2-3 times.
+Rule of thumb: **sum the bytes of all read and write operations**, and remember that an atomic operation is fundamentally a read-modify-write, so its memory traffic should be counted as 2-3x.
 
-> [!note]Common misunderstandings
-> Halving FLOPs without reducing memory accesses does not improve the kernel's execution time. What's worse is that the introduction of additional intermediate arrays to reduce calculations actually increases memory traffic and leads to performance degradation.
+> [!note] A common pitfall
+> Cutting FLOPs in half without reducing memory accesses does not improve kernel runtime at all. Worse, reducing computation by introducing extra intermediate arrays can increase memory traffic and actually hurt performance.
 
-**Example: Byte ledger for vector addition**
+**Example: Byte accounting for vector addition**
 ```
-// C[i] = A[i] + B[i]，N 个 float
-// 读：A (4N bytes) + B (4N bytes) = 8N bytes
-// 写：C (4N bytes)
-// 总内存流量 = 12N bytes
-// 峰值带宽 900 GB/s → 理论下界 = 12N / 900G 秒
+// C[i] = A[i] + B[i], N floats
+// Read: A (4N bytes) + B (4N bytes) = 8N bytes
+// Write: C (4N bytes)
+// Total memory traffic = 12N bytes
+// Peak bandwidth 900 GB/s -> theoretical lower bound = 12N / 900G seconds
 ```
 
-**Example: Histogram’s byte ledger (easy to miscalculate)**
+**Example: Byte accounting for Histogram (easy to miscalculate)**
 ```
-// 输入：N 个 int（读 4N bytes）
-// 输出：bins[] 使用 atomicAdd
-// atomic = read + modify + write → 每次 ≈ 3×4 = 12 bytes
-// 总流量 = 4N + 12N = 16N bytes（而非天真以为的 4N + 4N）
+// Input: N ints (read 4N bytes)
+// Output: bins[] uses atomicAdd
+// atomic = read + modify + write -> each update is about 3x4 = 12 bytes
+// Total traffic = 4N + 12N = 16N bytes (not the naive 4N + 4N)
 ```
 
 ---
 
 ### Principle B: Coalescing
 
-The ideal memory access form: **32 threads of a warp access continuous 128 bytes** (take float as an example).
+The ideal memory access pattern is: **the 32 threads in a warp access a contiguous 128-byte segment** (for `float`, for example).
 
-Specific requirements:
-- Lanes within the warp are mapped to consecutive memory addresses
-- The overall access pattern is as close to sequential streaming as possible
+More concretely:
+- lanes within a warp should map to consecutive memory addresses
+- the overall access pattern should be as close to sequential streaming as possible
 
-Merging memory fetches is a prerequisite for all other optimizations. If coalescing is not met, the upper limit of effective bandwidth will be slashed.
+Coalescing is the prerequisite for all other optimizations. If coalescing is not satisfied, the upper limit of effective bandwidth drops dramatically.
 
-**Example: coalescing problem in matrix transpose**
+**Example: The coalescing issue in matrix transpose**
 ```
-// 反面：按列读取，warp 内线程访问步长为 N
-out[j][i] = in[i][j]   // in 按行读（coalesced）✓
-                        // out 按列写（strided）✗ → 带宽利用率骤降
+// Bad case: read by column, warp threads access with stride N
+out[j][i] = in[i][j]   // in read by row (coalesced) ✓
+                        // out written by column (strided) ✗ -> bandwidth utilization drops sharply
 
-// 正面：借助 shared memory 中转
-tile[threadIdx.y][threadIdx.x] = in[row][col]   // coalesced 读
+// Good case: use shared memory as a staging buffer
+tile[threadIdx.y][threadIdx.x] = in[row][col]   // coalesced read
 __syncthreads()
-out[col][row] = tile[threadIdx.x][threadIdx.y]   // coalesced 写
+out[col][row] = tile[threadIdx.x][threadIdx.y]   // coalesced write
 ```
 
 **Example: AoS vs SoA**
 ```
-// AoS（Array of Structs）— warp 读 x 时跨步为 sizeof(Point)
+// AoS (Array of Structs) — when a warp reads x, the stride is sizeof(Point)
 struct Point { float x, y, z; };
 Point pts[N];            // pts[tid].x → stride=12 bytes ✗
 
-// SoA（Struct of Arrays）— warp 读 x 时连续
+// SoA (Struct of Arrays) — when a warp reads x, accesses are contiguous
 float px[N], py[N], pz[N];
-px[tid]                  // stride=4 bytes，完美 coalesced ✓
+px[tid]                  // stride=4 bytes, perfectly coalesced ✓
 ```
 
 ---
 
-### Principle C: Explicit reuse (Tiling)
+### Principle C: Explicit Reuse (Tiling)
 
-When the kernel has a neighborhood or data reuse structure (such as stencil, convolution, partially sparse local operator):
+When a kernel has neighborhood structure or data reuse (such as stencil, convolution, or some sparse local operators):
 
-- Should not rely on implicit hits from hardware L1/L2 cache
-- Reuse should be converted into deterministic behavior through tiling (shared memory or register)
+- do not rely on implicit hits in the hardware L1/L2 cache
+- use tiling (shared memory or registers) to turn reuse into deterministic behavior
 
-Core idea: **Load data from HBM to SRAM and reuse it multiple times to avoid repeated HBM access**.
+The core idea is: **load data from HBM into SRAM and reuse it multiple times to avoid repeated HBM accesses**.
 
-> [!info]What is Stencil?
-> Stencil (template calculation) is a common calculation mode: each output element is obtained by the weighted sum of itself and the input elements in a fixed neighborhood. A 1D stencil of radius R means that `out[i]` depends on `in[i-R] ... in[i+R]` for a total of 2R+1 elements. Typical applications include finite differences (CFD/PDE solving), image blurring/sharpening (2D stencil), audio filtering, etc. Since the input windows of adjacent output points highly overlap, stencil is a classic scenario for tiling optimization.
+> [!info] What is a Stencil?
+> A stencil is a common computational pattern in which each output element is computed as a weighted sum of **the input element itself and input elements in a fixed neighborhood**. A 1D stencil with radius R means that `out[i]` depends on `in[i-R] ... in[i+R]`, for a total of 2R+1 elements. Typical applications include finite differences (CFD/PDE solvers), image blur/sharpening (2D stencil), audio filtering, and more. Because the input windows of neighboring output points overlap heavily, stencil is a classic use case for tiling.
 
-**Example: 1D Stencil — no tiling vs with tiling**
+**Example: 1D stencil — without tiling vs with tiling**
 ```
-// 无 tiling：每个输出点从 HBM 读 2R+1 个邻居
-// 相邻线程的读取大量重叠 → 依赖 cache 命中，不可控
+// Without tiling: each output point reads 2R+1 neighbors from HBM
+// Neighboring threads have heavily overlapping reads -> depends on cache hits, not controllable
 out[i] = Σ w[k] * in[i-R+k],  k=0..2R
 
-// 有 tiling：block 协作加载一段 tile（含 halo）到 shared memory
+// With tiling: the block cooperatively loads a tile segment (including halo) into shared memory
 __shared__ float tile[BLOCK + 2*R];
 tile[threadIdx.x + R] = in[blockStart + threadIdx.x];
-if (threadIdx.x < R) {               // 加载左右 halo
+if (threadIdx.x < R) {               // load left and right halo
     tile[threadIdx.x] = in[blockStart - R + threadIdx.x];
     tile[BLOCK + R + threadIdx.x] = in[blockStart + BLOCK + threadIdx.x];
 }
 __syncthreads();
-out[i] = Σ w[k] * tile[threadIdx.x + k];  // 全部命中 SRAM
+out[i] = Σ w[k] * tile[threadIdx.x + k];  // all hits come from SRAM
 ```
 
 ---
 
-### Principle D: Reduce synchronization and contention (Sync/Contention)
+### Principle D: Reduce Synchronization and Contention (Sync/Contention)
 
-The performance bottleneck of Memory-bound kernel is often not the bandwidth itself, but rather:
-- `__syncthreads()` is called too frequently, converting pipeline throughput into serial waits
-- Atomic operation competition (histogram, scatter), degenerating parallel writing into serial writing
+For memory-bound kernels, the performance bottleneck is often not the bandwidth itself, but rather:
+- overly frequent `__syncthreads()` calls, which turn pipeline throughput into serialized waiting
+- contention on atomic operations (histogram, scatter), which degrades parallel writes into serialized writes
 
-The "hierarchical privatization" in the Histogram in the previous lecture is a typical application of this principle: gradually reducing the competition scope from global to block and then to warp, thereby reducing the contention overhead.
+The "hierarchical privatization" strategy in the previous Histogram lecture is a canonical application of this principle: reduce the scope of contention progressively from global to block to warp, thereby lowering contention overhead.
 
-**Example: Histogram Hierarchical Privatization**
+**Example: Hierarchical privatization for Histogram**
 ```
-// 级别 1 — 全局 atomic（最大争用）
-atomicAdd(&global_bins[val], 1);           // 所有线程竞争同一组 bins
+// Level 1 — global atomic (maximum contention)
+atomicAdd(&global_bins[val], 1);           // all threads contend for the same set of bins
 
-// 级别 2 — block 私有 bins → 最后归约
-__shared__ int local_bins[NUM_BINS];       // 每个 block 一份
-atomicAdd(&local_bins[val], 1);            // 争用缩小到 block 内
+// Level 2 — block-private bins -> final reduction
+__shared__ int local_bins[NUM_BINS];       // one copy per block
+atomicAdd(&local_bins[val], 1);            // contention shrinks to within the block
 __syncthreads();
-atomicAdd(&global_bins[tid], local_bins[tid]);  // 一次性归约
+atomicAdd(&global_bins[tid], local_bins[tid]);  // one-shot reduction
 
-// 级别 3 — warp 私有 bins（寄存器/shared memory 分区）
-// 争用进一步缩小到 32 个线程内，几乎无冲突
+// Level 3 — warp-private bins (registers/shared-memory partitioning)
+// contention shrinks further to within 32 threads, with almost no conflicts
 ```
 
 ---
 
 ### Principle E: Latency Hiding
 
-When high latency of memory access cannot be avoided (such as random access of SpMV), the latency can be hidden by:
-- **Improve occupancy**: Increase the number of warps resident at the same time so that more warps can be scheduled for execution during memory waiting
-- **Increase ILP (Instruction Level Parallelism)**: Through unroll and one-thread multi-element strategy, a single thread can initiate more load requests at the same time
+When high memory latency is unavoidable (for example, the random accesses in SpMV), latency can be hidden in the following ways:
+- **increase occupancy**: raise the number of resident warps so that more warps can be scheduled while others are waiting on memory
+- **increase ILP (instruction-level parallelism)**: use unrolling and multiple-elements-per-thread strategies so that each thread can issue more load requests concurrently
 
-Grid-stride loops are a common engineering means of implementing this principle.
+The grid-stride loop is a general engineering pattern for realizing this principle.
 
-**Example: Grid-stride loop + ILP unroll**
+**Example: Grid-stride loop + ILP unrolling**
 ```
-// 基础版：每线程处理一个元素，occupancy 是唯一延迟隐藏手段
+// Basic version: each thread handles one element; occupancy is the only latency-hiding mechanism
 for (int i = tid; i < N; i += gridDim.x * blockDim.x)
     out[i] = f(in[i]);
 
-// ILP 版：每线程同时发起多个 load，隐藏内存延迟
+// ILP version: each thread issues multiple loads at once to hide memory latency
 for (int i = tid; i < N; i += stride * 4) {
     float a = in[i];
     float b = in[i + stride];
     float c = in[i + stride*2];
-    float d = in[i + stride*3];    // 4 个 load 同时 in-flight
+    float d = in[i + stride*3];    // 4 loads in flight at the same time
     out[i]            = f(a);
     out[i + stride]   = f(b);
     out[i + stride*2] = f(c);
@@ -178,30 +178,30 @@ for (int i = tid; i < N; i += stride * 4) {
 
 ---
 
-## 3. Pattern Library: Six types of Memory-Bound Kernel
+## 3. Pattern Library: Six Classes of Memory-Bound Kernels
 
-The following summarizes memory-bound kernels into six categories according to memory access modes. When faced with a new kernel, first determine its category, and then optimize it according to the corresponding principles.
+Below, memory-bound kernels are grouped into six categories based on their memory access patterns. When facing a new kernel, first determine which category it belongs to, then combine the corresponding principles for optimization.
 
 ---
 
-### Pattern 1: Streaming (linear reading and writing)
+### Pattern 1: Streaming (Linear Read/Write)
 
-**Typical scenario**: `out[i] = f(in[i])`, elementwise map, vector addition
+**Typical scenarios**: `out[i] = f(in[i])`, elementwise map, vector addition
 
-**Memory access features**: read input sequentially, write output sequentially, no data reuse.
+**Memory access characteristics**: input is read sequentially, output is written sequentially, and there is no data reuse.
 
-**Applicable principles**: B (coalescing) + E (delay hiding)
+**Applicable principles**: B (coalescing) + E (latency hiding)
 
-**Optimization methods**: vectorized load/store (float4), memory alignment, grid-stride loop, loop expansion
+**Optimization techniques**: vectorized load/store (`float4`), memory alignment, grid-stride loop, loop unrolling
 
 ```cpp
 // Vectorized elementwise kernel
-// 使用 float4 进行向量化加载和存储，每次内存事务搬运 16 字节
+// Use float4 for vectorized loads and stores; each memory transaction moves 16 bytes
 __global__ void vector_add_v4(
     const float4* __restrict__ a,
     const float4* __restrict__ b,
     float4* __restrict__ c,
-    int n4  // n / 4，即 float4 元素个数
+    int n4  // n / 4, i.e. the number of float4 elements
 ) {
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int stride = blockDim.x * gridDim.x;
@@ -218,51 +218,51 @@ __global__ void vector_add_v4(
     }
 }
 
-//// float4 的定义（大致）
+//// Approximate definition of float4
 // struct float4 {
 //    float x, y, z, w;
 //};
 
-// 启动配置
-// n 为 float 元素总数，需为 4 的倍数（否则需额外处理尾部）
+// Launch configuration
+// n is the total number of float elements and must be a multiple of 4 (otherwise the tail needs extra handling)
 // vector_add_v4<<<(n/4 + 255) / 256, 256>>>(a4, b4, c4, n/4);
 ```
 
-> [!note]Optimization principle of float4
-> After using float4, each load/store instruction moves 16 bytes instead of 4 bytes. This reduces the total number of load/store instructions required, allowing the compiler to more efficiently schedule the instruction pipeline and improve instruction-level parallelism (ILP). When 32 threads of a warp execute float4 load at the same time, four 128B memory transactions are generated, and a total of 512 bytes are transferred.
+> [!note] Why `float4` helps
+> After switching to `float4`, each load/store instruction moves 16 bytes instead of 4. This reduces the total number of load/store instructions required, allowing the compiler to schedule the instruction pipeline more effectively and improve ILP. When the 32 threads in a warp execute `float4` loads simultaneously, they generate 4 memory transactions of 128B each, transferring 512 bytes in total.
 
 ---
 
-### Pattern 2: Reorder/Permutation (reorder class)
+### Pattern 2: Reorder / Permutation
 
-**Typical Scenario**: Matrix Transpose
+**Typical scenario**: Matrix Transpose
 
-**Core Contradiction**: The reading direction is orthogonal to the writing direction. If the read is coalesced, the write must be strided, and vice versa.
+**Core conflict**: the read direction and write direction are orthogonal. If the reads are coalesced, the writes are necessarily strided, and vice versa.
 
-**Solution**: Use shared memory as intermediate buffer. When reading, coalesce is loaded into shared memory in the row direction, and when writing, coalesce is written out from shared memory in the column direction.
+**Solution**: use shared memory as an intermediate buffer. Read along the row direction and coalesce into shared memory, then write from shared memory along the column direction with coalescing.
 
-**Applicable principles**: B (coalesce is required on both reading and writing ends) + C (shared memory is used as a rearrangement cache) + D (avoiding bank conflict)
+**Applicable principles**: B (both reads and writes must be coalesced) + C (shared memory as a reordering buffer) + D (avoid bank conflicts)
 
 ```cpp
-// Shared memory tiled 矩阵转置
-// 输入 [M x N]，输出 [N x M]
+// Shared-memory-tiled matrix transpose
+// Input [M x N], output [N x M]
 #define TILE_DIM 32
-#define BLOCK_ROWS 8  // block 尺寸: TILE_DIM x BLOCK_ROWS
-                      // 每个 block 处理 TILE_DIM x TILE_DIM 的 tile
+#define BLOCK_ROWS 8  // block dimensions: TILE_DIM x BLOCK_ROWS
+                      // each block processes a TILE_DIM x TILE_DIM tile
 
 __global__ void transpose_optimized(
     const float* __restrict__ input,
     float* __restrict__ output,
     int M, int N
 ) {
-    // 列数 +1 作为 padding，消除 bank conflict（详见下方说明）
+    // Columns +1 as padding to eliminate bank conflicts (see explanation below)
     __shared__ float tile[TILE_DIM][TILE_DIM + 1];
 
     int x = blockIdx.x * TILE_DIM + threadIdx.x;
     int y = blockIdx.y * TILE_DIM + threadIdx.y;
 
-    // Step 1: 按行方向从 global memory 加载到 shared memory（coalesced read）
-    // 每个线程负责加载 TILE_DIM / BLOCK_ROWS = 4 行
+    // Step 1: load from global memory into shared memory along rows (coalesced read)
+    // Each thread is responsible for loading TILE_DIM / BLOCK_ROWS = 4 rows
     for (int j = 0; j < TILE_DIM; j += BLOCK_ROWS) {
         if (x < N && (y + j) < M) {
             tile[threadIdx.y + j][threadIdx.x] = input[(y + j) * N + x];
@@ -271,7 +271,7 @@ __global__ void transpose_optimized(
 
     __syncthreads();
 
-    // Step 2: 坐标互换后，按行方向从 shared memory 写入 global memory（coalesced write）
+    // Step 2: after swapping coordinates, write from shared memory to global memory along rows (coalesced write)
     x = blockIdx.y * TILE_DIM + threadIdx.x;
     y = blockIdx.x * TILE_DIM + threadIdx.y;
 
@@ -282,35 +282,35 @@ __global__ void transpose_optimized(
     }
 }
 
-// 启动配置
+// Launch configuration
 // dim3 grid((N + TILE_DIM - 1) / TILE_DIM, (M + TILE_DIM - 1) / TILE_DIM);
 // dim3 block(TILE_DIM, BLOCK_ROWS);
 // transpose_optimized<<<grid, block>>>(input, output, M, N);
 ```
 
-> [!important]Padding eliminates bank conflict
-> Shared memory consists of 32 banks, each bank is 4 bytes wide. If the number of columns of a tile is exactly 32, all elements of the same column will be mapped to the same bank, resulting in a 32-way bank conflict when accessing in the column direction. After setting the number of columns to `TILE_DIM + 1 = 33`, elements at the same column position in adjacent rows are staggered by one bank, thereby eliminating conflicts. This technique is widely used in kernels involving shared memory column accesses.
+> [!important] Padding to eliminate bank conflicts
+> Shared memory consists of 32 banks, each 4 bytes wide. If the tile has exactly 32 columns, then all elements in the same column map to the same bank, causing a 32-way bank conflict during column-wise accesses. By setting the number of columns to `TILE_DIM + 1 = 33`, elements at the same column position in adjacent rows are shifted by one bank, eliminating the conflict. This trick is widely used in kernels that perform column-wise accesses in shared memory.
 
 ---
 
-### Pattern 3: Stencil / Neighborhood (neighborhood reuse class)
+### Pattern 3: Stencil / Neighborhood
 
-**Typical scenarios**: 1D/2D stencil, image convolution, image processing filter
+**Typical scenarios**: 1D/2D stencil, image convolution, image-processing filters
 
-**Core Feature**: Each input element is multiplexed by multiple adjacent output points. Taking the 1D 3-point stencil as an example, each input element is read once by the three output points of the left, middle and right.
+**Core characteristic**: each input element is reused by multiple neighboring output points. For a 1D 3-point stencil, for example, each input element is read once by the left, center, and right output points.
 
-**Applicable principles**: C (tile + halo achieves deterministic reuse) + B (halo maintains coalescing when loaded)
+**Applicable principles**: C (tile + halo for deterministic reuse) + B (keep halo loading coalesced)
 
 ```cpp
 // 1D Stencil: out[i] = c0*in[i-R] + c1*in[i-R+1] + ... + c2R*in[i+R]
-// R = stencil 半径，本例取 R = 4（9-point stencil）
+// R = stencil radius; this example uses R = 4 (9-point stencil)
 
 #define RADIUS 4
 #define BLOCK_SIZE 256
-// 每个 block 计算 BLOCK_SIZE 个输出点
-// 需加载 BLOCK_SIZE + 2*RADIUS 个输入点（含两端 halo 区域）
+// Each block computes BLOCK_SIZE output points
+// It needs to load BLOCK_SIZE + 2*RADIUS input points (including halo regions on both sides)
 
-__constant__ float coeff[2 * RADIUS + 1];  // stencil 系数存入 constant memory
+__constant__ float coeff[2 * RADIUS + 1];  // stencil coefficients stored in constant memory
 
 __global__ void stencil_1d(
     const float* __restrict__ input,
@@ -320,18 +320,18 @@ __global__ void stencil_1d(
     __shared__ float smem[BLOCK_SIZE + 2 * RADIUS];
 
     int gidx = blockIdx.x * BLOCK_SIZE + threadIdx.x;
-    int lidx = threadIdx.x + RADIUS;  // shared memory 内的偏移索引
+    int lidx = threadIdx.x + RADIUS;  // offset index inside shared memory
 
-    // Step 1: 加载中间区域
+    // Step 1: load the center region
     smem[lidx] = (gidx < n) ? input[gidx] : 0.0f;
 
-    // Step 2: 加载左侧 halo（前 RADIUS 个线程负责）
+    // Step 2: load the left halo (handled by the first RADIUS threads)
     if (threadIdx.x < RADIUS) {
         int halo_idx = gidx - RADIUS;
         smem[threadIdx.x] = (halo_idx >= 0) ? input[halo_idx] : 0.0f;
     }
 
-    // Step 3: 加载右侧 halo（后 RADIUS 个线程负责）
+    // Step 3: load the right halo (handled by the last RADIUS threads)
     if (threadIdx.x >= BLOCK_SIZE - RADIUS) {
         int halo_idx = gidx + RADIUS;
         smem[lidx + RADIUS] = (halo_idx < n) ? input[halo_idx] : 0.0f;
@@ -339,7 +339,7 @@ __global__ void stencil_1d(
 
     __syncthreads();
 
-    // Step 4: 从 shared memory 计算 stencil，无 global memory 访问
+    // Step 4: compute the stencil from shared memory, with no global memory access
     if (gidx < n) {
         float result = 0.0f;
         #pragma unroll
@@ -353,80 +353,80 @@ __global__ void stencil_1d(
 
 **Memory traffic comparison**:
 
-| Version | Global Memory Read Volume | Description |
+| Version | Global memory read volume | Explanation |
 |------|---------------------|------|
 | Naive (no shared memory) | $N \times (2R+1)$ | Each output point reads $2R+1$ inputs from HBM |
-| Tiled (using shared memory) | $N + 2R \times \text{num\_blocks}$ | Each input element is basically loaded from HBM only once |
+| Tiled (using shared memory) | $N + 2R \times \text{num\_blocks}$ | Each input element is essentially loaded from HBM only once |
 
-When the stencil radius $R$ is larger, the degree of data reuse is higher and the benefits of tiling are more significant.
+When the stencil radius $R$ becomes larger, data reuse increases and the benefit of tiling becomes more significant.
 
 ---
 
-### Pattern 4: Indirection / Gather (irregular reading side)
+### Pattern 4: Indirection / Gather (Irregular Reads)
 
-**Typical scenario**: CSR format SpMV, gather, embedding lookup
+**Typical scenarios**: CSR-format SpMV, gather, embedding lookup
 
-**Core difficulty**: Indirect addressing `x[col_idx[j]]` causes the access address to depend on the data content, making it difficult to achieve ideal coalescing.
+**Core difficulty**: indirect indexing `x[col_idx[j]]` makes access addresses depend on the data itself, making ideal coalescing hard to achieve.
 
-**Applicable principles**: A (Incorporate the byte overhead of index into the calculation) + E (Hide latency through warp-level mapping)
+**Applicable principles**: A (include index bytes in the accounting) + E (hide latency through warp-level mapping)
 
 Sparse matrix-vector multiplication (SpMV)
 
 ```
-CSR (Compressed Sparse Row) 用三个数组存储稀疏矩阵:
+CSR (Compressed Sparse Row) stores a sparse matrix using three arrays:
 ═══════════════════════════════════════════════════════════════════════════════
 
-1. values[nnz]:   所有非零值，按行存储
-2. col_idx[nnz]:  每个非零值对应的列号
-3. row_ptr[M+1]:  每行在 values/col_idx 中的起始位置
+1. values[nnz]:   all nonzero values, stored row by row
+2. col_idx[nnz]:  the column index corresponding to each nonzero value
+3. row_ptr[M+1]:  the starting position of each row in values/col_idx
 
-对于上面的矩阵:
+For the matrix above:
 
 values[]:   [ 1,  2,  3,  4,  5,  6,  7,  8,  9, 10]
              ↑       ↑   ↑   ↑   ↑           ↑   ↑
             row0    row0 row1 row1 row2      row2 row3
 
 col_idx[]:  [ 0,  2,  4,  1,  5,  0,  1,  2,  3,  5]
-             对应每个非零元素的列号
+             column index for each nonzero element
 
 row_ptr[]:  [ 0,  3,  5,  9, 10]
               ↑   ↑   ↑   ↑   ↑
-             row0 row1 row2 row3 结束
-             起始 起始 起始 起始
+             row0 row1 row2 row3 end
+             start start start start
 
-row_ptr[i] 到 row_ptr[i+1] 之间的索引就是第 i 行的非零元素
+The indices between row_ptr[i] and row_ptr[i+1] are the nonzero elements of row i
 ```
 
 
 warp-per-row strategy
 ```
-核心思想: 一个 Warp (32个线程) 协作处理矩阵的一行
+Core idea: one warp (32 threads) cooperatively processes one matrix row
 ═══════════════════════════════════════════════════════════════════════════════
 
-为什么不用 Thread-per-Row？
+Why not use Thread-per-Row?
 ─────────────────────────────
-如果一行有很多非零元素（比如 1000 个），单线程串行处理太慢
+If a row has many nonzero elements (for example, 1000), serial processing by a single thread is too slow
 
-Warp-per-Row 的优势:
+Advantages of Warp-per-Row:
 ─────────────────────────────
-1. 32 个线程并行处理一行的非零元素
-2. 访问 values[] 和 col_idx[] 时地址连续 → Coalesced Access
-3. 使用 Warp Shuffle 归约，不需要 Shared Memory
+1. 32 threads process a row's nonzero elements in parallel
+2. Accesses to values[] and col_idx[] are contiguous -> Coalesced Access
+3. Uses Warp Shuffle for reduction, with no Shared Memory needed
 ```
 
 ```cpp
-// CSR 格式 SpMV: y = A * x
-// CSR 存储: row_ptr[M+1], col_idx[nnz], values[nnz]
+// CSR-format SpMV: y = A * x
+// CSR storage: row_ptr[M+1], col_idx[nnz], values[nnz]
 //
-// 映射策略:
-//   行长度较均匀: thread-per-row
-//   行长度差异大: warp-per-row（本例采用此策略）
+// Mapping strategy:
+//   Row lengths are fairly uniform: thread-per-row
+//   Row lengths vary widely: warp-per-row (this example uses this strategy)
 
-// Warp-per-row: 每个 warp（32 线程）处理矩阵的一行
-// 优势:
-//   1. warp 内线程访问连续的 col_idx 和 values（coalesced）
-//   2. 使用 warp shuffle 归约，无需 shared memory 或 atomic
-//   3. 32 个线程同时发起 load，有效隐藏延迟
+// Warp-per-row: each warp (32 threads) processes one matrix row
+// Advantages:
+//   1. Threads within a warp access consecutive col_idx and values entries (coalesced)
+//   2. Uses warp shuffle for reduction, with no shared memory or atomic needed
+//   3. 32 threads issue loads simultaneously, effectively hiding latency
 __global__ void spmv_csr_warp_per_row(
     const int* __restrict__ row_ptr,
     const int* __restrict__ col_idx,
@@ -445,14 +445,14 @@ __global__ void spmv_csr_warp_per_row(
 
     float sum = 0.0f;
 
-    // warp 内 32 个线程以 stride 32 遍历该行的非零元素
+    // The 32 threads in the warp iterate over this row's nonzeros with stride 32
     for (int j = row_start + lane; j < row_end; j += 32) {
-        // col_idx[j], values[j]: 连续访问，coalesced
-        // x[col_idx[j]]: 随机访问，依赖 L2 cache 和延迟隐藏
+        // col_idx[j], values[j]: contiguous accesses, coalesced
+        // x[col_idx[j]]: random access, relies on L2 cache and latency hiding
         sum += values[j] * x[col_idx[j]];
     }
 
-    // Warp-level 归约（warp shuffle），无需 shared memory 或 barrier
+    // Warp-level reduction (warp shuffle), no shared memory or barrier needed
     for (int offset = 16; offset > 0; offset >>= 1) {
         sum += __shfl_down_sync(0xffffffff, sum, offset);
     }
@@ -462,85 +462,85 @@ __global__ void spmv_csr_warp_per_row(
     }
 }
 
-// 启动配置
-// int threads_per_block = 256;  // 每个 block 包含 8 个 warp
+// Launch configuration
+// int threads_per_block = 256;  // each block contains 8 warps
 // int num_blocks = (num_rows * 32 + threads_per_block - 1) / threads_per_block;
 // spmv_csr_warp_per_row<<<num_blocks, threads_per_block>>>(...);
 ```
 
-If you need all lanes to get the results, you can use __shfl_sync to broadcast, or use __shfl_xor_sync to do butterfly reduction. But here you only need to write a y[warp_id], so it is enough that Lane 0 has the result.
+If all lanes need the result, you can broadcast with `__shfl_sync`, or use `__shfl_xor_sync` for a butterfly reduction. But here we only need to write a single `y[warp_id]`, so it is enough for lane 0 alone to hold the result.
 
-> [!note]Bandwidth upper bound for sparse kernels
-> For sparse kernels, the actual achievable bandwidth upper limit is often lower than the theoretical peak value of HBM. The access pattern of `x[col_idx[j]]` is determined by the sparse structure of the matrix and cannot be fully controlled at the kernel level. The optimization direction therefore turns to "reduce the randomness of access", such as reordering matrix columns to improve the access locality of vector x.
-
----
-
-### Pattern 5: Scatter / Atomic (write-side irregularity + contention)
-
-**Typical scenarios**: histogram, scatter-add, partial graph algorithm
-
-**Core Difficulty**: The write address depends on the data content, and hot targets (such as high-frequency bins) cause atomic operations to be severely serialized.
-
-**Applicable principles**: D (hierarchical privatization)
-
-The optimization method of this type of kernel has been demonstrated in detail in the three versions of Histogram in the previous lecture. The core strategy is as follows:
-
-```
-Level 0: Global atomic — 所有线程竞争全局内存
-  ↓ 私有化
-Level 1: Block 级 shared memory atomic — 竞争范围缩小至 256 线程
-  ↓ 进一步私有化
-Level 2: Warp 级 / 寄存器本地累积 — 竞争缩小至 32 线程或完全消除
-  ↓ 最终归约
-写回 global memory — atomic 调用次数从 N 降至 num_bins × num_blocks
-```
+> [!note] The bandwidth ceiling for sparse kernels
+> For sparse kernels, the achievable bandwidth ceiling is often lower than the theoretical HBM peak. The access pattern of `x[col_idx[j]]` is determined by the sparsity structure of the matrix and cannot be fully controlled at the kernel level. As a result, the optimization goal shifts toward "reducing randomness in accesses," for example by reordering matrix columns to improve locality when accessing vector `x`.
 
 ---
 
-### Pattern 6: Filter / Compaction (conditional filtering class)
+### Pattern 5: Scatter / Atomic (Irregular Writes + Contention)
 
-**Typical scenarios**: stream compaction, zero removal operation, predicate filter
+**Typical scenarios**: histogram, scatter-add, some graph algorithms
+
+**Core difficulty**: the write address depends on the data values, and hot destinations (such as high-frequency bins) cause severe serialization of atomic operations.
+
+**Applicable principle**: D (hierarchical privatization)
+
+The optimization method for this class of kernels was already presented in detail in the three Histogram versions from the previous lecture. The core strategy is as follows:
+
+```
+Level 0: Global atomic — all threads contend for global memory
+  ↓ Privatize
+Level 1: Block-level shared memory atomic — contention shrinks to 256 threads
+  ↓ Further privatize
+Level 2: Warp-level / register-local accumulation — contention shrinks to 32 threads or is fully eliminated
+  ↓ Final reduction
+Write back to global memory — the number of atomic calls drops from N to num_bins × num_blocks
+```
+
+---
+
+### Pattern 6: Filter / Compaction (Conditional Filtering)
+
+**Typical scenarios**: stream compaction, remove-zero, predicate filter
 
 #### What is Stream Compaction?
 
-**Filter out elements that meet the conditions from the array and store them compactly**
+**Filter out elements that satisfy a condition and store them compactly**
 
 ```
-输入:  [ 3, -1, 4, 0, -2, 5, 0, 1 ]
-条件:  元素 > 0
-输出:  [ 3, 4, 5, 1 ]
+Input:      [ 3, -1, 4, 0, -2, 5, 0, 1 ]
+Condition:  element > 0
+Output:     [ 3, 4, 5, 1 ]
 ```
 
-#### Why is it difficult to parallelize?
+#### Why is it hard to parallelize?
 
-Each thread does not know its own output location - **solve with Exclusive Prefix Sum**:
+Each thread does not know its own output position — **solve it with an Exclusive Prefix Sum**:
 
 ```
-flag:   [ 1,  0,  1,  0,  0,  1,  0,  1 ]   ← 标记满足条件的
+flag:   [ 1,  0,  1,  0,  0,  1,  0,  1 ]   ← mark elements satisfying the condition
 scan:   [ 0,  1,  1,  2,  2,  2,  3,  3 ]   ← exclusive scan
 
-scan[i] = "在我之前有几个满足条件的" = 我的输出位置
+scan[i] = "how many satisfied the condition before me" = my output position
 ```
 
-#### Three-step process
+#### Three-step workflow
 
-| Steps | What to do | Code |
+| Step | What it does | Code |
 |-----|-------|------|
-| **Flag** | Mark elements that meet the condition | `flag = (val > 0) ? 1 : 0` |
+| **Flag** | Mark elements that satisfy the condition | `flag = (val > 0) ? 1 : 0` |
 | **Scan** | Exclusive prefix sum (Blelloch algorithm) | Up-sweep + Down-sweep |
 | **Scatter** | Write to the correct position | `output[offset + scan[tid]] = val` |
 
 
 ```cpp
-// Stream Compaction: 筛选 input 中 > 0 的元素，紧凑写入 output
-// Fused 实现: 在单个 kernel 内完成 flag、block-level scan、scatter
+// Stream Compaction: filter elements > 0 from input and write them compactly into output
+// Fused implementation: complete flag, block-level scan, and scatter inside a single kernel
 
 #define BLOCK_SIZE 256
 
 __global__ void stream_compaction(
     const int* __restrict__ input,
     int* __restrict__ output,
-    int* __restrict__ output_count,  // 输出的元素总数
+    int* __restrict__ output_count,  // total number of output elements
     int n
 ) {
     __shared__ int scan[BLOCK_SIZE];
@@ -549,7 +549,7 @@ __global__ void stream_compaction(
     int tid = threadIdx.x;
     int gid = blockIdx.x * BLOCK_SIZE + tid;
 
-    // Step 1: Flag — 标记满足条件的元素
+    // Step 1: Flag — mark elements satisfying the condition
     int val = 0;
     int flag = 0;
     if (gid < n) {
@@ -559,7 +559,7 @@ __global__ void stream_compaction(
     scan[tid] = flag;
     __syncthreads();
 
-    // Step 2: Block-level exclusive scan（Blelloch 算法）
+    // Step 2: Block-level exclusive scan (Blelloch algorithm)
 
     // Up-sweep
     for (int offset = 1; offset < BLOCK_SIZE; offset *= 2) {
@@ -570,7 +570,7 @@ __global__ void stream_compaction(
         __syncthreads();
     }
 
-    // 提取 block 内满足条件的元素总数，并通过一次 atomic 分配输出空间
+    // Extract the total number of qualifying elements in the block and allocate output space with one atomic
     if (tid == 0) {
         int block_total = scan[BLOCK_SIZE - 1];
         block_output_offset = atomicAdd(output_count, block_total);
@@ -589,44 +589,44 @@ __global__ void stream_compaction(
         __syncthreads();
     }
 
-    // Step 3: Scatter — 将满足条件的元素写入输出数组的正确位置
+    // Step 3: Scatter — write qualifying elements to the correct positions in the output array
     if (gid < n && flag) {
         output[block_output_offset + scan[tid]] = val;
     }
 }
 ```
 
-> [!tip]Key optimization
-> `atomicAdd(output_count, block_total)` is called num_blocks instead of N. This is a combination of principle D (reduce contention) and principle A (reduce atomic memory overhead): each block internally calculates local offsets through scan, and finally only needs one atomic operation to allocate output space.
+> [!tip] Key optimization
+> `atomicAdd(output_count, block_total)` is called `num_blocks` times rather than N times. This combines Principle D (reduce contention) with Principle A (reduce the memory cost of atomics): each block computes local offsets internally via scan, and only a single atomic operation is needed at the end to allocate output space.
 
 ---
 
-## 4. Optimize Checklist
+## 4. Optimization Checklist
 
-When optimizing the memory-bound kernel, it is recommended to check in the following order:
+When optimizing a memory-bound kernel, it is recommended to check the following items in order:
 
-| Steps | Contents | Observation methods |
+| Step | Item | How to observe it |
 |------|------|----------|
-| 1 | Calculate arithmetic intensity and bandwidth upper limit | Roofline model, manual calculation |
-| 2 | Measure effective bandwidth | Bytes / kernel_time, compared with theoretical peak value |
-| 3 | Check merged memory fetches | ncu: `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` |
-| 4 | Check contention and synchronization overhead | ncu: atomic throughput, barrier wait time |
-| 5 | Adjust occupancy and ILP | grid-stride loop, loop expansion, multiple elements in one thread |
+| 1 | Compute arithmetic intensity and bandwidth upper bound | Roofline model, manual calculation |
+| 2 | Measure effective bandwidth | Bytes / kernel_time, compare against the theoretical peak |
+| 3 | Check coalescing | `ncu`: `l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum` |
+| 4 | Check contention and synchronization overhead | `ncu`: atomic throughput, barrier wait time |
+| 5 | Tune occupancy and ILP | grid-stride loop, loop unrolling, multiple elements per thread |
 
-The importance of this order is that if coalescing is not satisfied and occupancy is adjusted, the benefits obtained will be very limited. You should first ensure that the memory access mode is correct before performing higher-level tuning.
+The importance of this order is that if coalescing is not satisfied, then tuning occupancy will yield only limited benefit. You should first ensure that the memory access pattern is correct, and only then move on to higher-level tuning.
 
 ---
 
 ## 5. Summary
 
-| Principles | Optimization goals | Typical applicable kernel |
+| Principle | Optimization goal | Typical applicable kernels |
 |------|----------|----------------|
-| A-byte ledger | Accurately quantify memory traffic | All kernels |
-| B merged memory access | Continuous address access within warp, reducing the number of memory transactions | streaming, transpose |
-| C explicit multiplexing | Data is loaded from HBM to SRAM and multiplexed multiple times | stencil, partial sparse |
-| D Reduce contention | Reduce the serialization overhead of barrier and atomic | histogram, scatter, compaction |
-| E latency hiding | Masking memory latency through parallelism and ILP | sparse, gather |
+| A Byte accounting | Accurately quantify memory traffic | All kernels |
+| B Coalescing | Consecutive addresses within a warp, fewer memory transactions | streaming, transpose |
+| C Explicit reuse | Reuse data multiple times after loading it from HBM into SRAM | stencil, some sparse kernels |
+| D Reduce contention | Lower the serialization cost of barriers and atomics | histogram, scatter, compaction |
+| E Latency hiding | Mask memory latency with parallelism and ILP | sparse, gather |
 
-The optimization of Reduce, Histogram, and Scan in the first two lectures has covered all the above principles (coalescing, first add during load, warp shuffle, ILP, grid-stride loop). The purpose of this lecture is to abstract these techniques scattered in specific examples into a general analysis framework.
+The optimizations for Reduce, Histogram, and Scan in the previous two lectures already covered all of these principles (`coalescing`, `first add during load`, `warp shuffle`, `ILP`, `grid-stride loop`). The purpose of this lecture is to abstract those techniques, previously tied to specific examples, into a general analytical framework.
 
-When facing a new memory-bound kernel, first determine the Pattern (1-6) it belongs to, and then formulate an optimization strategy based on the corresponding principles.
+When facing a new memory-bound kernel, first determine which Pattern (1-6) it belongs to, and then formulate an optimization strategy by combining the corresponding principles.

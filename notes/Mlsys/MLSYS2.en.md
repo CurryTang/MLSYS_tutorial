@@ -3,120 +3,120 @@
 ### Overview
 
 ![[assets/Pasted image 20251222135239.png]]
-**Figure 1: Abstract diagram of the overall architecture of NVIDIA H100/B100 GPU. ** Shows the hierarchical memory and computing structure of the GPU: multiple streaming multiprocessors (SM 0, SM 1, ... SM N-1) are arranged in parallel. Each SM contains 4 Tensor Cores (responsible for matrix multiplication operations, contributing the main computing power, similar to the MXU of TPU) and 4 Warp Schedulers (SIMD vector units, containing 32 lanes, namely "CUDA Core", all lanes in the same warp must perform the same operation). Each SM has 256KB of L1 Cache/SMEM (shared memory, controllable by the programmer, similar to TPU VMEM but smaller). All SMs share 50MB of L2 Cache (automatically managed by hardware, providing faster bandwidth) and underlying HBM high-bandwidth memory (80GB for H100 and 192GB for B100, used to store model parameters, activation values, and optimizer state).
+**Figure 1: Abstract diagram of the overall NVIDIA H100/B100 GPU architecture.** It shows the GPU's hierarchical memory and compute structure: multiple streaming multiprocessors (SM 0, SM 1, ... SM N-1) are arranged in parallel, and each SM contains 4 Tensor Cores (responsible for matrix multiplication and contributing most of the compute throughput, analogous to the TPU MXU) and 4 Warp Schedulers (SIMD vector units containing 32 lanes, i.e., "CUDA Cores"; all lanes within the same warp must execute the same operation). Each SM has 256KB of L1 Cache/SMEM (shared memory that can be controlled by the programmer, similar to TPU VMEM but smaller). All SMs share a 50MB L2 Cache (automatically managed by hardware to provide faster bandwidth) and the underlying HBM high-bandwidth memory (80GB on H100, 192GB on B100), which stores model parameters, activations, and optimizer states.
 
 ![[assets/Pasted image 20251222135741.png]]
-**Figure 2: NVIDIA H100 single SM (streaming multiprocessor) internal detailed architecture diagram. ** Each SM contains 4 processing blocks (Processing Block), shared L1 instruction cache and 256KB L1 data cache/shared memory. Each processing block contains: L0 instruction cache, Warp Scheduler (scheduling 32 threads per cycle), Dispatch Unit, 16384×32-bit register file, and a large number of computing units - 16 INT32 units, 16 FP32 units, 8 FP64 units, 1 fourth-generation Tensor Core, LD/ST (Load/Store) unit and SFU (Special Function Unit). The bottom also features a Tensor Memory Accelerator and a Tex (texture unit). This design enables the H100 to efficiently execute large-scale matrix operations and deep learning workloads in parallel.
+**Figure 2: Detailed internal architecture of a single NVIDIA H100 SM (streaming multiprocessor).** Each SM contains 4 processing blocks that share an L1 instruction cache and a 256KB L1 data cache/shared memory. Each processing block contains an L0 instruction cache, a Warp Scheduler (scheduling 32 threads per cycle), a Dispatch Unit, a 16384×32-bit register file, and many compute units—16 INT32 units, 16 FP32 units, 8 FP64 units, 1 fourth-generation Tensor Core, LD/ST (load/store) units, and an SFU (special function unit). The bottom also includes a Tensor Memory Accelerator and Tex (texture units). This design enables the H100 to efficiently execute large-scale matrix operations and deep learning workloads in parallel.
 
 
 ### Components
 
-#### Summary of GPU computing components
+#### Summary of GPU compute components
 
-| Hierarchy | Component | Quantity (H100) | Role | Responsible Action |
+| Level | Component | Count (H100) | Role | Operations handled |
 | ------------------ | ----------------------------- | ------------- | ------- | -------------------------------- |
-| **GPU level** | GigaThread Engine | 1 | Global scheduler | Allocate thread blocks to individual SMs |
-| **SM level** | SM (Streaming Multiprocessor) | 132 | Independent computing unit | Execute one or more thread blocks and manage internal resources |
-| **SubPartition Level** | Warp Scheduler | 4 per SM | Warp Scheduling | Select eligible warp launch from warp pool |
-| | Dispatch Unit | 2 per SubPart | Instruction distribution | Read operands, select execution unit, issue instructions |
-| | Scoreboard | 1 per SubPart | Dependency tracking | Track register status, detect data hazards |
-| **Execution unit level** | Tensor Core | 4 per SM | Matrix multiplication | GEMM, ~1024 FLOPs/cycle, accounting for 93%+ computing power |
-| | FP32 CUDA Cores | 128 per SM | Single precision floating point | ReLU, pointwise ops, reduction |
-| | FP64 CUDA Cores | 64 per SM | Double precision floating point | Scientific computing (rarely used in ML) |
-| | INT32 Cores | 64 per SM | Integer operations | Address calculation, indexing, bit operations |
-| | Load/Store Units | 32 per SM | Memory access | Initiate load/store request, address calculation |
-| | SFU (Special Function Unit) | 16 per SM | Special functions | sin, cos, exp, rsqrt and other transcendental functions |
-| | Texture Units | 4 per SM | Texture sampling | Used for graphics rendering, occasionally used for interpolation in ML |
+| **GPU level** | GigaThread Engine | 1 | Global scheduler | Assigns thread blocks to SMs |
+| **SM level** | SM (Streaming Multiprocessor) | 132 | Independent compute unit | Executes one or more thread blocks and manages internal resources |
+| **SubPartition level** | Warp Scheduler | 4 per SM | Warp scheduling | Selects eligible warps from the warp pool to issue |
+|                    | Dispatch Unit                 | 2 per SubPart | Instruction dispatch | Reads operands, selects execution units, issues instructions |
+|                    | Scoreboard                    | 1 per SubPart | Dependency tracking | Tracks register state and detects data hazards |
+| **Execution-unit level** | Tensor Core | 4 per SM | Matrix multiplication | GEMM, ~1024 FLOPs/cycle, accounting for 93%+ of compute |
+|                    | FP32 CUDA Cores               | 128 per SM    | Single-precision floating point | ReLU, pointwise ops, reduction |
+|                    | FP64 CUDA Cores               | 64 per SM     | Double-precision floating point | Scientific computing (rarely used in ML) |
+|                    | INT32 Cores                   | 64 per SM     | Integer arithmetic | Address computation, indexing, bit operations |
+|                    | Load/Store Units              | 32 per SM     | Memory access | Initiates load/store requests and performs address calculation |
+|                    | SFU (Special Function Unit)   | 16 per SM     | Special functions | Transcendental functions such as sin, cos, exp, rsqrt |
+|                    | Texture Units                 | 4 per SM      | Texture sampling | Used for graphics rendering, occasionally for interpolation in ML |
 
-#### Calculate component hierarchical relationship
+#### Hierarchy of compute components
 
 ```
 GPU
- └── GigaThread Engine (全局调度)
+ └── GigaThread Engine (global scheduling)
       └── SM ×132
-           ├── Warp Pool (最多 64 warps 常驻)
+           ├── Warp Pool (up to 64 resident warps)
            └── SubPartition ×4
-                ├── Warp Scheduler ──► 选 warp
-                ├── Dispatch Unit ×2 ──► 发指令
+                ├── Warp Scheduler ──► selects warps
+                ├── Dispatch Unit ×2 ──► issues instructions
                 └── Execution Units
-                     ├── Tensor Core (矩阵乘)
-                     ├── FP32 Cores ×32 (向量算术)
+                     ├── Tensor Core (matrix multiply)
+                     ├── FP32 Cores ×32 (vector arithmetic)
                      ├── INT32 Cores ×16
                      ├── FP64 Cores ×16
                      ├── LD/ST Units ×8
                      └── SFU ×4
 ```
 
-#### Summary of GPU storage components
+#### Summary of GPU memory components
 
-| Hierarchy | Components | Capacity (H100) | Bandwidth | Latency | Scope | Purpose |
+| Level | Component | Capacity (H100) | Bandwidth | Latency | Scope | Use |
 |------|------|-------------|------|------|--------|------|
-| **Off-chip** | HBM (Video Memory) | 80 GB | 3.35 TB/s | ~400 cycles | Global | Model weights, activations, large tensor |
-| | L2 Cache | 50 MB | ~12 TB/s | ~100 cycles | Global | Automatically cache HBM data |
-| **SM level** | SMEM (Shared Memory) | 256 KB per SM | ~33 TB/s | ~20 cycles | Shared within Block | Tile data, inter-thread communication |
-| | L1 Cache | Shared with SMEM | ~33 TB/s | ~20 cycles | SM Private | Auto-caching (configurable ratio) |
-| | TMEM (Tensor Memory) | B200 New | Very High | Very Low | SubPart Private | Feed Tensor Core's dedicated cache |
-| **Thread level** | Register File | 64K ×32bit per SM | ~80 TB/s | 1 cycle | Thread private | Local variables, intermediate results |
-| | Local Memory | Spill to HBM | Same as HBM | High | Thread private | Register spill (register spill) |
-| **Special** | Constant Memory | 64 KB | Broadcast optimization | ~4 cycles (cached) | Read-only global | Constant parameters, hyperparameters |
-| | Texture Memory | Shared with L1 | Spatial locality optimization | Medium | Read-only global | 2D spatial data access |
+| **Off-chip** | HBM (device memory) | 80 GB | 3.35 TB/s | ~400 cycles | Global | Model weights, activations, large tensors |
+| | L2 Cache | 50 MB | ~12 TB/s | ~100 cycles | Global | Automatically caches HBM data |
+| **SM level** | SMEM (Shared Memory) | 256 KB per SM | ~33 TB/s | ~20 cycles | Shared within a block | Tile data, inter-thread communication |
+| | L1 Cache | Shared with SMEM | ~33 TB/s | ~20 cycles | Private to an SM | Automatic caching (configurable partitioning) |
+| | TMEM (Tensor Memory) | New in B200 | Extremely high | Extremely low | Private to a SubPart | Dedicated cache for feeding Tensor Cores |
+| **Thread level** | Register File | 64K ×32bit per SM | ~80 TB/s | 1 cycle | Private to a thread | Local variables, intermediate results |
+| | Local Memory | Spills to HBM | Same as HBM | High | Private to a thread | Register spill |
+| **Special** | Constant Memory | 64 KB | Broadcast-optimized | ~4 cycles (cached) | Read-only global | Constant parameters, hyperparameters |
+| | Texture Memory | Shared with L1 | Optimized for spatial locality | Medium | Read-only global | 2D spatial data access |
 
-#### Storage level pyramid
+#### Memory hierarchy pyramid
 
 ```
                     ┌─────────┐
                     │ Register│  64K×32bit/SM, 1 cycle, ~80 TB/s
-                    │  File   │  线程私有
+                    │  File   │  Thread-private
                     └────┬────┘
                          │
                     ┌────▼────┐
                     │  SMEM   │  256 KB/SM, ~20 cycles, ~33 TB/s
-                    │L1 Cache │  Block 共享 / 自动缓存
+                    │L1 Cache │  Block-shared / automatic cache
                     └────┬────┘
                          │
                     ┌────▼────┐
                     │L2 Cache │  50 MB, ~100 cycles, ~12 TB/s
-                    │         │  全局共享，自动管理
+                    │         │  Globally shared, automatically managed
                     └────┬────┘
                          │
                     ┌────▼────┐
                     │   HBM   │  80 GB, ~400 cycles, 3.35 TB/s
-                    │ (DRAM)  │  全局，持久存储
+                    │ (DRAM)  │  Global, persistent storage
                     └─────────┘
 
-容量:    小 ◄─────────────────────────────► 大
-速度:    快 ◄─────────────────────────────► 慢
+Capacity: Small ◄─────────────────────────────► Large
+Speed:    Fast ◄─────────────────────────────► Slow
 ```
 
-#### Typical usage scenarios of each storage
+#### Typical usage scenarios for each memory type
 
-| Storage | Typical uses in ML | Programmatically |
+| Memory | Typical use in ML | Programming model |
 |------|----------------|---------|
-| **Register** | Accumulator, loop variables, Tensor Core input and output | Automatic allocation, local variables |
-| **SMEM** | GEMM tiling, attention K/V cache, reduction intermediate results | `__shared__` explicit declaration |
-| **L2** | Data reused across SMs (such as different heads of the same batch) | Automatic, available `cudaAccessPolicyWindow` prompt |
-| **HBM** | Weight matrix, input and output tensor, optimizer state | `cudaMalloc`, global array |
-| **Constant** | Layer’s hyperparameters, lookup table | `__constant__` declaration |
+| **Register** | Accumulators, loop variables, Tensor Core inputs/outputs | Automatically allocated, local variables |
+| **SMEM** | GEMM tiling, attention K/V cache, intermediate reduction results | Explicitly declared with `__shared__` |
+| **L2** | Data reused across SMs (e.g., different heads from the same batch) | Automatic, with optional hints via `cudaAccessPolicyWindow` |
+| **HBM** | Weight matrices, input/output tensors, optimizer state | `cudaMalloc`, global arrays |
+| **Constant** | Layer hyperparameters, lookup tables | Declared with `__constant__` |
 
 
-### Understand the working mechanism of warp and dispatch through pseudo code
+### Understanding the working mechanism of warp and dispatch through pseudocode
 
 
 ```python
-# ============ SM 内部结构 ============
+# ============ SM internal structure ============
 class SM:
     def __init__(self):
-        # 执行单元（以 Ampere 架构为例，每个 SM 有 4 个 sub-partition）
+        # Execution units (using the Ampere architecture as an example, each SM has 4 sub-partitions)
         self.sub_partitions = [SubPartition() for _ in range(4)]
         
-        # 每个 sub-partition 有自己的 warp scheduler + dispatch unit
+        # Each sub-partition has its own warp scheduler + dispatch units
         
 class SubPartition:
     def __init__(self):
         self.warp_scheduler = WarpScheduler()
-        self.dispatch_units = [DispatchUnit(), DispatchUnit()]  # 通常 2 个
+        self.dispatch_units = [DispatchUnit(), DispatchUnit()]  # typically 2
         
-        # 执行单元
+        # Execution units
         self.int32_units = [INT32_ALU() for _ in range(16)]
         self.fp32_units = [FP32_ALU() for _ in range(16)]
         self.fp64_units = [FP64_ALU() for _ in range(8)]
@@ -127,75 +127,75 @@ class SubPartition:
 
 # ============ Warp Scheduler ============
 class WarpScheduler:
-    """决定下一个周期执行哪个 warp"""
+    """Decide which warp executes in the next cycle"""
     
     def __init__(self):
-        self.warp_pool = []  # 该 scheduler 管理的所有 warp（通常 8 个左右）
+        self.warp_pool = []  # all warps managed by this scheduler (typically around 8)
         
     def select_warps_to_issue(self):
-        """每个周期选择可以发射的 warp"""
+        """Select warps that can issue each cycle"""
         
         ready_warps = []
         for warp in self.warp_pool:
             if self.is_warp_eligible(warp):
                 ready_warps.append(warp)
         
-        # 调度策略：GTO (Greedy Then Oldest), LRR (Loose Round Robin), 等
+        # Scheduling policy: GTO (Greedy Then Oldest), LRR (Loose Round Robin), etc.
         selected = self.scheduling_policy(ready_warps)
-        return selected  # 可能返回 1-2 个 warp（取决于 dispatch unit 数量）
+        return selected  # may return 1-2 warps (depending on the number of dispatch units)
     
     def is_warp_eligible(self, warp):
-        """检查 warp 是否可以被调度"""
+        """Check whether a warp can be scheduled"""
         
         if warp.is_finished():
             return False
             
-        # 检查 scoreboard：指令的操作数是否就绪
+        # Check the scoreboard: are the instruction operands ready?
         next_inst = warp.get_next_instruction()
         if not self.scoreboard.operands_ready(warp.id, next_inst):
-            return False  # 数据依赖，stall
+            return False  # data dependency, stall
             
-        # 检查结构冒险：目标执行单元是否可用
+        # Check structural hazards: is the target execution unit available?
         if not self.check_structural_hazard(next_inst):
             return False
             
-        # 检查是否在等待 barrier 同步
+        # Check whether it is waiting at a barrier
         if warp.waiting_at_barrier:
             return False
             
         return True
     
     def scheduling_policy(self, ready_warps):
-        """调度策略示例：GTO - 优先让同一个 warp 连续执行"""
+        """Example scheduling policy: GTO - prefer issuing the same warp consecutively"""
         if not ready_warps:
             return []
         
-        # 优先选上次执行的 warp（局部性）
+        # Prefer the previously issued warp (locality)
         if self.last_issued_warp in ready_warps:
             return [self.last_issued_warp]
         
-        # 否则选最老的 ready warp
+        # Otherwise select the oldest ready warp
         return [min(ready_warps, key=lambda w: w.age)]
 
 
 # ============ Dispatch Unit ============
 class DispatchUnit:
-    """把 warp scheduler 选中的指令分发到执行单元"""
+    """Dispatch instructions selected by the warp scheduler to execution units"""
     
     def dispatch(self, warp, instruction):
-        """将指令分发到具体执行单元"""
+        """Dispatch an instruction to a specific execution unit"""
         
-        # 1. 从 Register File 读取操作数（32 个线程的数据）
+        # 1. Read operands from the Register File (data for 32 threads)
         operands = self.read_operands(warp, instruction)
-        # operands 是 32 份数据，每个 lane 一份
+        # operands contains 32 values, one per lane
         
-        # 2. 根据指令类型选择执行单元
+        # 2. Select the execution unit based on the instruction type
         exec_unit = self.select_execution_unit(instruction)
         
-        # 3. 发射到执行单元
+        # 3. Issue to the execution unit
         exec_unit.issue(warp.id, warp.active_mask, instruction, operands)
         
-        # 4. 更新 scoreboard：标记目标寄存器为 pending
+        # 4. Update the scoreboard: mark the destination register as pending
         self.scoreboard.mark_pending(warp.id, instruction.dest_reg)
         
     def select_execution_unit(self, instruction):
@@ -212,16 +212,16 @@ class DispatchUnit:
                 return self.find_available(self.tensor_cores)
 
 
-# ============ 执行单元 ============
+# ============ Execution units ============
 class FP32_ALU:
-    """FP32 执行单元 - SIMT 执行"""
+    """FP32 execution unit - SIMT execution"""
     
     def issue(self, warp_id, active_mask, instruction, operands):
-        """执行 32 个线程的计算"""
+        """Execute computation for 32 threads"""
         
         results = [None] * 32
         for lane in range(32):
-            if active_mask & (1 << lane):  # 只执行 active 的线程
+            if active_mask & (1 << lane):  # execute only active threads
                 a = operands.src1[lane]
                 b = operands.src2[lane]
                 
@@ -234,29 +234,29 @@ class FP32_ALU:
                         c = operands.src3[lane]
                         results[lane] = a * b + c
         
-        # 写回 register file（流水线化，可能需要几个周期）
+        # Write back to the register file (pipelined, may take several cycles)
         self.writeback_queue.enqueue(warp_id, instruction.dest_reg, results)
 
 
-# ============ 完整的每周期流程 ============
+# ============ Complete per-cycle flow ============
 def sm_cycle(sub_partition):
-    """每个时钟周期的流水线操作"""
+    """Pipeline operations for each clock cycle"""
     
-    # Stage 1: Warp Scheduler 选择 warp
+    # Stage 1: Warp Scheduler selects warps
     selected_warps = sub_partition.warp_scheduler.select_warps_to_issue()
     
-    # Stage 2: Dispatch Unit 分发指令
+    # Stage 2: Dispatch Unit dispatches instructions
     for i, warp in enumerate(selected_warps):
         if i < len(sub_partition.dispatch_units):
             instruction = warp.fetch_next_instruction()
             sub_partition.dispatch_units[i].dispatch(warp, instruction)
             warp.pc += 1
     
-    # Stage 3-N: 执行单元流水线执行（并行进行）
+    # Stage 3-N: Execution-unit pipeline execution (in parallel)
     for unit in all_execution_units(sub_partition):
         unit.pipeline_tick()
     
-    # Writeback: 完成的结果写回 register file，更新 scoreboard
+    # Writeback: completed results write back to the register file and update the scoreboard
     sub_partition.process_writebacks()
 ```
 
@@ -272,10 +272,10 @@ def sm_cycle(sub_partition):
 │  │   │ Warp Pool    │  (8 warps)                          │ │
 │  │   │ W0 W1 W2 ... │                                      │ │
 │  │   └──────┬───────┘                                      │ │
-│  │          │ 哪个 warp ready?                              │ │
+│  │          │ Which warp is ready?                         │ │
 │  │          ▼                                              │ │
 │  │   ┌──────────────┐                                      │ │
-│  │   │Warp Scheduler│ ──选择 1-2 个 eligible warp          │ │
+│  │   │Warp Scheduler│ ──selects 1-2 eligible warps         │ │
 │  │   └──────┬───────┘                                      │ │
 │  │          │                                              │ │
 │  │          ▼                                              │ │
@@ -292,26 +292,26 @@ def sm_cycle(sub_partition):
 └─────────────────────────────────────────────────────────────┘
 ```
 
-| Components | Responsibilities | Analogy |
+| Component | Responsibility | Analogy |
 | ------------------ | ---------------------- | -------------- |
-| **Warp Scheduler** | Decide "who will execute", check dependencies, take risks, choose strategies | Scheduler: choose the next player to play |
-| **Dispatch Unit** | Decide "how to execute", read operands, select execution unit, launch | Distributor: send players to the correct track |
+| **Warp Scheduler** | Decides "who executes," checks dependencies and hazards, and chooses a policy | Dispatcher: chooses the next player to send in |
+| **Dispatch Unit**  | Decides "how to execute," reads operands, selects execution units, and issues instructions | Coordinator: sends the player to the correct lane |
 
-Cycle 1: Warp_A: LD r1, [addr] # Initiate memory read, need to wait ~400 cycles
-Cycle 2: Warp_B: ADD r2, r3, r4 # Switch to B
-Cycle 3: Warp_C: MUL r5, r6, r7 # Switch to C
+Cycle 1:  Warp_A: LD r1, [addr]     # initiates memory read, must wait ~400 cycles
+Cycle 2:  Warp_B: ADD r2, r3, r4    # switch to B
+Cycle 3:  Warp_C: MUL r5, r6, r7    # switch to C
 ...
-Cycle 400: Warp_A: (Memory return) # The data of A has arrived
-Cycle 401: Warp_A: ADD r8, r1, r9 # A continues execution
+Cycle 400: Warp_A: (memory returns)       # A's data has arrived
+Cycle 401: Warp_A: ADD r8, r1, r9   # A resumes execution
 
-### Importance of TensorCore
-H100 total computing power distribution:
-┌───────────────────────────────────────────┐
-│ Tensor Core: 990 TFLOPs (bf16) 93.7%
-│ CUDA Cores: 66 TFLOPs (fp32) █ 6.3%
-└───────────────────────────────────────────┘
-Conclusion: In modern ML workloads, Tensor Core is the main force, and CUDA Cores are only responsible for chores such as ReLU and reduction.
+### Importance of Tensor Cores
+H100 total compute distribution:
+┌────────────────────────────────────────────┐
+│ Tensor Core:  990 TFLOPs (bf16)  ████████████████████ 93.7%
+│ CUDA Cores:    66 TFLOPs (fp32)  █ 6.3%
+└────────────────────────────────────────────┘
+Conclusion: in modern ML workloads, Tensor Cores are the real workhorses, while CUDA Cores mainly handle miscellaneous tasks such as ReLU and reduction.
 
 
-Ref:
+Ref: 
 Austin et al., "How to Scale Your Model", Google DeepMind, online, 2025.

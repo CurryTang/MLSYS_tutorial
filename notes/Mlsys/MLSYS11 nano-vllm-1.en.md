@@ -1,19 +1,19 @@
 ## nano-vllm part 1
 
-**nano-vllm** 是一个用 ~1000 行纯 Python/PyTorch 实现的最小化 LLM 推理引擎,项目目标是用最少的代码还原 vLLM 的核心设计，便于学习和研究。
+**nano-vllm** is a minimal LLM inference engine implemented in ~1000 lines of pure Python/PyTorch. The project goal is to restore the core design of vLLM with the least code to facilitate learning and research.
 
-| 特性 | 说明 |
+| Features | Description |
 |------|------|
-| 模型支持 | Qwen3 系列（可扩展） |
-| 推理优化 | Paged KV Cache、Continuous Batching |
-| 并行策略 | Tensor Parallelism（列并行 + 行并行） |
-| 代码量 | ~1000 行，无复杂依赖 |
+| Model support | Qwen3 series (expandable) |
+| Inference Optimization | Paged KV Cache, Continuous Batching |
+| Parallel strategy | Tensor Parallelism (column parallelism + row parallelism) |
+| Code size | ~1000 lines, no complex dependencies |
 
 ### Revisit transformers
 
-Transformer 是 2017 年由 Google 在论文 *"Attention Is All You Need"* 中提出的架构，成为了现代大语言模型（如 GPT、LLaMA、Claude）的基础。核心创新：**Self-Attention**（直接关注序列任意位置）、**并行计算**（无需 RNN 的顺序依赖）、**位置编码**。
+Transformer is an architecture proposed by Google in the paper *"Attention Is All You Need"* in 2017, and has become the basis of modern large language models (such as GPT, LLaMA, Claude). Core innovations: **Self-Attention** (direct attention to any position in the sequence), **parallel computing** (without the sequential dependence of RNN), **position coding**.
 
-#### Transformer Decoder 层结构
+#### Transformer Decoder layer structure
 
 ```
 Input [B,T,D]
@@ -28,7 +28,7 @@ Output [B,T,D]
 ```
 
 
-MHA 允许模型同时从不同"表示子空间"学习信息，三个核心向量：**Q（我在找什么）**、**K（我有什么标签）**、**V（我的内容是什么）**。
+MHA allows the model to learn information from different "representation subspaces" simultaneously, three core vectors: **Q (what am I looking for)**, **K (what labels do I have)**, **V (what is my content)**.
 
 #### Scaled Dot-Product Attention
 
@@ -36,269 +36,269 @@ $$
 \text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right)V
 $$
 
-计算：① $QK^T$ 得相似度矩阵 → ② 除以 $\sqrt{d_k}$ 防梯度消失 → ③ softmax → ④ 加权求 V。MHA 将输入分多头并行学习不同模式：$\text{MultiHead} = \text{Concat}(\text{head}_i)W^O$，其中 $\text{head}_i = \text{Attention}(QW_i^Q, KW_i^K, VW_i^V)$。
+Calculation: ① $QK^T$ gets the similarity matrix → ② Divide by $\sqrt{d_k}$ to prevent gradient disappearance → ③ softmax → ④ Find V with weighting. MHA divides the input into multiple heads and learns different modes in parallel: $\text{MultiHead} = \text{Concat}(\text{head}_i)W^O$, where $\text{head}_i = \text{Attention}(QW_i^Q, KW_i^K, VW_i^V)$.
 
-三种变体：**MHA**（$N=K$，标准）、**MQA**（$K=1$，极省 KV cache）、**GQA**（$K$ 整除 $N$，折中，Qwen3 使用）。
+Three variants: **MHA** ($N=K$, standard), **MQA** ($K=1$, extremely economical KV cache), **GQA** ($K$ is evenly divided by $N$, compromise, used by Qwen3).
 
 
 
-### 分析理解transformer的roofline性质
+### Analyze and understand the roofline properties of transformer
 
-符号：$x, y \in [P]$（向量），$A \in [N, P]$，$B \in [P, M]$（矩阵）。
+Notation: $x, y \in [P]$ (vector), $A \in [N, P]$, $B \in [P, M]$ (matrix).
 
-#### FLOPs 计算规则
+#### FLOPs calculation rules
 
-| 操作 | FLOPs | 数据传输 | 说明 |
+| Operations | FLOPs | Data Transfer | Description |
 |------|-------|----------|------|
-| 向量点积 $x \cdot y$ | $2P$ | $2P$ | P 次乘法 + P 次加法 |
-| 矩阵-向量乘 $Ax$ | $2NP$ | $NP + P$ | N 个点积 |
-| 矩阵-矩阵乘 $AB$ | $2NPM$ | $NP + PM$ | M 个矩阵-向量乘 |
+| Vector dot product $x \cdot y$ | $2P$ | $2P$ | P multiplications + P additions |
+| Matrix-vector multiplication $Ax$ | $2NP$ | $NP + P$ | N dot products |
+| Matrix-matrix multiplication $AB$ | $2NPM$ | $NP + PM$ | M matrix-vector multiplication |
 
-矩阵乘法：计算 $O(N^3)$、数据传输 $O(N^2)$，矩阵越大越容易达到 compute-bound，这也是深度学习大量使用矩阵乘法的原因。
+Matrix multiplication: calculation $O(N^3)$, data transmission $O(N^2)$. The larger the matrix, the easier it is to achieve compute-bound. This is why deep learning uses matrix multiplication extensively.
 
-#### 通用 Einsum 规则
+#### General Einsum Rules
 
-对于高维张量收缩，我们需要区分三类维度：
-- ==红色== **收缩维度**：在两个张量中都出现，在输出中消失（被求和掉）
-- ==蓝色== **批处理维度**：在两个张量和输出中都出现（独立并行计算）
-- **普通维度**：只在一个输入张量和输出中出现
+For high-dimensional tensor shrinkage, we need to distinguish three types of dimensions:
+- ==Red== **Shrink Dimension**: appears in both tensors and disappears in the output (summed away)
+- ==Blue== **Batch Dimensions**: present in both tensors and outputs (computed independently in parallel)
+- **Normal dimensions**: only appear in one input tensor and output
 
-**示例解析**：
+**Example analysis**:
 $$
 C[\textcolor{blue}{GH}IJ\textcolor{red}{KL}] \cdot D[\textcolor{blue}{GH}MN\textcolor{red}{KL}] \rightarrow E[\textcolor{blue}{GH}IJMN]
 $$
 
-用 einsum 表示：`einsum('ghijkl,ghmnkl->ghijmn', C, D)`
+Use einsum to express: `einsum('ghijkl,ghmnkl->ghijmn', C, D)`
 
 ```
-张量 C: [G, H, I, J, K, L]
+Tensor C: [G, H, I, J, K, L]
         ↑  ↑  ↑  ↑  ↑  ↑
-        批 批 普 普 收 收
-        处 处 通 通 缩 缩
+        B  B  N  N  R  R
+        A  A  O  O  E  E
 
-张量 D: [G, H, M, N, K, L]
+Tensor D: [G, H, M, N, K, L]
         ↑  ↑  ↑  ↑  ↑  ↑
-        批 批 普 普 收 收
-        处 处 通 通 缩 缩
+        B  B  N  N  R  R
+        A  A  O  O  E  E
 
-输出 E: [G, H, I, J, M, N]  ← K, L 被求和消失
+Output E: [G, H, I, J, M, N]  ← K, L are summed away
 ```
 
-**计算过程理解**：
-- 对于输出的每个位置 `E[g,h,i,j,m,n]`，需要计算：
+**Understanding of calculation process**:
+- For each position of the output `E[g,h,i,j,m,n]`, it is necessary to calculate:
   $$E[g,h,i,j,m,n] = \sum_{k,l} C[g,h,i,j,k,l] \times D[g,h,m,n,k,l]$$
-- 这是一个 $K \times L$ 次乘法和加法
+- This is a $K \times L$ multiplication and addition
 
-**FLOPs 计算**：
+**FLOPs calculation**:
 $$
 \text{FLOPs} = 2 \times \textcolor{blue}{G} \times \textcolor{blue}{H} \times I \times J \times M \times N \times \textcolor{red}{K} \times \textcolor{red}{L}
 $$
 
-- 系数 2：每个元素需要 1 次乘法 + 1 次加法
-- 所有维度相乘，但每个维度只计一次（不管它出现在几个张量中）
+- Factor 2: 1 multiplication + 1 addition required per element
+- all dimensions are multiplied, but each dimension is counted only once (regardless of how many tensors it appears in)
 
-**记忆**：FLOPs = 2 × 所有维度之积（包括收缩维度）
+**Memory**: FLOPs = 2 × product of all dimensions (including shrinking dimensions)
 
 ---
 
-### 前向与反向传播的 FLOPs
+### FLOPs of forward and backward propagation
 
-设 $A[N,P]$，$B[P,M]$，$C=AB$：
+Let $A[N,P]$, $B[P,M]$, $C=AB$:
 
-| 阶段 | 操作 | FLOPs |
+| Phases | Operations | FLOPs |
 |------|------|-------|
-| 前向传播 | $C = AB$ | $2NPM$ |
-| 反向传播 (权重梯度) | $\frac{\partial L}{\partial B} = A^T \frac{\partial L}{\partial C}$ | $2NPM$ |
-| 反向传播 (输入梯度) | $\frac{\partial L}{\partial A} = \frac{\partial L}{\partial C} B^T$ | $2NPM$ |
-| **总计** | - | ==$6NPM$== |
+| Forward propagation | $C = AB$ | $2NPM$ |
+| Backpropagation (weight gradient) | $\frac{\partial L}{\partial B} = A^T \frac{\partial L}{\partial C}$ | $2NPM$ |
+| Backpropagation (input gradient) | $\frac{\partial L}{\partial A} = \frac{\partial L}{\partial C} B^T$ | $2NPM$ |
+| **Total** | - | ==$6NPM$== |
 
-**推理** = $2NPM$（仅前向）；**训练** = $6NPM$（前向 + 两个反向），训练是推理的 3 倍。
+**Inference** = $2NPM$ (forward only); **Training** = $6NPM$ (forward + two reverses), training is 3 times faster than inference.
 
-### 符号定义
+### Symbol definition
 
-$B$=batch，$T/S$=序列长（Q/KV），$D$=model dim，$F$=FFN dim，$N$=Q heads，$K$=KV heads，$H$=head dim，$L$=层数，$V$=词表大小。
+$B$=batch, $T/S$=sequence length (Q/KV), $D$=model dim, $F$=FFN dim, $N$=Q heads, $K$=KV heads, $H$=head dim, $L$=number of layers, $V$=vocabulary size.
 
 ---
 
-### MLP 层的计算
+### Calculation of MLP layer
 
-现代 Transformer 用 **Gated MLP**（SwiGLU）：$W_{out} \cdot [\sigma(W_{in1} x) \odot W_{in2} x]$，比传统 2 矩阵多 1 个矩阵（参数 +50%），表达能力更强。常见变体：GLU（sigmoid）、GEGLU（GELU）、SwiGLU（SiLU，LLaMA/Qwen3 使用）。
+Modern Transformer uses **Gated MLP** (SwiGLU): $W_{out} \cdot [\sigma(W_{in1} x) \odot W_{in2} x]$, which has 1 more matrix (parameters +50%) than the traditional 2 matrices, and has stronger expressive power. Common variants: GLU (sigmoid), GEGLU (GELU), SwiGLU (SiLU, used by LLaMA/Qwen3).
 
-| 操作 | 训练 FLOPs | 参数量 |
+| Operations | Training FLOPs | Number of parameters |
 |------|------------|--------|
 | $A[B,T,\textcolor{red}{D}] \cdot W_{in1}[\textcolor{red}{D}, F]$ | $6BTDF$ | $DF$ |
 | $A[B,T,\textcolor{red}{D}] \cdot W_{in2}[\textcolor{red}{D}, F]$ | $6BTDF$ | $DF$ |
-| $\sigma(A_{in1}) \odot A_{in2}$ (激活+门控) | $O(BTF)$ 可忽略 | - |
+| $\sigma(A_{in1}) \odot A_{in2}$ (activation+gating) | $O(BTF)$ can be ignored | - |
 | $A[B,T,\textcolor{red}{F}] \cdot W_{out}[\textcolor{red}{F}, D]$ | $6BTDF$ | $DF$ |
-| **MLP 总计** | ==$\approx 18BTDF$== | ==$3DF$== |
+| **MLP TOTAL** | ==$\approx 18BTDF$== | ==$3DF$== |
 
-*无 Gating 的传统 MLP：2 个矩阵，参数量 $2DF$。现代模型（LLaMA、DeepSeek 等）均使用 Gating 变体。*
+*Traditional MLP without Gating: 2 matrices, parameter size $2DF$. Modern models (LLaMA, DeepSeek, etc.) all use Gating variants. *
 
 ---
 
-### Attention 层的计算
+### Calculation of Attention layer
 
-#### QKVO 投影矩阵
+#### QKVO projection matrix
 
-| 操作 | 训练 FLOPs | 参数量 |
+| Operations | Training FLOPs | Number of parameters |
 |------|------------|--------|
 | $A[B,T,\textcolor{red}{D}] \cdot W_Q[\textcolor{red}{D}, N, H]$ | $6BTDNH$ | $DNH$ |
 | $A[B,T,\textcolor{red}{D}] \cdot W_K[\textcolor{red}{D}, K, H]$ | $6BTDKH$ | $DKH$ |
 | $A[B,T,\textcolor{red}{D}] \cdot W_V[\textcolor{red}{D}, K, H]$ | $6BTDKH$ | $DKH$ |
 | $A[B,T,\textcolor{red}{N},\textcolor{red}{H}] \cdot W_O[\textcolor{red}{N},\textcolor{red}{H}, D]$ | $6BTDNH$ | $DNH$ |
-| **QKVO 总计** | ==$12BTD(N+K)H$== | ==$2D(N+K)H$== |
+| **QKVO TOTAL** | ==$12BTD(N+K)H$== | ==$2D(N+K)H$== |
 
 #### Dot-Product Attention
 
-| 操作 | 训练 FLOPs |
+| Operations | Training FLOPs |
 |------|------------|
 | $Q[\textcolor{blue}{B}, T, \textcolor{blue}{K}, G, \textcolor{red}{H}] \cdot K[\textcolor{blue}{B}, S, \textcolor{blue}{K}, \textcolor{red}{H}]^T \rightarrow S[B,T,S,N]$ | $6BTSNH$ |
-| $\text{softmax}_S(S) \rightarrow P$ | $O(BTSN)$ 可忽略 |
+| $\text{softmax}_S(S) \rightarrow P$ | $O(BTSN)$ can be ignored |
 | $P[\textcolor{blue}{B}, T, \textcolor{red}{S}, \textcolor{blue}{K}, G] \cdot V[\textcolor{blue}{B}, \textcolor{red}{S}, \textcolor{blue}{K}, H] \rightarrow O[B,T,N,H]$ | $6BTSNH$ |
-| **Attention 总计** (self-attention: S=T) | ==$\approx 12BT^2NH$== |
+| **Attention total** (self-attention: S=T) | ==$\approx 12BT^2NH$== |
 
-*注：Decoder-only 的 causal attention 只算下三角，实际 FLOPs 减半，但需要 Flash Attention 等专用 kernel 才能利用。*
+*Note: Decoder-only causal attention only counts the lower triangle, and the actual FLOPs are halved, but it requires dedicated kernels such as Flash Attention to utilize it. *
 
 ---
 
-### 6ND 法则
+### 6ND Rule
 
-忽略 dot-product attention（短上下文合理），整个模型的 FLOPs：
+Ignoring dot-product attention (reasonable for short context), FLOPs of the entire model:
 
 $$
 \boxed{\text{Total FLOPs} = 6 \times \text{num\_tokens} \times \text{num\_parameters}}
 $$
 
-MLP 和 QKVO 投影的 FLOPs 都是 **6 × BT × 参数量**（MLP: $18BTDF = 6BT \cdot 3DF$；QKVO: $12BTD(N+K)H = 6BT \cdot 2D(N+K)H$），因此忽略 attention 后：
+The FLOPs projected by MLP and QKVO are both **6 × BT × parameter amount** (MLP: $18BTDF = 6BT \cdot 3DF$; QKVO: $12BTD(N+K)H = 6BT \cdot 2D(N+K)H$), so after ignoring attention:
 
 $$
-\text{FLOPs} = 6 \times BT \times \underbrace{(3DF + 2D(N+K)H) \times L}_{\text{总参数量}} = 6 \times N_{\text{tokens}} \times N_{\text{params}}
+\text{FLOPs} = 6 \times BT \times \underbrace{(3DF + 2D(N+K)H) \times L}_{\text{Total number of parameters}} = 6 \times N_{\text{tokens}} \times N_{\text{params}}
 $$
 
-系数 6 = 2（乘加）× 3（前向 + 权重梯度 + 输入梯度），每个参数在训练时被"使用" 6 次。
+Coefficient 6 = 2 (multiply and add) × 3 (forward + weight gradient + input gradient), each parameter is "used" 6 times during training.
 
-> [!example] 使用 6ND 法则
-> 这个法则让估算训练成本变得非常简单：
+> [!example]Use the 6ND rule
+> This rule makes estimating training costs very simple:
 > 
 > ```
-> 训练 FLOPs ≈ 6 × 参数量 × 训练 token 数
+> Training FLOPs ≈ 6 × number of parameters × number of training tokens
 > ```
 > 
-> **例如**：训练一个 70B 参数模型，使用 2T tokens：
+> **Example**: Train a 70B parameter model, using 2T tokens:
 > ```
 > FLOPs = 6 × 70×10⁹ × 2×10¹² = 8.4×10²³ FLOPs
 > ```
 
-#### Attention vs MLP：何时 attention 开始主导？
+#### Attention vs MLP: When does attention start to dominate?
 
-典型配置：$F = 4D$，$D = NH$，$N = K$
+Typical configuration: $F = 4D$, $D = NH$, $N = K$
 
 $$
 \frac{\text{Attention FLOPs}}{\text{Matmul FLOPs}} = \frac{12BT^2NH}{18BTDF + 24BTDNH} = \frac{T}{8D}
 $$
 
-> [!important] 关键结论
-> Dot-product attention 的 FLOPs 只有在 ==$T > 8D$== 时才会开始主导。
+> [!important]Key conclusions
+> FLOPs of Dot-product attention only start to dominate when ==$T > 8D$==.
 > 
-> 对于 $D = 8192$ 的模型，这意味着 **~65K tokens**。
+> For a model with $D = 8192$, this means **~65K tokens**.
 > 
-> ==对于大模型，attention 的二次复杂度实际上并没有那么可怕！==
+> ==For large models, the quadratic complexity of attention is actually not that terrible! ==
 
 
 
-### 进阶话题
+### Advanced topics
 
 #### Mixture of Experts (MoE)
 
-MoE 将单个 dense MLP 替换为多个独立的 "expert" MLP，通过 router 动态选择激活哪些 expert。
+MoE replaces a single dense MLP with multiple independent "expert" MLPs, and dynamically selects which experts to activate through the router.
 
-**核心思想**：增加模型容量（参数量）而不成比例增加计算量。
+**Core idea**: Increase the model capacity (amount of parameters) without increasing the amount of calculation disproportionately.
 
 ```
 Dense:  x → MLP → y
 
-MoE:    x → Router（选 top-k）→ E_1, E_2, ..., E_k → 加权求和 → y
+MoE:    x → Router (select top-k) → E_1, E_2, ..., E_k → weighted sum → y
 ```
 
-**Vanilla MoE 公式 (LLM中具体design有所不同)**：
+**Vanilla MoE formula (the specific design in LLM is different)**:
 
-1. **Router 计算**（选择哪些 expert）：
+1. **Router calculation** (select which experts):
 $$
 G(x) = \text{softmax}(\text{TopK}(x \cdot W_r))
 $$
-其中 $W_r \in \mathbb{R}^{D \times E}$ 是 router 权重，TopK 保留前 k 个最大值，其余置为 $-\infty$。
+Among them, $W_r \in \mathbb{R}^{D \times E}$ is the router weight, TopK retains the top k maximum values, and the rest is $-\infty$.
 
-2. **MoE 输出**（加权组合）：
+2. **MoE output** (weighted combination):
 $$
 \text{MoE}(x) = \sum_{i=1}^{E} G(x)_i \cdot \text{Expert}_i(x)
 $$
-由于 TopK，实际只有 k 个 expert 被激活（其余 $G(x)_i = 0$）。
+Due to TopK, only k experts are actually activated (the rest $G(x)_i = 0$).
 
-3. **负载均衡损失**（防止 expert 使用不均）：
+3. **Load balancing loss** (to prevent uneven use of experts):
 $$
 \mathcal{L}_{\text{aux}} = \alpha \cdot E \cdot \sum_{i=1}^{E} f_i \cdot p_i
 $$
-其中 $f_i$ 是分配给 expert $i$ 的 token 比例，$p_i$ 是 router 对 expert $i$ 的平均概率。
+Where $f_i$ is the proportion of tokens assigned to expert $i$, and $p_i$ is the average probability of router to expert $i$.
 
-#### MoE 参数
+#### MoE Parameters
 
-| 参数 | 说明 | 示例 (DeepSeek v3) |
+| Parameters | Description | Example (DeepSeek v3) |
 |------|------|-------------------|
-| **E** | Expert 数量 | 256 |
-| **k** | 每个 token 激活的 expert 数 | 8 |
+| **E** | Expert quantity | 256 |
+| **k** | Number of experts activated for each token | 8 |
 | **Sparsity** | $E / k$ | 32 |
 
-#### 计算特点
+#### Computing features
 
-- 总参数量增加 $O(E)$ 倍
-- 每 token 激活参数仅增加 $k$ 倍
-- 引入 AllToAll 通信开销
+- The total number of parameters increases $O(E)$ times
+- The activation parameters are only increased by $k$ times per token
+- Introduce AllToAll communication overhead
 
-要达到 compute-bound，需要 $B > 120E/k$（DeepSeek E=256, k=8 时约 3840），推理时是相当大的 batch size。
+To achieve compute-bound, $B > 120E/k$ is required (about 3840 when DeepSeek E=256, k=8), which is a quite large batch size during inference.
 
 ---
 
-### 梯度检查点 (Gradient Checkpointing)
+### Gradient Checkpointing
 
-保存中间激活避免 $O(L^2)$ 重计算，但内存开销极大：
+Saving intermediate activations avoids $O(L^2)$ recalculation, but the memory overhead is huge:
 
-> [!warning] 激活内存示例
-> 对于 $BT = 4M$ tokens，$L = 64$ 层，$D = 8192$：
+> [!warning]Activate memory example
+> For $BT = 4M$ tokens, $L = 64$ layer, $D = 8192$:
 > ```
-> 激活内存 ≈ 2 × 20 × BT × D × L = 84 TB (bf16)!
+> Activate memory ≈ 2 × 20 × BT × D × L = 84 TB (bf16)!
 > ```
 
-#### 检查点策略
+#### Checkpoint strategy
 
-| 策略 | 保存内容 | FLOPs 开销 |
+| Strategy | Saving Content | FLOPs Overhead |
 |------|----------|------------|
-| **Block Remat** | 每层输入 (1 checkpoint/层) | 从 $6ND$ 增加到 $8ND$ |
-| **Big Matmuls Only** | 大矩阵乘法的输出 (7/层) | 避免重计算大矩阵乘法 |
+| **Block Remat** | Input per layer (1 checkpoint/layer) | Increased from $6ND$ to $8ND$ |
+| **Big Matmuls Only** | Output of big matrix multiplication (7/layer) | Avoid recomputing big matrix multiplication |
 
 ---
 
 ### KV Cache
 
-LLM 推理的两个阶段：
+Two stages of LLM inference:
 
-1. **Prefill**：处理 prompt，保存 K/V 到 cache
-2. **Decode**：逐 token 生成，复用 KV cache
+1. **Prefill**: Process prompt and save K/V to cache
+2. **Decode**: Generate token by token and reuse KV cache
 
 $$
 \text{KV Cache Size} = 2 \times S \times L \times K \times H
 $$
 
-> [!example] KV Cache 大小示例
-> 8K context，64 层，$KH = D = 8192$：
+> [!example]KV Cache size example
+> 8K context, 64 layers, $KH = D = 8192$:
 > ```
 > KV Cache = 2 × 8192 × 64 × 8192 = 8 GiB (int8)
 > ```
-> ==这就是为什么 GQA ($K \ll N$) 如此重要！==
+> ==This is why GQA ($K \ll N$) is so important! ==
 
 
-### 典型模型配置参考
+### Typical model configuration reference
 
-| 参数 | 7B | 13B | 70B |
+| Parameters | 7B | 13B | 70B |
 |------|-----|------|------|
 | D (model dim) | 4096 | 5120 | 8192 |
 | L (layers) | 32 | 40 | 80 |
@@ -308,15 +308,15 @@ $$
 
 ## Back to nano-vllm
 
-> 这一部分主要讲每个 **module 的设计**（`models/qwen3.py`、`layers/` 下各子模块），包括 attention、linear、embedding、sampler 等的实现细节。下一篇（Part 2）会讲 **system 的设计**：KV cache 管理、scheduler、continuous batching 等推理引擎核心。
+> This part mainly talks about the design of each **module** (submodules under `models/qwen3.py`, `layers/`), including the implementation details of attention, linear, embedding, sampler, etc. The next article (Part 2) will talk about **system design**: KV cache management, scheduler, continuous batching and other inference engine cores.
 
-接下来回到nano-vllm，从models/qwen3.py开始
+Next, go back to nano-vllm and start with models/qwen3.py
 
-这个文件的核心是如下的 Attention 设计：
+The core of this document is the following Attention design:
 
 ### 1. Grouped Query Attention (GQA)
 
-`num_heads (Q) >> num_kv_heads (K/V)`：Q 头数远多于 K/V 头数（例如 32Q heads vs 8KV heads），K/V 权重在多个 Q head 之间共享，大幅减少 KV Cache 显存。
+`num_heads (Q) >> num_kv_heads (K/V)`: The number of Q heads is much more than the number of K/V heads (for example, 32Q heads vs 8KV heads). The K/V weight is shared among multiple Q heads, greatly reducing the KV Cache memory.
 
 ```python
 # qwen3.py:30-38
@@ -326,9 +326,9 @@ self.q_size  = self.num_heads    * self.head_dim
 self.kv_size = self.num_kv_heads * self.head_dim        # kv_size << q_size
 ```
 
-### 2. QK Norm（RMSNorm on Q and K）
+### 2. QK Norm (RMSNorm on Q and K)
 
-Qwen3 的独特设计：在 RoPE 之前对 Q、K 各做一次 RMSNorm（per head_dim）：
+The unique design of Qwen3: do RMSNorm (per head_dim) on Q and K once before RoPE:
 
 ```python
 # qwen3.py:81-83
@@ -337,115 +337,115 @@ if not self.qkv_bias:
     k = self.k_norm(k)  # RMSNorm on each head's k
 ```
 
-**为什么需要 QK Norm？**
+**Why do you need QK Norm? **
 
-- 防止 attention logit（$QK^T / \sqrt{d}$）数值爆炸，训练更稳定
-- 替代了传统的 `qkv_bias`（当 `qkv_bias=False` 时启用）
-- 与 Llama 等模型的区别：Qwen3 对每个 head 单独做 norm，粒度更细
+- Prevent attention logit ($QK^T / \sqrt{d}$) value from exploding, making training more stable
+- Replaced the traditional `qkv_bias` (enabled when `qkv_bias=False`)
+- Differences from models such as Llama: Qwen3 performs norm on each head separately, with finer granularity
 
 ![[assets/Pasted image 20260227222651.png]]
 
-### 3. SwiGLU 激活函数
+### 3. SwiGLU activation function
 
-**SwiGLU** 是 GLU（Gated Linear Unit）的变体，公式为：
+**SwiGLU** is a variant of GLU (Gated Linear Unit), the formula is:
 
 $$\text{SwiGLU}(x_1, x_2) = \text{SiLU}(x_1) \times x_2$$
 
-两个优势：**门控机制**（$x_2$ 动态控制每个维度信息流通量，表达能力更强）；**SiLU 平滑**（$x \cdot \sigma(x)$，比 ReLU 梯度更稳定）。Google 在 *GLU Variants Improve Transformer (2020)* 中实验证明 SwiGLU 在语言模型上效果最好，此后成为主流。
+Two advantages: **Gating mechanism** ($x_2$ dynamically controls the information flow in each dimension, with stronger expressive ability); **SiLU smoothing** ($x \cdot \sigma(x)$, more stable than ReLU gradient). Google experimentally proved that SwiGLU works best on language models in *GLU Variants Improve Transformer (2020)*, and has since become mainstream.
 
-**`layers/activation.py` forward 逐行解读**：
+**`layers/activation.py` forward line-by-line interpretation**:
 
 ```python
 def forward(self, x: torch.Tensor) -> torch.Tensor:
-    x, y = x.chunk(2, -1)  # 沿最后一维切成两半
-    return F.silu(x) * y    # 对前半做 SiLU，再和后半逐元素相乘
+    x, y = x.chunk(2, -1)  # split the last dimension into two halves
+    return F.silu(x) * y    # apply SiLU to the first half, then multiply elementwise with the second half
 ```
 
-| 步骤 | 操作 | 结果 shape |
+| step | operation | result shape |
 |------|------|-----------|
-| 输入 | Linear 将 hidden 投影到 2× 宽度 | `[B, L, 2H]` |
-| `x.chunk(2, -1)` | 最后一维切成两半，得到 x 和 y | 各 `[B, L, H]` |
-| `F.silu(x)` | 激活：$x \cdot \sigma(x)$ | `[B, L, H]` |
-| `* y` | 与门控信号 y 逐元素相乘 | `[B, L, H]` |
+| Input | Linear projects hidden to 2× width | `[B, L, 2H]` |
+| `x.chunk(2, -1)` | Cut the last dimension in half to get x and y | Each `[B, L, H]` |
+| `F.silu(x)` | Activation: $x \cdot \sigma(x)$ | `[B, L, H]` |
+| `* y` | Element-wise multiplication of gated signal y | `[B, L, H]` |
 
-> [!note] 为什么 Linear 投影到 2H？
-> SwiGLU 需要两路输入，FFN 第一个 Linear 输出设为 `intermediate_size * 2`，forward 中 chunk 成两份，一份激活、一份门控。这正是 `layers/activation.py:13` 的作用。
+> [!note]Why does Linear project to 2H?
+> SwiGLU requires two inputs. The first Linear output of FFN is set to `intermediate_size * 2`, and the chunk in forward is divided into two parts, one for activation and one for gate. This is exactly what `layers/activation.py:13` does.
 
-### 4. LayerNorm vs RMSNorm（`layers/layernorm.py`）
+### 4. LayerNorm vs RMSNorm (`layers/layernorm.py`)
 
-| | 公式 | 特点 |
+| | Formula | Features |
 |---|---|---|
-| **LayerNorm** | $(x - \mu) / \sqrt{\sigma^2 + \varepsilon} \cdot \gamma + \beta$ | 先中心化再归一化 |
-| **RMSNorm** | $x / \sqrt{\text{mean}(x^2) + \varepsilon} \cdot \gamma$ | 去掉减均值步骤，更快 |
+| **LayerNorm** | $(x - \mu) / \sqrt{\sigma^2 + \varepsilon} \cdot \gamma + \beta$ | Center first and then normalize |
+| **RMSNorm** | $x / \sqrt{\text{mean}(x^2) + \varepsilon} \cdot \gamma$ | Remove the mean subtraction step, faster |
 
-RMSNorm 省去了均值计算，实验表明效果与 LayerNorm 相当，因此成为现代 LLM（LLaMA、Qwen3）的默认选择。
+RMSNorm eliminates the need for mean calculation, and experiments show that the effect is equivalent to LayerNorm, so it has become the default choice for modern LLM (LLaMA, Qwen3).
 
-### 5. RoPE 位置编码（`layers/rope.py`）
+### 5. RoPE position encoding (`layers/rope.py`)
 
-**核心思想**：对 head 中每对维度 $(x_1, x_2)$ 做旋转，频率 $\theta_i = 1 / \text{base}^{2i/d}$（base 通常 10000，Qwen 用更大值）：
+**Core idea**: Rotate each pair of dimensions $(x_1, x_2)$ in head, frequency $\theta_i = 1 / \text{base}^{2i/d}$ (base is usually 10000, Qwen uses a larger value):
 
 $$y_1 = x_1\cos\theta - x_2\sin\theta, \quad y_2 = x_2\cos\theta + x_1\sin\theta$$
 
-`apply_rotary_emb` 直接实现上式，无额外变换。
+`apply_rotary_emb` directly implements the above formula without additional transformation.
 
-**三个工程优化**：
+**Three engineering optimizations**:
 
-**① 预计算 cache**（`__init__` 里）：
+**① Precomputation cache** (in `__init__`):
 
 ```python
-inv_freq = 1.0 / (base ** (arange(0, d, 2) / d))     # 频率向量
-freqs    = einsum("i,j->ij", positions, inv_freq)      # 外积 [max_pos, d/2]
+inv_freq = 1.0 / (base ** (arange(0, d, 2) / d))     # frequency vector
+freqs    = einsum("i,j->ij", positions, inv_freq)      # outer product [max_pos, d/2]
 cache    = cat(cos, sin, dim=-1).unsqueeze_(1)         # [max_pos, 1, d]
 ```
 
-把所有位置的 cos/sin 提前算好存表，推理时直接 gather，避免重复计算。
+Calculate the cos/sin of all positions in advance and store them in the table, and gather them directly during inference to avoid repeated calculations.
 
-**② 按位置索引**（`forward` 里）：
+**② Index by position** (in `forward`):
 
 ```python
-cos_sin = self.cos_sin_cache[positions]   # 直接 gather，支持非连续位置
+cos_sin = self.cos_sin_cache[positions]   # direct gather, supports non-consecutive positions
 cos, sin = cos_sin.chunk(2, dim=-1)
 ```
 
-支持 prefill/decode 混合场景中的非连续 token 位置。
+Support non-consecutive token positions in prefill/decode mixed scenarios.
 
-**③ `lru_cache(1)` 单例化**：
+**③ `lru_cache(1)` singleton**:
 
 ```python
 @lru_cache(1)
 def get_rope(...):
-    assert rope_scaling is None   # 只支持标准 RoPE
+    assert rope_scaling is None   # only standard RoPE is supported
 ```
 
-全局只创建一个 RoPE 实例，节省显存；`assert` 明确不支持 YaRN / 线性插值等扩展。
+Only one RoPE instance is created globally to save video memory; `assert` explicitly does not support extensions such as YaRN/linear interpolation.
 
-### 6. 采样策略（`layers/sampler.py`）
+### 6. Sampling strategy (`layers/sampler.py`)
 
-原始的nano-vllm采用的是普通的贪心采样，这里可以简单扩展讨论一下top-p采样。
-采样分三步：温度缩放 → Top-p 过滤 → Gumbel-max 采样。
+The original nano-vllm uses ordinary greedy sampling. Here we can briefly expand and discuss top-p sampling.
+Sampling is divided into three steps: temperature scaling → Top-p filtering → Gumbel-max sampling.
 
-#### Step 1 — Temperature Scaling（第 13 行）
+#### Step 1 — Temperature Scaling (line 13)
 
 ```python
 logits = logits.div_(temperatures.unsqueeze(1))
 ```
 
-温度的本质是"拉伸或压缩 logit 之间的差距"：
+The essence of temperature is "stretching or compressing the gap between logits":
 
-| 温度 | 效果 | 用途 |
+| Temperature | Effect | Usage |
 |------|------|------|
-| T < 1（如 0.3） | 差距放大，高分 token 概率更集中 | 输出更确定、保守 |
-| T = 1 | 不变 | 模型原始分布 |
-| T > 1（如 2.0） | 差距缩小，概率趋于均匀 | 输出更多样、创意 |
+| T < 1 (such as 0.3) | The gap is enlarged, and the probability of high-scoring tokens is more concentrated | The output is more certain and conservative |
+| T = 1 | unchanged | model original distribution |
+| T > 1 (such as 2.0) | The gap narrows and the probability tends to be uniform | The output is more diverse and creative |
 
-*例：logits = [10, 5, 1]，T=0.5 → [20, 10, 2]，softmax 后最大值概率更高。*
+*Example: logits = [10, 5, 1], T=0.5 → [20, 10, 2], the probability of the maximum value is higher after softmax. *
 
-#### Step 2 — Top-p 过滤（第 15–20 行）
+#### Step 2 — Top-p filtering (lines 15–20)
 
 ```python
 sorted_logits, sorted_indices = torch.sort(logits, descending=True)
 cumulative_probs = softmax(sorted_logits).cumsum(-1)
-# 累计概率超过 p 之后的 token 屏蔽为 -inf
+# mask tokens after cumulative probability exceeds p as -inf
 to_remove = (cumulative_probs - softmax(sorted_logits)) >= top_ps
 logits = logits.masked_fill(to_remove, float('-inf'))
 ```
@@ -454,78 +454,78 @@ logits = logits.masked_fill(to_remove, float('-inf'))
 token:   A     B     C     D     E
 prob:   0.5   0.3   0.1   0.06  0.04
 cumsum: 0.5   0.8   0.9   0.96  1.0
-                    ↑ top_p=0.9 恰好在此截断，D/E 被屏蔽
+                    ↑ top_p=0.9 cuts off exactly here; D/E are masked
 ```
 
-`cumsum - prob`（加入当前 token *之前*的累计概率）确保恰好触碰到 p 的那个 token 被保留。
+`cumsum - prob` (the cumulative probability *before* adding the current token) ensures that the token that happens to touch p is retained.
 
-#### Step 3 — Gumbel-max 采样（第 22–23 行）
+#### Step 3 — Gumbel-max sampling (lines 22–23)
 
 ```python
 probs.div_(torch.empty_like(probs).exponential_(1)).argmax()
 ```
 
-从过滤后的分布中随机采样。随机性来自为每个 token 独立采样的 $\text{Exp}(1)$ 随机变量，再用 $p_i / E_i$ 取 argmax。
+Randomly sample from the filtered distribution. The randomness comes from $\text{Exp}(1)$ random variables sampled independently for each token, and then $p_i / E_i$ is used to take argmax.
 
-**为什么等价于按概率采样？**（Gumbel-Max Trick）
+**Why is it equivalent to sampling by probability? **(Gumbel-Max Trick)
 
-从分类分布 $p$ 采样等价于：
+Sampling from a categorical distribution $p$ is equivalent to:
 
 $$\text{argmax}\bigl(\log p_i + G_i\bigr), \quad G_i \sim \text{Gumbel}(0,1)$$
 
-利用 $G_i = -\log E_i,\ E_i \sim \text{Exp}(1)$，代入得：
+Using $G_i = -\log E_i,\ E_i \sim \text{Exp}(1)$, substitute:
 
 $$\text{argmax}\bigl(\log p_i - \log E_i\bigr) = \text{argmax}\bigl(\log(p_i / E_i)\bigr) = \text{argmax}(p_i / E_i)$$
 
-即代码中的写法，在数学上严格等价于从原始分布采样。
+That is, the way it is written in the code is strictly mathematically equivalent to sampling from the original distribution.
 
-### 7. 列并行与行并行 Linear（`layers/linear.py`, `embed_head.py`）
+### 7. Column parallelism and row parallelism Linear (`layers/linear.py`, `embed_head.py`)
 
 ![[assets/Pasted image 20260302111018.png]]
 
-对线性层 $Y = XW$，TP 有两种切法：
+For linear layer $Y = XW$, TP has two cutting methods:
 
-**列并行（Column Parallel，按输出维切 W）**：每卡算一段输出通道 $Y_i = XW_i$，各卡输出天然不重叠。
-- Forward：无通信（各卡独立算，后续需完整 Y 时 concat/all-gather）
-- Backward：算 $dX = \sum_i dY_i W_i^\top$ 时需要 all-reduce
+**Column Parallel (cut by output dimension W)**: Each card counts an output channel $Y_i = XW_i$, and the output of each card naturally does not overlap.
+- Forward: No communication (each card is calculated independently, subsequent concat/all-gather requires complete Y)
+- Backward: All-reduce is required when calculating $dX = \sum_i dY_i W_i^\top$
 
-**行并行（Row Parallel，按输入维切 W）**：每卡拿到一段输入 $X_i$，算部分和 $Y_i = X_i W_i$，最终 $Y = \sum_i Y_i$。
-- Forward：需要 all-reduce（把各卡部分和加起来）
-- Backward：$dX_i = dY W_i^\top$ 各卡各算，不需要 all-reduce
+**Row Parallel (press input dimension W)**: Each card gets a piece of input $X_i$, calculates the partial sum $Y_i = X_i W_i$, and finally $Y = \sum_i Y_i$.
+- Forward: requires all-reduce (add up the parts of each card)
+- Backward: $dX_i = dY W_i^\top$ Each card is calculated separately, no all-reduce is required
 
-**一句话**：forward 通信上，列并行是 gather、行并行是 reduce；但列并行的 backward 仍需 all-reduce。
+**One sentence**: For forward communication, column parallelism is gather and row parallelism is reduce; but column parallel backward still requires all-reduce.
 
-> [!note] vLLM 是推理系统，无 backward
-> 推理时只跑 forward：列并行完全无通信，行并行仍需 all-reduce（把各卡的部分 logit 求和）。所以 vLLM 中 FFN 的 gate/up 矩阵用列并行（free），down 矩阵用行并行（one all-reduce per layer）。
+> [!note]vLLM is an inference system without backward
+> Only run forward during inference: column parallelism has no communication at all, and row parallelism still requires all-reduce (summing the partial logit of each card). Therefore, the gate/up matrix of FFN in vLLM uses column parallelism (free), and the down matrix uses row parallelism (one all-reduce per layer).
 
-**所有 Linear 类继承自 `LinearBase`**，核心差异在权重如何切分（`weight_loader`）和 forward 是否需要通信：
+**All Linear classes inherit from `LinearBase`**. The core difference is how the weight is divided (`weight_loader`) and whether forward communication is required:
 
-| 类 | weight 形状（单卡） | 通信 | 用途 |
+| class | weight shape (single card) | communication | purpose |
 |---|---|---|---|
-| `ReplicatedLinear` | `[O, I]`（完整复制） | 无 | RMSNorm weight 等小参数 |
-| `ColumnParallelLinear` | `[O/tp, I]`（按输出维切） | 无 | FFN up/gate（后接 Row） |
-| `MergedColumnParallelLinear` | `[(O1+O2)/tp, I]` | 无 | FFN gate+up 合并一次 kernel |
-| `QKVParallelLinear` | `[(Nq+2Nkv)·H/tp, I]` | 无 | Q/K/V 合并，GQA 时 K/V shard 更小 |
-| `RowParallelLinear` | `[O, I/tp]`（按输入维切） | all_reduce | FFN down，各卡部分和求和 |
+| `ReplicatedLinear` | `[O, I]` (complete copy) | None | Small parameters such as RMSNorm weight |
+| `ColumnParallelLinear` | `[O/tp, I]` (cut by output dimension) | None | FFN up/gate (followed by Row) |
+| `MergedColumnParallelLinear` | `[(O1+O2)/tp, I]` | None | FFN gate+up merge once kernel |
+| `QKVParallelLinear` | `[(Nq+2Nkv)·H/tp, I]` | None | Q/K/V merge, K/V shard is smaller in GQA |
+| `RowParallelLinear` | `[O, I/tp]` (press input dimension) | all_reduce | FFN down, sum the partial sum of each card |
 
-**关键实现细节**：
+**Key implementation details**:
 
-`weight_loader` 以属性挂载到 `Parameter` 上，checkpoint 加载时统一调用，每个类自己决定怎么切分——无需修改加载逻辑。
+`weight_loader` is mounted on `Parameter` as an attribute, and checkpoint is called uniformly when loading. Each class decides how to split it - no need to modify the loading logic.
 
-`RowParallelLinear` bias 只在 rank 0 加：`bias if tp_rank == 0 else None`，避免 all_reduce 后 bias 被累加 tp_size 倍。
+`RowParallelLinear` bias is only added at rank 0: `bias if tp_rank == 0 else None` to avoid bias being accumulated tp_size times after all_reduce.
 
-**数学等价性**（Column + Row 配对）：
+**Mathematical equivalence** (Column + Row pairing):
 ```
-完整: y = x @ W.T
-分片: x 完整，W 按输出维切 → 各卡 y_i = x @ Wi.T，concat 得 y   ← ColumnParallel
-      x 分片，W 按输入维切 → 各卡 y_i = xi @ Wi.T，all_reduce sum ← RowParallel
+Full: y = x @ W.T
+Sharded: x is full, W is split along output dim → each GPU computes y_i = x @ Wi.T, concat gives y   ← ColumnParallel
+         x is sharded, W is split along input dim → each GPU computes y_i = xi @ Wi.T, all_reduce sum ← RowParallel
 ```
 
-### 8. VocabParallelEmbedding 与 ParallelLMHead（`embed_head.py`）
+### 8. VocabParallelEmbedding and ParallelLMHead (`embed_head.py`)
 
 #### VocabParallelEmbedding
 
-**`__init__`**：词表按 TP 均分，每卡持有 `vocab/tp` 个向量：
+**`__init__`**: The vocabulary list is divided equally by TP, and each card holds `vocab/tp` vectors:
 
 ```python
 self.vocab_start_idx = num_embeddings_per_partition * tp_rank
@@ -533,19 +533,19 @@ self.vocab_end_idx   = vocab_start_idx + num_embeddings_per_partition
 self.weight = nn.Parameter(torch.empty(num_embeddings_per_partition, embedding_dim))
 ```
 
-**`forward`**：查表 + all_reduce
+**`forward`**: lookup table + all_reduce
 
 ```python
 mask = (x >= vocab_start_idx) & (x < vocab_end_idx)
-x    = mask * (x - vocab_start_idx)  # 范围外归零（避免越界崩溃）
-y    = F.embedding(x, self.weight)   # 安全查表，范围外结果无意义
-y    = mask.unsqueeze(1) * y         # mask 抹掉无意义结果
-dist.all_reduce(y)                   # 每个 token 只有一卡非零，sum = 正确向量
+x    = mask * (x - vocab_start_idx)  # zero out out-of-range values (avoid out-of-bounds crashes)
+y    = F.embedding(x, self.weight)   # safe lookup; out-of-range results are meaningless
+y    = mask.unsqueeze(1) * y         # mask out meaningless results
+dist.all_reduce(y)                   # for each token only one GPU is nonzero, so sum = correct vector
 ```
 
-为什么不直接跳过范围外的 token？GPU 上 if/else 很贵，用 "先安全查、再 mask 清零" 的 trick 避免条件分支。
+Why not just skip out-of-range tokens? If/else is very expensive on GPU, use the trick of "safety check first, then clear mask" to avoid conditional branches.
 
-数值示例（tp=2, vocab=10）：
+Numerical example (tp=2, vocab=10):
 ```
 x = [2, 7, 0, 5]
 GPU 0 (id 0~4): y = embed([2,0,0,0]) * mask → [vec2, 0, vec0, 0]
@@ -555,17 +555,17 @@ all_reduce sum → [vec2, vec7, vec0, vec5] ✓
 
 #### ParallelLMHead
 
-继承 `VocabParallelEmbedding` **共享权重**，但 forward 完全不同：
+Inherits `VocabParallelEmbedding` **Shared weights**, but forward is completely different:
 
 ```python
 def forward(self, x):
-    # Prefill 只取每段最后一个 token（只需预测下一个 token）
+    # In prefill, only take the last token of each segment (only need to predict the next token)
     if context.is_prefill:
         x = x[context.cu_seqlens_q[1:] - 1].contiguous()
 
     logits = F.linear(x, self.weight)   # [batch, vocab/tp]
 
-    # gather 到 rank 0 拼接完整 logits（只有 rank 0 做采样）
+    # gather to rank 0 and concatenate full logits (only rank 0 performs sampling)
     if tp_size > 1:
         all_logits = [torch.empty_like(logits) for _ in range(tp_size)] if rank == 0 else None
         dist.gather(logits, all_logits, dst=0)
@@ -575,42 +575,42 @@ def forward(self, x):
 
 | | VocabParallelEmbedding | ParallelLMHead |
 |---|---|---|
-| 通信 | all_reduce（所有卡都需要结果） | gather → rank 0（只有 rank 0 采样） |
-| 原因 | 所有卡的下一层都要用 embedding | 采样只在 rank 0 做 |
+| communication | all_reduce (all cards require results) | gather → rank 0 (only rank 0 samples) |
+| Reason | The next layer of all cards must use embedding | Sampling is only done at rank 0 |
 
-**Prefill 只算最后一个 token**：输入序列 [tok1...tokN] 只需 tokN 的 logits，LM Head 计算量从 `seq_len × vocab` 降为 `batch × vocab`。
+**Prefill only counts the last token**: the input sequence [tok1...tokN] only needs the logits of tokN, and the calculation amount of LM Head is reduced from `seq_len × vocab` to `batch × vocab`.
 
 
 
 ---
 
-## GQA 实现要点（面试重点）
+## GQA implementation key points (interview focus)
 
-**核心思想**：多个 Q head 共享同一组 K/V head，KV cache 大小 ∝ `num_kv_heads`（而非 `num_heads`）。
+**Core idea**: Multiple Q heads share the same set of K/V heads, and the KV cache size is ∝ `num_kv_heads` (not `num_heads`).
 
 ```
 MHA (28Q, 28KV): Q0↔KV0, Q1↔KV1, ..., Q27↔KV27
 GQA (28Q,  4KV): Q0~Q6↔KV0, Q7~Q13↔KV1, Q14~Q20↔KV2, Q21~Q27↔KV3
-节省倍数 = num_heads / num_kv_heads = 28 / 4 = 7×
+Savings factor = num_heads / num_kv_heads = 28 / 4 = 7×
 ```
 
-**5 步实现**（以 Qwen3 + nano-vllm 为例）：
+**5-step implementation** (taking Qwen3 + nano-vllm as an example):
 
-**① 声明不对称 head 数**
+**① Declare asymmetric head number**
 ```python
-self.num_heads    = total_num_heads    // tp_size   # Q heads/卡（大）
-self.num_kv_heads = total_num_kv_heads // tp_size   # KV heads/卡（小）
+self.num_heads    = total_num_heads    // tp_size   # Q heads / GPU (large)
+self.num_kv_heads = total_num_kv_heads // tp_size   # KV heads / GPU (small)
 self.q_size  = self.num_heads    * head_dim
 self.kv_size = self.num_kv_heads * head_dim
 ```
 
-**② QKV 投影输出不对称维度**
+**② QKV projection output asymmetric dimension**
 ```python
 # output = (28 + 2×4) × head_dim = 36 × head_dim
 output_size = (total_num_heads + 2 * total_num_kv_heads) * head_dim
 ```
 
-**③ split 按不同大小切分**
+**③ split split into different sizes**
 ```python
 q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
 q = q.view(-1, num_heads,    head_dim)   # [N, 28/tp, d]
@@ -618,29 +618,29 @@ k = k.view(-1, num_kv_heads, head_dim)   # [N,  4/tp, d]
 v = v.view(-1, num_kv_heads, head_dim)   # [N,  4/tp, d]
 ```
 
-**④ Flash Attention 原生支持 GQA**：`flash_attn_varlen_func` 当 `num_heads != num_kv_heads` 时自动广播 K/V，无需手动 `repeat_kv`。
+**④ Flash Attention natively supports GQA**: `flash_attn_varlen_func` automatically broadcasts K/V when `num_heads != num_kv_heads`, without manual `repeat_kv`.
 
-**⑤ KV cache 按 kv_heads 分配**
+**⑤ KV cache is allocated according to kv_heads**
 ```python
 # kv_cache shape: [2, num_layers, num_blocks, block_size, num_kv_heads, head_dim]
-#                                                          ↑ 只存 4 份，不是 28 份
+#                                                          ↑ stores only 4 copies, not 28
 ```
 
-**面试高频问题**：
+**Frequently Asked Interview Questions**:
 
-> **Q: GQA 节省的是什么内存？节省多少？**
-> KV cache（推理时的主要内存瓶颈）。节省倍数 = `num_heads / num_kv_heads`。Qwen3-8B：28Q/8KV = 3.5×；LLaMA-3-70B：64Q/8KV = 8×。模型权重本身（W_K, W_V）也等比减小。
+> **Q: What kind of memory does GQA save? How much is saved? **
+> KV cache (the main memory bottleneck during inference). Savings multiplier = `num_heads / num_kv_heads`. Qwen3-8B: 28Q/8KV = 3.5×; LLaMA-3-70B: 64Q/8KV = 8×. The model weights themselves (W_K, W_V) also decrease proportionally.
 
-> **Q: GQA 和 MQA 的区别？**
-> MQA（Multi-Query Attention）是 GQA 的极端情况（`num_kv_heads=1`），所有 Q head 共享同一个 K/V。GQA 是折中方案，效果接近 MHA，KV cache 接近 MQA。
+> **Q: What is the difference between GQA and MQA? **
+> MQA (Multi-Query Attention) is the extreme case of GQA (`num_kv_heads=1`), all Q heads share the same K/V. GQA is a compromise solution, the effect is close to MHA, and KV cache is close to MQA.
 
-> **Q: GQA 在 TP 下如何切分？**
-> Q/K/V 都按 `// tp_size` 切分，但需保证 `num_kv_heads` 能被 `tp_size` 整除。如果 `num_kv_heads < tp_size`，部分卡没有 KV head，需要额外的 broadcast 逻辑（不常见）。
+> **Q: How is GQA split under TP? **
+> Q/K/V are all divided according to `// tp_size`, but it must be ensured that `num_kv_heads` can be evenly divided by `tp_size`. If `num_kv_heads < tp_size`, some cards do not have KV heads, requiring additional broadcast logic (uncommon).
 
-> **Q: 为什么不需要手动 repeat K/V？**
-> Flash Attention kernel 内部直接根据 `num_heads / num_kv_heads`（group size）做 broadcast，在寄存器级别完成，比显式 repeat 节省显存且更高效。
+> **Q: Why is there no need to manually repeat K/V? **
+> Flash Attention kernel internally performs broadcast directly based on `num_heads / num_kv_heads` (group size), which is completed at the register level, saving video memory and more efficient than explicit repeat.
 
-## 参考资料
+## References
 
 - [How To Scale Your Model - Part 4: Transformers](https://jax-ml.github.io/scaling-book/transformers/)
 - [The Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/)

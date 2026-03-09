@@ -1,54 +1,54 @@
-## 1. 引言：什么是 Compute-Bound Kernel
+## 1. Introduction: What Is a Compute-Bound Kernel
 
-Compute-bound kernel 是指其性能瓶颈在于 GPU 的计算单元（ALU/FPU/Tensor Core）处理能力，而非内存带宽。这类 kernel 的特征是：
+A compute-bound kernel is one whose performance bottleneck is the throughput of the GPU's compute units (ALU/FPU/Tensor Core), rather than memory bandwidth. Such kernels typically have the following characteristics:
 
-- **高算术强度（Arithmetic Intensity）**：每从内存加载一个字节的数据，需要执行大量的浮点运算
-- **计算单元利用率是关键**：优化目标是最大化 SM（Streaming Multiprocessor）的计算吞吐量
-- **典型代表**：矩阵乘法、卷积、注意力机制等
+- **High arithmetic intensity**: each byte loaded from memory is used for many floating-point operations
+- **Compute-unit utilization is critical**: the optimization goal is to maximize the compute throughput of each SM (Streaming Multiprocessor)
+- **Typical examples**: matrix multiplication, convolution, attention, and similar operators
 
-### 1.1 Compute-Bound 的判断标准
+### 1.1 Criteria for Identifying Compute-Bound Kernels
 
 ```
-算术强度 = FLOPs / Bytes_Accessed
+Arithmetic intensity = FLOPs / Bytes_Accessed
 
-若 算术强度 > GPU峰值计算能力 / GPU峰值带宽
-则该 kernel 为 compute-bound
+If arithmetic intensity > GPU peak compute throughput / GPU peak bandwidth
+then the kernel is compute-bound
 ```
 
-以 NVIDIA A100 为例：
-- 峰值计算能力（FP32）：19.5 TFLOPS
-- 峰值带宽：2039 GB/s
-- 临界算术强度 ≈ 9.6 FLOPs/Byte
+Taking the NVIDIA A100 as an example:
+- Peak compute throughput (FP32): 19.5 TFLOPS
+- Peak bandwidth: 2039 GB/s
+- Critical arithmetic intensity ≈ 9.6 FLOPs/Byte
 
-### 1.2 常见Compute-Bound Kernel 类型
+### 1.2 Common Types of Compute-Bound Kernels
 
-| Kernel 类型 | 算术强度 | 典型应用场景 |
+| Kernel type | Arithmetic intensity | Typical application scenarios |
 |------------|---------|-------------|
-| GEMM | O(N) | 全连接层、注意力投影 |
-| 卷积 | O(K²) | CNN、图像处理 |
+| GEMM | O(N) | Fully connected layers, attention projections |
+| Convolution | O(K²) | CNN, image processing |
 | Self-Attention | O(N) | Transformer |
-| 复杂激活函数 | O(1) 但计算密集 | GELU、Swish、SiLU |
-| 融合 Kernel | 变化大 | 各种算子融合 |
+| Complex activation functions | O(1) but computationally intensive | GELU, Swish, SiLU |
+| Fused kernels | Varies widely | Fusion of multiple operators |
 
 ---
 
-## 2. 矩阵乘法 (GEMM) 优化
+## 2. Matrix Multiplication (GEMM) Optimization
 
-矩阵乘法 `C = A × B` 是最经典的 compute-bound kernel，也是深度学习中最核心的操作。
+Matrix multiplication `C = A × B` is the canonical compute-bound kernel and one of the most fundamental operations in deep learning.
 
-### 2.1 GEMM 的计算特性
+### 2.1 Computational Characteristics of GEMM
 
-对于 `C[M,N] = A[M,K] × B[K,N]`：
+For `C[M,N] = A[M,K] × B[K,N]`:
 - **FLOPs**: 2 × M × N × K
-- **数据访问**: M×K + K×N + M×N（写回）
-- **算术强度**: 约 2×M×N×K / (M×K + K×N + M×N) ≈ O(min(M,N,K))
+- **Data access**: M×K + K×N + M×N (write-back)
+- **Arithmetic intensity**: approximately 2×M×N×K / (M×K + K×N + M×N) ≈ O(min(M,N,K))
 
-当矩阵足够大时，GEMM 几乎总是 compute-bound。
+When the matrices are large enough, GEMM is almost always compute-bound.
 
-### 2.2 朴素实现（Baseline）
+### 2.2 Naive Implementation (Baseline)
 
 ```cuda
-// 朴素 GEMM - 每个线程计算 C 的一个元素
+// Naive GEMM - each thread computes one element of C
 __global__ void gemm_naive(
     const float* A, const float* B, float* C,
     int M, int N, int K
@@ -66,45 +66,45 @@ __global__ void gemm_naive(
 }
 ```
 
-**问题分析**：
-1. 全局内存访问模式差（B 矩阵的列访问不连续）
-2. 没有数据重用
-3. 每个线程只计算一个输出元素，效率低
+**Problems**:
+1. Poor global memory access patterns (column-wise accesses to matrix B are not contiguous)
+2. No data reuse
+3. Each thread computes only one output element, leading to low efficiency
 
-### 2.3 共享内存分块（Tiling）优化
+### 2.3 Shared-Memory Tiling Optimization
 
 ---
 
-> 💡 **核心技巧：Shared Memory Tiling（共享内存分块）**
+> 💡 **Core Technique: Shared-Memory Tiling**
 >
-> Tiling 是 CUDA 优化中**最重要的通用技巧之一**，几乎出现在所有高性能 kernel 中。核心思想只有一句话：**把数据从慢的全局内存（HBM, ~1TB/s）搬到快的共享内存（SRAM, ~19TB/s），然后在快的内存上重复使用多次**。
+> Tiling is one of the most important general techniques in CUDA optimization, and it appears in almost every high-performance kernel. The core idea is simple: **move data from slow global memory (HBM, ~1 TB/s) into fast shared memory (SRAM, ~19 TB/s), then reuse it many times from the fast memory**.
 
-**为什么需要 Tiling？** 以 GEMM 为例：计算 $C_{ij} = \sum_k A_{ik} B_{kj}$，朴素实现中每个线程独立从全局内存读 A 的一行和 B 的一列。但相邻线程其实需要 A 的同一行或 B 的同一列——这些数据被反复读取却没有复用。Tiling 的做法是：一个 block 的所有线程**协作地**把 A 和 B 的一个小块（tile）搬到共享内存，然后每个线程从共享内存读数据计算。一份数据被 TILE_SIZE 个线程共享，全局内存访问量降低 TILE_SIZE 倍。
+**Why do we need tiling?** Take GEMM as an example: to compute $C_{ij} = \sum_k A_{ik} B_{kj}$, the naive implementation has each thread independently load one row of A and one column of B from global memory. But neighboring threads often need the same row of A or the same column of B, so the same data is fetched repeatedly with no reuse. Tiling fixes this by having all threads in a block **cooperatively** load a small tile of A and B into shared memory, after which each thread reads from shared memory to do its computation. Each data item can then be shared by `TILE_SIZE` threads, reducing global-memory traffic by roughly a factor of `TILE_SIZE`.
 
-**Tiling 的通用模式（三步曲）**：
+**Tiling’s general pattern (three steps)**:
 
 ```
-1. 协作加载：block 内所有线程各负责一部分，把 tile 从 global memory → shared memory
-2. 同步屏障：__syncthreads()，确保所有线程加载完毕
-3. 本地计算：每个线程从 shared memory 读数据做计算（命中 SRAM，延迟 ~20 cycles vs HBM ~400 cycles）
+1. Collaborative load: all threads in the block each handle part of the work, moving the tile from global memory → shared memory
+2. Synchronization barrier: `__syncthreads()` ensures all threads have finished loading
+3. Local computation: each thread reads data from shared memory and computes on it (hitting SRAM, latency ~20 cycles vs. HBM ~400 cycles)
 ```
 
-**Tiling 在不同场景中的应用**（参见 [MLSYS6.md](notes/Mlsys/MLSYS6.md) 的详细讨论）：
+**How tiling is used in different scenarios** (see [MLSYS6.md](notes/Mlsys/MLSYS6.md) for a more detailed discussion):
 
-| 场景 | Tile 的作用 | 关键细节 |
+| Scenario | Role of the tile | Key details |
 |------|-----------|---------|
-| **GEMM**（本节） | 复用 A 的行和 B 的列 | 每份数据被 TILE_SIZE 个线程复用 |
-| **矩阵转置**（MLSYS6 Pattern 2） | 读写方向正交的中间缓冲 | 读时 coalesced → tile → 写时 coalesced；`tile[DIM][DIM+1]` 加 padding 消除 bank conflict |
-| **Stencil/卷积**（MLSYS6 Pattern 3） | 邻域数据复用 + halo 区域 | tile 需要额外加载 ±R 的 halo 边界；复用倍数 = 2R+1（stencil 宽度）|
-| **直方图**（MLSYS6 原则 D） | 私有 bin 减少 atomic 争用 | 每个 block 在 shared memory 维护私有直方图，最后合并到全局 |
+| **GEMM** (this section) | Reuse rows of A and columns of B | Each data item is reused by `TILE_SIZE` threads |
+| **Matrix transpose** (MLSYS6 Pattern 2) | Intermediate buffer for orthogonal read/write directions | Coalesced read → tile → coalesced write; `tile[DIM][DIM+1]` padding removes bank conflicts |
+| **Stencil/Convolution** (MLSYS6 Pattern 3) | Reuse neighborhood data plus halo regions | The tile must additionally load halo boundaries of ±R; reuse factor = 2R+1 (stencil width) |
+| **Histogram** (MLSYS6 Principle D) | Private bins reduce atomic contention | Each block maintains a private histogram in shared memory, then merges it into global memory |
 
-**性能分析**：设 tile 大小为 $T$，原始每个元素被读 $R$ 次（复用因子），Tiling 后全局内存访问量降为 $\frac{1}{R}$（理想情况）。对 GEMM：$R = T$（TILE_SIZE）；对 stencil：$R = 2 \times \text{radius} + 1$。**tile 越大，复用越高，但受限于共享内存容量**（每个 SM 通常 48-228 KB）。这就是 tile size 选择的核心权衡：太小→复用不够，太大→shared memory 不够或 occupancy 降低。
+**Performance analysis**: Suppose the tile size is $T$, and each original element would otherwise be read $R$ times (the reuse factor). With tiling, global-memory traffic ideally drops to $\frac{1}{R}$ of the original. For GEMM, $R = T$ (`TILE_SIZE`); for stencil, $R = 2 \times \text{radius} + 1$. **Larger tiles give higher reuse, but they are limited by shared-memory capacity** (typically 48-228 KB per SM). This is the central trade-off in choosing a tile size: too small → insufficient reuse; too large → too much shared memory consumption or lower occupancy.
 
-**常见的 Tiling 进阶技巧**（后续小节会用到）：
-- **Double buffering**（2.5 节）：用两个 tile buffer 交替，一个在计算、一个在预取，隐藏访存延迟
-- **寄存器分块**（2.4 节）：在 shared memory tiling 之上，再把 tile 的一小块加载到寄存器，形成 global → shared → register 的三级层次
-- **Padding**（2.5 节）：`tile[DIM][DIM + padding]` 避免 bank conflict，代价是多占少量共享内存
-- **向量化加载**（2.4 节）：用 `float4` 一次加载 128 位，减少加载指令数量、提高带宽利用率
+**Common advanced tiling techniques** (used in later sections):
+- **Double buffering** (Section 2.5): alternate between two tile buffers, one being computed on and one being prefetched, to hide memory latency
+- **Register Blocking** (Section 2.4): On top of shared memory tiling, load a small piece of the tile into the register to form a three-level hierarchy of global → shared → register
+- **Padding** (section 2.5): `tile[DIM][DIM + padding]` avoids bank conflict at the cost of occupying a small amount of shared memory
+- **Vectorized loading** (Section 2.4): Use `float4` to load 128 bits at a time, reducing the number of loading instructions and improving bandwidth utilization
 
 ---
 
@@ -126,9 +126,9 @@ __global__ void gemm_tiled(
     
     float sum = 0.0f;
     
-    // 遍历所有 tile
+    // iterate over all tiles
     for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
-        // 协作加载 A 和 B 的 tile 到共享内存
+        // collaboratively load the A and B tiles into shared memory
         int a_col = t * TILE_SIZE + tx;
         int b_row = t * TILE_SIZE + ty;
         
@@ -146,7 +146,7 @@ __global__ void gemm_tiled(
         
         __syncthreads();
         
-        // 计算部分和
+        // Compute the partial sum
         #pragma unroll
         for (int k = 0; k < TILE_SIZE; ++k) {
             sum += As[ty][k] * Bs[k][tx];
@@ -161,12 +161,12 @@ __global__ void gemm_tiled(
 }
 ```
 
-**优化点**：
-1. 利用共享内存实现数据重用
-2. 每个数据被重用 TILE_SIZE 次
-3. 减少全局内存访问次数
+**Optimization points**:
+1. Use shared memory to achieve data reuse
+2. Each data is reused TILE_SIZE times
+3. Reduce the number of global memory accesses
 
-### 2.4 寄存器分块 + 向量化访问
+### 2.4 Register blocking + vectorized access
 
 ```cuda
 #define BM 128  // Block tile size in M dimension
@@ -181,39 +181,39 @@ __global__ void gemm_optimized(
     float* __restrict__ C,
     int M, int N, int K
 ) {
-    // 共享内存声明
-    __shared__ float As[BK][BM];  // 转置存储以避免 bank conflict
+    // shared-memory declaration
+    __shared__ float As[BK][BM];  // Stored transposed to avoid bank conflicts
     __shared__ float Bs[BK][BN];
     
-    // 计算 block 和 thread 的位置
+    // Compute the block and thread positions
     const int bx = blockIdx.x;
     const int by = blockIdx.y;
     const int tx = threadIdx.x;
     const int ty = threadIdx.y;
     
-    // 每个 block 有 (BM/TM) × (BN/TN) 个线程
+    // each block has (BM/TM) × (BN/TN) threads
     const int thread_x = tx;
     const int thread_y = ty;
     
-    // 寄存器存储线程的计算结果
+    // Registers store the thread's computed results
     float thread_results[TM][TN] = {0.0f};
     
-    // 寄存器存储 A 和 B 的片段
+    // Registers store fragments of A and B
     float reg_a[TM];
     float reg_b[TN];
     
-    // A 和 B 的起始位置
+    // Starting positions of A and B
     const float* A_ptr = A + by * BM * K;
     const float* B_ptr = B + bx * BN;
     
-    // 计算加载索引
+    // Compute the load indices
     const int num_threads = (BM / TM) * (BN / TN);
     const int thread_id = ty * (BN / TN) + tx;
     
-    // 主循环：遍历 K 维度
+    // Main loop: iterate over the K dimension
     for (int k_base = 0; k_base < K; k_base += BK) {
-        // ============ 协作加载 A tile 到共享内存 ============
-        // 使用向量化加载 (float4)
+        // ============ Collaboratively load the A tile into shared memory ============
+        // use vectorized loads (float4)
         #pragma unroll
         for (int i = 0; i < BM * BK / (num_threads * 4); ++i) {
             int load_idx = thread_id + i * num_threads;
@@ -231,7 +231,7 @@ __global__ void gemm_optimized(
             }
         }
         
-        // ============ 协作加载 B tile 到共享内存 ============
+        // ============ Collaboratively load the B tile into shared memory ============
         #pragma unroll
         for (int i = 0; i < BK * BN / (num_threads * 4); ++i) {
             int load_idx = thread_id + i * num_threads;
@@ -248,10 +248,10 @@ __global__ void gemm_optimized(
         
         __syncthreads();
         
-        // ============ 计算线程的 tile ============
+        // ============ Compute the thread's tile ============
         #pragma unroll
         for (int k = 0; k < BK; ++k) {
-            // 从共享内存加载到寄存器
+            // load from shared memory into registers
             #pragma unroll
             for (int m = 0; m < TM; ++m) {
                 reg_a[m] = As[k][thread_y * TM + m];
@@ -261,7 +261,7 @@ __global__ void gemm_optimized(
                 reg_b[n] = Bs[k][thread_x * TN + n];
             }
             
-            // 外积计算
+            // Outer-product computation
             #pragma unroll
             for (int m = 0; m < TM; ++m) {
                 #pragma unroll
@@ -274,7 +274,7 @@ __global__ void gemm_optimized(
         __syncthreads();
     }
     
-    // ============ 写回结果 ============
+    // ============ Write back the result ============
     #pragma unroll
     for (int m = 0; m < TM; ++m) {
         int global_row = by * BM + thread_y * TM + m;
@@ -294,189 +294,189 @@ __global__ void gemm_optimized(
 }
 ```
 
-### 2.5 Bank Conflict 消除
+### 2.5 Eliminating Bank Conflicts
 
-共享内存被组织成 32 个 bank，连续的 4 字节（一个 float）分布在连续的 bank 中。当同一 warp 中的多个线程访问同一 bank 的不同地址时，会产生 bank conflict。
+Shared memory is organized into 32 banks, with each consecutive 4-byte word (one `float`) mapped to the next bank. A bank conflict occurs when multiple threads in the same warp access different addresses in the same bank.
 
 ```cuda
-// 有 bank conflict 的访问模式
+// Access pattern with bank conflicts
 __shared__ float smem[32][32];
-// 线程 i 访问 smem[i][k]，所有线程访问同一列时会有冲突
+// Thread `i` accesses `smem[i][k]`; there is a conflict when all threads access the same column
 
-// 解决方案 1：Padding
-__shared__ float smem[32][33];  // 添加一列 padding
+// Solution 1: padding
+__shared__ float smem[32][33];  // add one padding column
 
-// 解决方案 2：交错访问（Swizzle）
+// Solution 2: interleaved access (swizzle)
 __shared__ float smem[32][32];
-// 访问时：smem[row][col ^ (row % 32)]
+// when accessing：smem[row][col ^ (row % 32)]
 ```
 
-## 3. CUTLASS 与 Triton 编程范式
+## 3. CUTLASS and Triton programming paradigms
 
-在前两章中，我们从零开始手写了 CUDA GEMM kernel，逐步引入了 shared memory tiling、register blocking、向量化访存、bank conflict 消除等优化技巧。这些底层优化让我们深刻理解了 GPU 的执行模型。然而，在生产环境中，直接手写 CUDA kernel 面临着诸多挑战。本章将介绍两种主流的高级编程范式——NVIDIA CUTLASS 和 OpenAI Triton，它们分别从 C++ 模板元编程和 Python 编译器的角度，提供了更高效、更可维护的 GPU kernel 开发方式。
+In the first two chapters, we built a CUDA GEMM kernel from scratch and progressively introduced optimization techniques such as shared-memory tiling, register blocking, vectorized memory access, and bank-conflict elimination. These low-level optimizations give us a deep understanding of the GPU execution model. In production, however, writing CUDA kernels entirely by hand comes with major challenges. This chapter introduces two mainstream high-level programming paradigms—NVIDIA CUTLASS and OpenAI Triton—which offer more efficient and maintainable ways to develop GPU kernels through C++ template metaprogramming and compiler-driven Python code, respectively.
 
 ---
 
-### 3.1 为什么需要高级抽象
+### 3.1 Why high-level abstraction is needed
 
-#### 3.1.1 手写 CUDA 的困境
+#### 3.1.1 The Challenge of Handwritten CUDA
 
-回顾前两章的 GEMM 优化之旅，我们不得不手动管理以下所有细节：
+Looking back on the GEMM optimization journey in the first two chapters, we had to manually manage all the following details:
 
-- **Shared memory 管理**：手动计算所需大小、声明 `__shared__` 数组、处理 double buffering 的指针交换、确保 `__syncthreads()` 的正确放置。一个遗漏的同步就可能导致难以复现的竞态条件。
-- **Register tiling**：手动将 warp 级别的计算分解到每个线程的寄存器中，精确计算每个线程负责的元素范围，确保寄存器使用量不超过硬件限制（否则发生 register spilling，性能断崖式下降）。
-- **Bank conflict 消除**：shared memory 被划分为 32 个 bank，当同一 warp 中多个线程访问同一 bank 的不同地址时产生冲突。需要手动添加 padding 或调整访问模式来避免，这对代码可读性伤害极大。
-- **向量化访存**：为了充分利用内存带宽，需要使用 `float4`、`int4` 等向量类型进行 128-bit 访存，手动处理指针对齐和类型转换。
-- **指令级优化**：手动展开循环（`#pragma unroll`）、交错计算与访存指令以隐藏延迟、选择合适的 `mma` 指令变体。
+- **Shared-memory management**: manually calculate the required size, declare `__shared__` arrays, handle pointer swapping for double buffering, and place `__syncthreads()` correctly. A single missing synchronization can lead to a race condition that is very hard to reproduce.
+- **Register tiling**: manually decompose warp-level computation into per-thread register fragments, precisely determine which elements each thread owns, and keep register usage under hardware limits (otherwise register spilling can destroy performance).
+- **Bank-conflict elimination**: shared memory is divided into 32 banks, and conflicts occur when multiple threads in the same warp access different addresses in the same bank. Avoiding this requires manual padding or access-pattern changes, which hurts readability.
+- **Vectorized memory access**: to fully utilize memory bandwidth, developers must use vector types such as `float4` and `int4` for 128-bit accesses, while also handling pointer alignment and type conversion by hand.
+- **Instruction-level optimization**: manually unroll loops (`#pragma unroll`), interleave compute and load instructions to hide latency, and choose the right `mma` instruction variants.
 
-#### 3.1.2 跨架构移植的难题
+#### 3.1.2 Problems with cross-architecture migration
 
-更严重的问题在于，最优的实现策略在不同 GPU 架构之间存在本质差异：
+A more serious problem is that the optimal implementation strategy differs fundamentally between different GPU architectures:
 
-| 特性 | Volta (SM70) | Ampere (SM80) | Hopper (SM90) |
+| Features | Volta (SM70) | Ampere (SM80) | Hopper (SM90) |
 |------|-------------|---------------|---------------|
-| Tensor Core 指令 | `wmma` | `mma` | `wgmma` |
-| 最优 tile size | 128x128x32 | 128x256x64 | 256x256x64 |
-| 异步拷贝 | 不支持 | `cp.async` | `cp.async.bulk` (TMA) |
-| 软件流水线 stages | 2 | 3-4 | 4-8 |
-| Shared memory 大小 | 96 KB | 164 KB | 228 KB |
-| 集群调度 | 不支持 | 不支持 | Thread Block Cluster |
+| Tensor Core instructions | `wmma` | `mma` | `wgmma` |
+| Optimal tile size | 128x128x32 | 128x256x64 | 256x256x64 |
+| Asynchronous copy | Not supported | `cp.async` | `cp.async.bulk` (TMA) |
+| Software-pipeline stages | 2 | 3-4 | 4-8 |
+| Shared memory size | 96 KB | 164 KB | 228 KB |
+| Cluster scheduling | Not supported | Not supported | Thread Block Cluster |
 
-一份在 Ampere 上精心调优的 kernel，迁移到 Hopper 上可能完全无法利用新硬件特性（如 TMA、wgmma、Cluster），性能反而不如通用库。这意味着每一代新架构都需要几乎重写 kernel，维护成本极高。
+A carefully tuned Ampere kernel may fail to exploit Hopper-specific features such as TMA, `wgmma`, and thread-block clusters; its performance may even fall behind a general-purpose library. In practice, each new GPU generation often requires the kernel to be reworked almost from scratch, which makes maintenance extremely costly.
 
-#### 3.1.3 可组合抽象的需求
+#### 3.1.3 Requirements for composable abstraction
 
-工业界需要的是一套**将算法逻辑与硬件映射分离**的可组合抽象：
+What the industry needs is a set of composable abstractions that separate algorithmic logic from hardware mapping:
 
-- **算法层面**：定义"GEMM = 三层循环 + 累加 + epilogue"这样的数学语义
-- **调度层面**：定义 tile 大小、流水线深度、warp 分配等策略
-- **硬件层面**：映射到具体的指令（mma vs wgmma）、内存层次（shared vs register）、同步机制
+- **Algorithm level**: define mathematical semantics such as "GEMM = three nested loops + accumulation + epilogue"
+- **Scheduling level**: define strategies such as tile size, pipeline depth, and warp allocation
+- **Hardware level**: map the computation onto specific instructions (`mma` vs `wgmma`), memory levels (shared vs register), and synchronization mechanisms
 
-CUTLASS 和 Triton 正是这两种不同哲学的代表：CUTLASS 通过 C++ 模板在编译期组合各层抽象；Triton 通过编译器自动推导底层实现。
+CUTLASS and Triton represent two different philosophies: CUTLASS composes these abstraction layers at compile time through C++ templates, while Triton relies on the compiler to derive the low-level implementation automatically.
 
 ---
 
-### 3.2 CUTLASS 设计哲学与核心抽象
+### 3.2 CUTLASS Design Philosophy and Core Abstractions
 
-[CUTLASS](https://github.com/NVIDIA/cutlass)（CUDA Templates for Linear Algebra Subroutines）是 NVIDIA 开源的 C++ 模板库，提供了一套**层次化、可组合**的 GEMM 及相关运算的构建块。它的核心设计理念是：用 C++ 模板元编程将 GEMM 的每一层分解封装，开发者通过组合模板参数来定制 kernel，而无需从头编写。
+[CUTLASS](https://github.com/NVIDIA/cutlass) (CUDA Templates for Linear Algebra Subroutines) is NVIDIA’s open-source C++ template library. It provides a set of hierarchical, composable building blocks for GEMM and related operations. Its core idea is to decompose GEMM into layers using C++ template metaprogramming, so developers can customize a kernel by composing template parameters instead of writing everything from scratch.
 
-#### 3.2.1 层次化分解（Hierarchical Decomposition）
+#### 3.2.1 Hierarchical Decomposition
 
-CUTLASS 将 GEMM 计算严格分解为四个层次，每个层次对应 GPU 硬件的一个执行级别：
+CUTLASS decomposes GEMM into four layers, each corresponding to a level of execution in GPU hardware:
 
-**Device 级别（Grid of Threadblocks）**
+**Device Level (Grid of Threadblocks)**
 
-整个 GEMM 问题 $D = \alpha \cdot A \times B + \beta \cdot C$ 被划分为一个二维网格的 threadblock。每个 threadblock 负责计算输出矩阵 $D$ 的一个 tile（通常 128x128 或 256x128）。Threadblock 之间完全独立，无需同步。
+The full GEMM problem $D = \alpha \cdot A \times B + \beta \cdot C$ is partitioned into a 2D grid of thread blocks. Each thread block computes one tile of the output matrix $D$ (typically 128x128 or 256x128). Thread blocks are fully independent and require no inter-block synchronization.
 
-CUTLASS 提供了 **Swizzle** 策略来控制 threadblock 到输出 tile 的映射顺序，优化 L2 cache 的局部性。例如，`GemmIdentityThreadblockSwizzle<8>` 会将相邻的 8 个 threadblock 映射到空间上相邻的输出 tile，使它们共享更多的 A 或 B 矩阵数据。
+CUTLASS provides **Swizzle** strategies to control how thread blocks map onto output tiles and thereby improve L2-cache locality. For example, `GemmIdentityThreadblockSwizzle<8>` maps groups of 8 neighboring thread blocks to neighboring output tiles, increasing their reuse of A or B matrix data.
 
-**Threadblock 级别（Shared Memory Tiling）**
+**Threadblock Level (Shared Memory Tiling)**
 
-每个 threadblock 协作地将 A 和 B 矩阵的 tile 从 global memory 加载到 shared memory，然后沿 K 维度迭代，每次处理一个 K-tile。这一层的核心是 **software pipelining**（软件流水线）：在计算当前 K-tile 的同时，异步预取下一个 K-tile 的数据。CUTLASS 通过 `num_stages` 参数控制流水线深度。
+Each thread block cooperatively loads A and B tiles from global memory into shared memory, then iterates over the K dimension one K-tile at a time. The key technique at this level is **software pipelining**: while computing on the current K-tile, the kernel asynchronously prefetches the next one. CUTLASS controls pipeline depth through the `num_stages` parameter.
 
-**Warp 级别（Tensor Core MMA）**
+**Warp Level (Tensor Core MMA)**
 
-Shared memory 中的 tile 被进一步划分给各个 warp。每个 warp 使用 Tensor Core 的 MMA（Matrix Multiply-Accumulate）指令进行计算。在 Ampere 上使用 `mma.sync` 指令，每条指令计算如 16x8x16 的小矩阵乘法。CUTLASS 定义了 `MmaWarp` 抽象来封装 warp 级别的 tiling 和 MMA 调用。
+Tiles in shared memory are further partitioned across warps. Each warp uses Tensor Core MMA (Matrix Multiply-Accumulate) instructions for computation. On Ampere, for example, `mma.sync` computes a small matrix multiplication such as 16x8x16 per instruction. CUTLASS encapsulates this warp-level tiling and MMA invocation through the `MmaWarp` abstraction.
 
-**Thread 级别（Epilogue）**
+**Thread Level (Epilogue)**
 
-当所有 K-tile 迭代完成后，每个线程持有累加器（accumulator）中的部分结果。Epilogue 阶段负责将累加结果从寄存器写回 global memory，同时执行后处理操作，如：缩放（$\alpha, \beta$）、添加偏置（bias）、激活函数（ReLU, GELU）等。
+After all K-tile iterations are complete, each thread holds part of the result in accumulators. The epilogue stage writes these accumulated values from registers back to global memory, while also performing post-processing such as scaling ($\alpha, \beta$), bias addition, and activation functions (ReLU, GELU).
 
-#### 3.2.2 核心抽象（Key Abstractions）
+#### 3.2.2 Key Abstractions
 
-**1. Layout——张量内存布局**
+**1. Layout——Tensor Memory Layout**
 
-Layout 描述了逻辑上的多维张量如何映射到一维的物理内存。CUTLASS 支持多种布局：
+Layout describes how a logical multi-dimensional tensor is mapped into one-dimensional physical memory. CUTLASS supports multiple layouts:
 
 ```cpp
-// 行主序：逻辑坐标 (i, j) → 物理偏移 i * stride + j
+// Row-major：logical coordinates (i, j) → physical offset i * stride + j
 using LayoutA = cutlass::layout::RowMajor;
 
-// 列主序：逻辑坐标 (i, j) → 物理偏移 i + j * stride
+// Column-major：logical coordinates (i, j) → physical offset i + j * stride
 using LayoutB = cutlass::layout::ColumnMajor;
 
-// 卷积专用布局
+// Convolution-specific layout
 using LayoutNHWC = cutlass::layout::TensorNHWC;
 
-// 交错布局（用于 INT8/INT4 量化推理）
+// Interleaved layout (for INT8/INT4 quantized inference)
 using LayoutInterleaved = cutlass::layout::ColumnMajorInterleaved<32>;
 ```
 
-Layout 的选择直接影响内存访问的连续性，进而影响向量化加载的可行性和 shared memory 的 bank conflict 模式。CUTLASS 的 iterator 会根据 layout 自动生成最优的访存指令序列。
+The choice of layout directly affects memory-access contiguity, which in turn affects the feasibility of vectorized loads and the bank-conflict pattern in shared memory. CUTLASS iterators automatically generate an optimized memory-access instruction sequence based on the selected layout.
 
-**2. TileDescription——分块大小描述**
+**2. TileDescription——Tile Size Description**
 
-Tile size 是 GEMM 性能最关键的超参数。CUTLASS 使用 `GemmShape` 模板在三个层次分别定义：
+Tile size is one of the most important tuning parameters for GEMM performance. In CUTLASS, it is specified at three levels using the `GemmShape` template:
 
 ```cpp
-// Threadblock 级别：每个 threadblock 计算 128x128 的输出 tile，每次迭代 K=32
+// Threadblock level: each threadblock computes a 128x128 output tile, with K=32 per iteration
 using ShapeMMAThreadBlock = cutlass::gemm::GemmShape<128, 128, 32>;
 
-// Warp 级别：每个 warp 计算 64x64 的子 tile
-// 因此每个 threadblock 有 (128/64) * (128/64) = 4 个 warp
+// Warp level: each warp computes a 64x64 sub-tile
+// Therefore each threadblock has `(128/64) * (128/64) = 4` warps
 using ShapeMMAWarp = cutlass::gemm::GemmShape<64, 64, 32>;
 
-// Instruction 级别：Tensor Core MMA 指令的形状
+// Instruction level: the shape of the Tensor Core MMA instruction
 // Ampere mma.sync.aligned.m16n8k16.f32.f16.f16.f32
 using ShapeMMAOp = cutlass::gemm::GemmShape<16, 8, 16>;
 ```
 
-这三个层次的 shape 之间存在整除约束：
-- `ShapeMMAThreadBlock::kM` 必须被 `ShapeMMAWarp::kM` 整除
-- `ShapeMMAWarp::kM` 必须被 `ShapeMMAOp::kM` 整除
-- K 维度类似
+There are divisibility constraints across these three levels:
+- `ShapeMMAThreadBlock::kM` must be divisible by `ShapeMMAWarp::kM`
+- `ShapeMMAWarp::kM` must be divisible by `ShapeMMAOp::kM`
+- The K dimension follows the same rule
 
-违反这些约束会导致编译错误（CUTLASS 通过 `static_assert` 在编译期检查）。
+Violating these constraints causes a compile-time error (`static_assert` in CUTLASS).
 
-**3. Epilogue——后处理操作**
+**3. Epilogue——Post-Processing Operations**
 
-CUTLASS 的一大亮点是将 epilogue 操作模板化，支持将常见的后处理融合到 GEMM kernel 中，避免额外的 kernel launch 和 global memory 往返：
+One major strength of CUTLASS is its templated epilogue, which allows common post-processing to be fused directly into the GEMM kernel, avoiding extra kernel launches and additional global-memory round-trips:
 
 ```cpp
-// 线性组合 + ReLU 激活：D = max(0, alpha * A@B + beta * C)
+// Linear combination + ReLU activation：D = max(0, alpha * A@B + beta * C)
 using EpilogueOp = cutlass::epilogue::thread::LinearCombinationRelu<
-    float,                                    // 输出元素类型
-    128 / cutlass::sizeof_bits<float>::value,  // 每次向量化访问的元素数 (=4)
-    float,                                    // 累加器类型
-    float                                     // 计算类型
+    float,                                    // output element type
+    128 / cutlass::sizeof_bits<float>::value,  // number of elements per vectorized access (=4)
+    float,                                    // accumulator type
+    float                                     // compute type
 >;
 
-// 线性组合 + GELU 激活
+// Linear combination + GELU activation
 using EpilogueGelu = cutlass::epilogue::thread::LinearCombinationGELU<
     cutlass::half_t, 8, float, float
 >;
 
-// 纯线性组合（无激活）：D = alpha * A@B + beta * C
+// Pure linear combination (no activation)：D = alpha * A@B + beta * C
 using EpilogueLinear = cutlass::epilogue::thread::LinearCombination<
     cutlass::half_t, 8, float, float
 >;
 ```
 
-Epilogue fusion 是 CUTLASS 相比于裸 cuBLAS 的一大优势：cuBLAS 的 GEMM 只能输出 $D = \alpha AB + \beta C$，后续的激活函数必须另起一个 kernel 完成；而 CUTLASS 可以将激活函数融合在 GEMM kernel 的写回阶段，一次完成所有操作。
+Epilogue fusion is a major advantage of CUTLASS over bare cuBLAS: cuBLAS GEMM can only produce $D = \alpha AB + \beta C$, and any subsequent activation must run in a separate kernel. CUTLASS, by contrast, can fuse those activations into the GEMM write-back path and complete everything in a single pass.
 
-**4. Iterator——内存访问模式抽象**
+**4. Iterator——Memory-Access Pattern Abstraction**
 
-Iterator 是 CUTLASS 中最复杂但也最关键的抽象之一。它封装了从 global memory 到 shared memory、从 shared memory 到 register 的数据搬运逻辑：
+The iterator is one of the most complex yet most important abstractions in CUTLASS. It encapsulates data movement from global memory to shared memory and from shared memory to registers:
 
-- **Global Memory Iterator**：根据 tensor layout 和 alignment，选择最优的向量化加载方式（如 `LDG.128`）；处理边界条件（当 tile 超出矩阵边界时自动 mask）
-- **Shared Memory Iterator**：生成无 bank conflict 的 shared memory 访问模式；配合 swizzle 策略重新排列数据布局
-- **异步拷贝**：在 Ampere+ 架构上使用 `cp.async` 指令直接从 global memory 异步拷贝到 shared memory，绕过寄存器中转
+- **Global-memory iterator**: chooses the best vectorized load method (such as `LDG.128`) based on tensor layout and alignment, and handles boundary conditions automatically when a tile crosses matrix boundaries
+- **Shared-memory iterator**: generates a bank-conflict-free shared-memory access pattern and works together with swizzle strategies to reorganize data layout
+- **Asynchronous copy**: on Ampere and later, uses `cp.async` to copy directly from global memory to shared memory asynchronously, bypassing registers
 
-开发者通常不需要直接操作 iterator，而是通过选择预定义的策略类来间接配置。
+Developers usually do not manipulate iterators directly; instead, they configure them indirectly by choosing predefined strategy classes.
 
 
-#### 3.2.3 CUTLASS 3.x 与 CuTe
+#### 3.2.3 CUTLASS 3.x and CuTe
 
-CUTLASS 3.x 引入了全新的 **CuTe**（CUDA Tensors）抽象，是对 CUTLASS 2.x 的根本性重构。CUTLASS 2.x 的抽象体系（`GemmShape`、`Iterator`、`Policy` 等）虽然功能强大，但存在两个根本性问题：
+CUTLASS 3.x introduces a new abstraction called **CuTe** (CUDA Tensors), representing a fundamental redesign of CUTLASS 2.x. Although the abstraction system in CUTLASS 2.x (`GemmShape`, `Iterator`, `Policy`, etc.) is powerful, it has two fundamental issues:
 
-1. **概念碎片化**：数据布局、线程映射、内存访问模式被分散在不同的抽象中，彼此的关系隐藏在复杂的模板特化里
-2. **组合爆炸**：每种新的 MMA 指令、内存访问模式或布局都需要大量新的特化代码
+1. **Concept fragmentation**: Data layout, thread mapping, and memory access patterns are scattered in different abstractions, and their relationships are hidden in complex template specializations.
+2. **Combinatorial explosion**: each new MMA instruction, memory-access mode, or layout requires a large amount of new specialized code
 
-CuTe 的核心洞察是：**GPU 编程中的几乎所有问题——数据布局、线程分配、分块策略、内存访问模式——本质上都是一个问题：整数坐标到整数偏移的映射**。CuTe 用一套统一的 Layout 代数来表达这一切。
+CuTe's core insight is this: **nearly every problem in GPU programming—data layout, thread assignment, tiling strategy, memory-access pattern—is fundamentally the same problem: mapping integer coordinates to integer offsets. CuTe expresses all of this using a unified layout algebra.**
 
-##### Layout = (Shape, Stride)——CuTe 的第一性原理
+##### Layout = (Shape, Stride)——CuTe's First Principles
 
-一个 Layout 完全由两个元组定义：**Shape**（形状）和 **Stride**（步幅）。给定一个逻辑坐标，Layout 将其映射到一个一维的物理偏移：
+A layout is fully defined by two tuples: **Shape** and **Stride**. Given a logical coordinate, the layout maps it to a 1D physical offset:
 
 ```
 offset = coord[0] * stride[0] + coord[1] * stride[1] + ...
@@ -485,169 +485,169 @@ offset = coord[0] * stride[0] + coord[1] * stride[1] + ...
 ```cpp
 using namespace cute;
 
-// 4x8 行主序矩阵：坐标 (i,j) → 偏移 i*8 + j
+// 4x8 row-major matrix: coordinates `(i,j)` → offset `i*8 + j`
 auto row_major = make_layout(make_shape(4, 8), make_stride(8, 1));
 // row_major(0, 0) = 0,  row_major(0, 1) = 1,  row_major(1, 0) = 8
 
-// 4x8 列主序矩阵：坐标 (i,j) → 偏移 i + j*4
+// 4x8 column-major matrix: coordinates `(i,j)` → offset `i + j*4`
 auto col_major = make_layout(make_shape(4, 8), make_stride(1, 4));
 // col_major(0, 0) = 0,  col_major(0, 1) = 4,  col_major(1, 0) = 1
 ```
 
-关键特性：**Shape 和 Stride 可以是层次化的**（hierarchical），即元组的元素本身也可以是元组。这使得 CuTe 能用同一套语法表达从简单的行/列主序到复杂的分块交错布局：
+Key point: Shape and Stride can themselves be hierarchical—the elements of a tuple can also be tuples. This lets CuTe use the same syntax to describe everything from simple row-major/column-major layouts to complex blocked layouts:
 
 ```cpp
-// 层次化 layout：一个 (4,8) 矩阵被分成 2x4 个 (2,2) 的小块
-// Shape:  ((2,2), (2,4))  —— 外层是 tile 内坐标，内层是 tile 数量
-// Stride: ((1,2), (4,16)) —— 对应的步幅
+// Hierarchical layout: a `(4,8)` matrix is divided into `2x4` small `(2,2)` blocks
+// Shape:  ((2,2), (2,4))  —— the outer level is coordinates within a tile, the inner level is the number of tiles
+// Stride: ((1,2), (4,16)) —— corresponding strides
 auto tiled_layout = make_layout(
     make_shape(make_shape(2, 2), make_shape(2, 4)),
     make_stride(make_stride(1, 2), make_stride(4, 16))
 );
-// 等价于 4x8 矩阵的 RowMajor，但"知道"它被分成了 2x2 的 tile
+// Equivalent to RowMajor for a 4x8 matrix, but it "knows" that the matrix is partitioned into 2x2 tiles
 ```
 
-这一点至关重要——**tiling 不是数据操作，而是 layout 的重新解释**。`local_tile` 或 `logical_divide` 这类操作只是重组 Shape 和 Stride 的嵌套结构，不移动任何数据，编译期零开销。
+This is crucial: tiling is not a data-movement operation, but a reinterpretation of layout. Operations such as `local_tile` and `logical_divide` merely reorganize the nested structure of Shape and Stride without moving data, and therefore add zero runtime overhead.
 
 ##### Tensor = Pointer + Layout
 
-CuTe 中的 Tensor 就是一个指针加上一个 Layout：
+In CuTe, a Tensor is simply a pointer plus a Layout:
 
 ```cpp
-// 从 global memory 指针构造 tensor
+// Construct a tensor from a global-memory pointer
 auto tensor_A = make_tensor(make_gmem_ptr(A_ptr),
     make_layout(make_shape(M, K), make_stride(K, Int<1>{})));
 
-// 从 shared memory 构造 tensor
+// Construct a tensor from shared memory
 auto smem_A = make_tensor(make_smem_ptr(smem_ptr),
     make_layout(make_shape(Int<128>{}, Int<32>{}), make_stride(Int<32>{}, Int<1>{})));
 
-// 从寄存器构造 tensor（register 也是一种"内存"）
-auto reg_C = make_tensor<float>(make_shape(Int<8>{}, Int<4>{}));  // 在寄存器上分配
+// Construct a tensor from registers (a register is also a kind of "memory")
+auto reg_C = make_tensor<float>(make_shape(Int<8>{}, Int<4>{}));  // allocate in registers
 ```
 
-注意 `Int<128>{}` 这种编译期常量——CuTe 大量使用编译期 shape/stride，使编译器能在编译期完成所有地址计算，生成的 PTX 中只有真正的数据搬运和计算指令。
+Note the compile-time constants such as `Int<128>{}`. CuTe relies heavily on compile-time shape/stride information, allowing the compiler to resolve address calculations ahead of time so that the generated PTX contains only the actual data-movement and compute instructions.
 
-##### Layout 代数——核心操作
+##### Layout Algebra—Core Operations
 
-CuTe 的强大之处在于一组**闭合的 layout 变换操作**，每个操作的输入和输出都是 Layout，可以任意链式组合：
+The power of CuTe lies in a set of **closed layout-transformation operations**. Each operation takes layouts as input and produces a layout as output, so they can be composed freely:
 
-**1. `logical_divide`——逻辑分块**
+**1. `logical_divide`——Logical Division**
 
-将一个 layout 按指定的 tile shape 分割，结果是一个层次化 layout，外层索引 tile 内坐标，内层索引 tile 编号：
+This splits a layout according to a specified tile shape. The result is a hierarchical layout whose outer index refers to coordinates within a tile and whose inner index refers to the tile number:
 
 ```cpp
-auto layout = make_layout(make_shape(16, 32));  // 16x32 矩阵
+auto layout = make_layout(make_shape(16, 32));  // 16x32 matrix
 
-// 按 (4, 8) 分块 → 结果 shape: ((4,8), (4,4))
-//   第一维度 (4,8)：tile 内的行/列坐标
-//   第二维度 (4,4)：tile 在矩阵中的行/列编号
+// Tile by `(4, 8)` → resulting shape: ((4,8), (4,4))
+//   first dimension (4,8)：row/column coordinates within a tile
+//   second dimension (4,4)：tile row/column indices in the matrix
 auto tiled = logical_divide(layout, make_shape(4, 8));
 ```
 
-**2. `local_tile`——提取特定 tile**
+**2. `local_tile`——Extracting a Specific Tile**
 
-`logical_divide` 之后，用坐标索引取出特定的 tile：
+After `logical_divide`, you can use coordinates to extract a specific tile:
 
 ```cpp
-// 取第 (2, 1) 个 tile：从 16x32 矩阵中取行 8~11、列 8~15 的 4x8 子矩阵
+// Take tile `(2, 1)`：extract the 4x8 submatrix covering rows 8~11 and columns 8~15 from the 16x32 matrix
 auto tile_2_1 = local_tile(tensor_A,
     make_shape(Int<4>{}, Int<8>{}),   // tile shape
-    make_coord(2, 1));                // tile 坐标
-// tile_2_1 的 shape 是 (4, 8)，指向原始数据的对应区域
+    make_coord(2, 1));                // tile coordinates
+// `tile_2_1` has shape `(4, 8)` and points to the corresponding region of the original data
 ```
 
-**3. `composition`——Layout 复合**
+**3. `composition`——Layout Composition**
 
-两个 layout 可以复合成一个新的 layout，数学上就是函数复合 $L_1 \circ L_2$：
+Two layouts can be combined into a new layout, mathematically corresponding to function composition $L_1 \circ L_2$:
 
 ```cpp
-// L2 将逻辑坐标映射到中间索引，L1 再将中间索引映射到物理偏移
+// L2 maps logical coordinates to intermediate indices, and L1 then maps those intermediate indices to physical offsets
 auto composed = composition(L1, L2);
 // composed(coord) = L1(L2(coord))
 ```
 
-这是实现 **Swizzle** 的基础——swizzle 就是在普通 layout 上复合一个 XOR 变换。
+This is the basis for implementing **swizzle**: swizzle is just an XOR transformation composed on top of a base layout.
 
-**4. `complement`——互补 Layout**
+**4. `complement`——Complementary Layout**
 
-给定一个将 thread ID 映射到数据元素的 layout（"每个线程访问哪个元素"），`complement` 计算出剩余未被覆盖的元素的 layout（"还有哪些元素需要被访问"）。这在计算 thread-value（TV）分解时至关重要。
+Given a layout that maps thread IDs to data elements ("which elements each thread accesses"), `complement` computes the layout of the remaining uncovered elements ("which elements still need to be covered"). This is important when constructing thread-value (TV) decompositions.
 
-##### Thread-Value (TV) 分解——线程映射的统一框架
+##### Thread-Value (TV) Decomposition - A Unified Framework for Thread Mapping
 
-GPU 编程的核心问题之一是：**128 个线程要协作处理一个 128x32 的 tile，每个线程负责哪些元素？**
+One of the core questions in GPU programming is: **if 128 threads cooperate to process a 128x32 tile, which elements should each thread handle?**
 
-CUTLASS 2.x 为每种情况（GMEM 加载、SMEM 写入、MMA 操作）编写不同的映射逻辑。CuTe 用一个统一的框架解决：**TV Layout**。
+CUTLASS 2.x uses separate mapping logic for each case (GMEM loads, SMEM writes, MMA operations). CuTe unifies them through the concept of a **TV Layout**.
 
-一个 TV Layout 是一个 `(Thread, Value)` → `(M, K)` 的映射：
-- **Thread 维度**：thread ID（0 ~ NumThreads-1）
-- **Value 维度**：每个线程负责的多个元素的索引
+A TV Layout is a mapping `(Thread, Value)` → `(M, K)`:
+- **Thread dimension**: thread ID (0 ~ NumThreads-1)
+- **Value dimension**: the indices of the multiple elements handled by each thread
 
 ```cpp
-// 一个 128 线程的向量化加载策略：每个线程用 LDG.128 加载 8 个 FP16 元素
-// 总共处理 128 * 8 = 1024 个元素 = 128x8 的 tile 的一行
+// A vectorized loading strategy for 128 threads: each thread uses `LDG.128` to load 8 FP16 elements
+// In total this handles `128 * 8 = 1024` elements = one row of a `128x8` tile
 auto copy_atom = Copy_Atom<SM80_CP_ASYNC_CACHEALWAYS<uint128_t>, half_t>{};
 
-// 构造 TiledCopy：128 个线程，排列成 (32, 4) 的线程网格
-// 每个线程每次处理 (1, 8) 个元素（LDG.128 = 8 个 FP16）
+// Construct `TiledCopy`: 128 threads arranged as a `(32, 4)` thread grid
+// Each thread handles `(1, 8)` elements per operation (`LDG.128` = 8 FP16 values)
 auto tiled_copy = make_tiled_copy(
     copy_atom,
-    Layout<Shape<_32, _4>>{},    // Thread layout: 32x4 的线程排布
-    Layout<Shape<_1, _8>>{}      // Value layout: 每线程 1x8 个元素
+    Layout<Shape<_32, _4>>{},    // Thread layout: 32x4 thread arrangement
+    Layout<Shape<_1, _8>>{}      // Value layout: 1x8 elements per thread
 );
-// 总覆盖面积: (32*1, 4*8) = (32, 32) —— 恰好是一个 32x32 的 SMEM tile
+// Total covered area: (32*1, 4*8) = (32, 32) —— which is exactly one 32x32 SMEM tile
 ```
 
-同样，MMA 操作也有 TV 分解：
+Likewise, MMA operations also have a TV decomposition:
 
 ```cpp
-// Ampere mma.sync.m16n8k16 的 TV 分解
+// Ampere mma.sync.m16n8k16 TV decomposition
 auto mma_atom = MMA_Atom<SM80_16x8x16_F32F16F16F32_TN>{};
 
-// 扩展成 TiledMma：4 个 warp（128 线程），覆盖 (64, 64, 16) 的 tile
+// Expand into `TiledMma`: 4 warps (128 threads) covering a `(64, 64, 16)` tile
 auto tiled_mma = make_tiled_mma(
     mma_atom,
-    Layout<Shape<_2, _2, _1>>{},    // Atom layout: 2x2x1 个 atom 排列
-    Tile<_64, _64, _16>{}           // 期望的 tile 大小
+    Layout<Shape<_2, _2, _1>>{},    // Atom layout: 2x2x1 atom arrangement
+    Tile<_64, _64, _16>{}           // target tile size
 );
-// 每次调用计算 (64, 64) @ (64, 16)^T 的部分结果
+// Each call computes (64, 64) @ (64, 16)^T a partial result of
 ```
 
-TV 分解的优势是**一致性**：无论是 `cp.async` 从 GMEM→SMEM 的拷贝、`ldmatrix` 从 SMEM→Register 的加载、还是 `mma.sync` 的矩阵乘法，都用 `(Thread, Value) → (M, K/N)` 的 layout 来描述。这使得验证数据在不同阶段的映射是否匹配变得简单——只需要检查两个 TV layout 的兼容性。
+The advantage of TV decomposition is **consistency**: whether the operation is `cp.async` from GMEM→SMEM, `ldmatrix` from SMEM→registers, or `mma.sync`, it can all be described as a `(Thread, Value) → (M, K/N)` layout. That makes it much easier to verify that data mappings line up across stages—just check whether the corresponding TV layouts are compatible.
 
-##### Swizzle——用 Layout 代数消除 Bank Conflict
+##### Swizzle - Using Layout Algebra to Eliminate Bank Conflicts
 
-Shared memory 有 32 个 bank，bank ID = `(地址 / 4字节) % 32`。当同一 warp 的多个线程访问同一 bank 时，发生 bank conflict。
+Shared memory has 32 banks, with bank ID = `(address / 4 bytes) % 32`. A bank conflict occurs when multiple threads in the same warp access the same bank.
 
-CuTe 用 **Swizzle** 函数来消除 bank conflict，其本质是一个位操作变换。CuTe 的 Swizzle 定义为三个参数 `Swizzle<B, M, S>`：
+CuTe uses the **Swizzle** transformation to eliminate bank conflicts. At heart, this is just a bitwise transformation. In CuTe, Swizzle is parameterized as `Swizzle<B, M, S>`:
 
 ```
 swizzled_offset = offset ^ ((offset >> S) & mask)
-其中 mask = ((1 << B) - 1) << M
+where mask = ((1 << B) - 1) << M
 ```
 
-- `B`：参与 XOR 的位数（swizzle 的"宽度"）
-- `M`：mask 的起始位位置
-- `S`：右移量（哪些高位用来 XOR 低位）
+- `B`: number of bits participating in the XOR (the swizzle "width")
+- `M`: starting bit position of the mask
+- `S`: right-shift amount (which higher bits are XORed into the lower bits)
 
 ```cpp
-// 常见的 shared memory swizzle 配置
-// 对于 FP16 (2 bytes)，32x32 的 SMEM tile：
+// Common shared-memory swizzle configuration
+// For FP16 (2 bytes), a 32x32 SMEM tile:
 auto smem_layout = composition(
-    Swizzle<3, 3, 3>{},                         // XOR 变换
+    Swizzle<3, 3, 3>{},                         // XOR transformation
     make_layout(make_shape(Int<32>{}, Int<32>{}),
-                make_stride(Int<32>{}, Int<1>{}))  // 基础行主序 layout
+                make_stride(Int<32>{}, Int<1>{}))  // Base row-major layout
 );
-// Swizzle<3,3,3> 表示：用 row 的低 3 位 XOR col 的高 3 位
-// 效果：同一列的相邻行会映射到不同的 bank → 消除列访问时的 bank conflict
+// Swizzle<3,3,3> means: XOR the low 3 bits of the row with the high 3 bits of the column
+// Effect: adjacent rows in the same column map to different banks → eliminating bank conflicts for column accesses
 ```
 
-这比 CUTLASS 2.x 手动编写 swizzle 特化要优雅得多——swizzle 只是 layout 的一次 `composition`，与其他所有 layout 操作完全兼容。
+This is much cleaner than manually writing swizzle specializations in CUTLASS 2.x: swizzle is just another layout `composition`, and it works seamlessly with all other layout operations.
 
-#### 3.2.4 实战：CuTe GEMM 深度解析
+#### 3.2.4 Case Study: In-Depth Analysis of CuTe GEMM
 
-前面介绍了 CuTe 的 Layout 代数、TV 分解和 Swizzle 等核心概念，但它们如何组合成一个完整的高性能 GEMM kernel？本节将通过一个生产级的 CuTe GEMM 实现，从全局数据流到每一行代码的设计意图，完整呈现 CUTLASS 3.x 的工程哲学。
-##### 完整代码
+We have introduced CuTe's core concepts—layout algebra, TV decomposition, and swizzle—but how do they come together in a complete high-performance GEMM kernel? This section walks through a production-grade CuTe GEMM implementation to show the engineering philosophy of CUTLASS 3.x, from end-to-end data flow down to the intent behind individual lines of code.
+##### Complete code
 
 ```cpp
 #include <cute/tensor.hpp>
@@ -662,62 +662,62 @@ auto smem_layout = composition(
 
 using namespace cute;
 
-// ==================== 配置参数 ====================
+// ==================== Configuration parameters ====================
 struct GemmConfig {
     using T = half_t;
     using AccT = float;
 
-    // 三级 Tiling 参数
+    // Three-level tiling parameters
     static constexpr int kBlockM  = 128;   // CTA tile M
     static constexpr int kBlockN  = 128;   // CTA tile N
-    static constexpr int kBlockK  = 32;    // CTA tile K（每次主循环迭代处理的 K 深度）
-    static constexpr int kStages  = 3;     // 流水线深度
+    static constexpr int kBlockK  = 32;    // CTA tile K（K depth processed per main-loop iteration）
+    static constexpr int kStages  = 3;     // pipeline depth
 
     // MMA atom: Ampere mma.sync.aligned.m16n8k16.f32.f16.f16.f32
-    // TN 表示 A 行主序(T)、B 列主序(N) 进入 MMA
+    // TN means A enters MMA as row-major (T) and B as column-major (N)
     using MMAOp = SM80_16x8x16_F32F16F16F32_TN;
 
-    // TiledMMA: 把 MMA atom 扩展到覆盖整个 CTA tile
-    //   Layout<Shape<_2, _2, _1>>: 4 个 warp，M 方向 2 个，N 方向 2 个
-    //   Tile<_128, _128, _16>: 期望覆盖 128×128×16 的子问题
-    //   → 每个 warp 负责 64×64×16
+    // TiledMMA: Expand the MMA atom to cover the entire CTA tile
+    //   Layout<Shape<_2, _2, _1>>: 4 warps: 2 along M and 2 along N
+    //   Tile<_128, _128, _16>: targeting a 128×128×16 subproblem
+    //   → each warp handles 64×64×16
     using TiledMMA = decltype(
         make_tiled_mma(MMAOp{},
                        Layout<Shape<_2, _2, _1>>{},
                        Tile<_128, _128, _16>{})
     );
 
-    // G→S: cp.async 128-bit (CACHEGLOBAL 策略，不污染 L1)
+    // G→S: cp.async 128-bit (CACHEGLOBAL policy, without polluting L1)
     using G2SCopyAtom = Copy_Atom<SM80_CP_ASYNC_CACHEGLOBAL<uint128_t>, half_t>;
-    // S→R: ldmatrix 指令（专为 Tensor Core 设计的 SMEM→Register 搬运）
+    // S→R: ldmatrix instruction (SMEM→register transfer designed specifically for Tensor Cores)
     using S2RCopyAtomA = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
     using S2RCopyAtomB = Copy_Atom<SM75_U32x4_LDSM_N, half_t>;
 
-    // 线程数 = TiledMMA 需要的线程数 = 4 warps × 32 = 128
+    // Thread count = the number of threads required by `TiledMMA` = 4 warps × 32 = 128
     static constexpr int kThreadNum = size(TiledMMA{});
 };
 
-// ==================== 共享内存布局 ====================
+// ==================== Shared-memory layout ====================
 static constexpr int kBlockM  = GemmConfig::kBlockM;
 static constexpr int kBlockN  = GemmConfig::kBlockN;
 static constexpr int kBlockK  = GemmConfig::kBlockK;
 static constexpr int kStages  = GemmConfig::kStages;
 
-// SmemLayoutAtom: 一个 128×32 的 swizzled 行主序布局
-// Swizzle<3,3,3> 消除 ldmatrix 列访问时的 bank conflict
+// SmemLayoutAtom: a swizzled row-major layout for 128×32
+// Swizzle<3,3,3> eliminates bank conflicts for `ldmatrix` column accesses
 using SmemLayoutAtom = decltype(
     composition(Swizzle<3, 3, 3>{},
                 make_layout(make_shape(Int<kBlockM>{}, Int<kBlockK>{}),
                             make_stride(Int<kBlockK>{}, Int<1>{})))
 );
-//维度 0：kBlockM
-//CTA 的 A-tile 在 M 方向的大小（多少行）。
+//Dimension 0：kBlockM
+//Size of the CTA A-tile along the M dimension (number of rows).
 
-//维度 1：kBlockK
-//CTA 每次 mainloop 迭代吃的 K 分块大小（多少列 / K-slice 宽度）。
+//Dimension 1：kBlockK
+//Size of the K chunk consumed by the CTA in each main-loop iteration (number of columns / K-slice width).
 
-//维度 2：kStages
-//pipeline stage 维度：有 kStages 份互相独立的 buffer（常见是 2 或 3），每一份都存一块“swizzled 的 A tile”。 
+//Dimension 2：kStages
+//Pipeline-stage dimension: there are `kStages` mutually independent buffers (commonly 2 or 3), each storing one swizzled A tile. 
 using SmemLayoutA = decltype(
     tile_to_shape(SmemLayoutAtom{},
                   make_shape(Int<kBlockM>{}, Int<kBlockK>{}, Int<kStages>{}))
@@ -727,7 +727,7 @@ using SmemLayoutB = decltype(
                   make_shape(Int<kBlockN>{}, Int<kBlockK>{}, Int<kStages>{}))
 );
 
-// ==================== Kernel 实现 ====================
+// ==================== Kernel implementation ====================
 template <typename Config>
 __global__ void cute_gemm_kernel(
     const void* __restrict__ Aptr,
@@ -745,30 +745,30 @@ __global__ void cute_gemm_kernel(
 
     int tid = threadIdx.x;
 
-    // ---- 全局内存 Tensor ----
+    // ---- Global-memory tensors ----
     // A: (M, K) row-major → stride = (K, 1)
     Tensor mA = make_tensor(make_gmem_ptr(reinterpret_cast<const T*>(Aptr)),
                             make_shape(M, K), make_stride(K, Int<1>{}));
-    // B: (N, K) row-major → host 端做了 B.t().contiguous()，符合 TN 约定
+    // B: (N, K) row-major → the host side applies `B.t().contiguous()`, matching the TN convention
     Tensor mB = make_tensor(make_gmem_ptr(reinterpret_cast<const T*>(Bptr)),
                             make_shape(N, K), make_stride(K, Int<1>{}));
     // C: (M, N) row-major → stride = (N, 1)
     Tensor mC = make_tensor(make_gmem_ptr(reinterpret_cast<T*>(Cptr)),
                             make_shape(M, N), make_stride(N, Int<1>{}));
 
-    // ---- CTA Tiling: 从全局矩阵中提取当前 block 负责的子矩阵 ----
-    // cta_tiler 描述了三个维度的 tile 大小
+    // ---- CTA tiling: extract the submatrices owned by the current block from the global matrices ----
+    // `cta_tiler` describes the tile sizes along all three dimensions
     auto cta_tiler = make_shape(Int<kBlockM>{}, Int<kBlockN>{}, Int<kBlockK>{});
-    // blockIdx.y → M 方向，blockIdx.x → N 方向，_ → K 方向（全部保留，主循环遍历）
+    // blockIdx.y → M direction，blockIdx.x → N direction，_ → K direction (kept entirely and traversed by the main loop)
     auto cta_coord = make_coord(blockIdx.y, blockIdx.x, _);
-    // Step<_1, X, _1>: 从 A(M,K) 中取 M 和 K 维度的 tile，跳过 N
+    // Step<_1, X, _1>: take the tile along the M and K dimensions from `A(M,K)`, skipping N
     Tensor gA = local_tile(mA, cta_tiler, cta_coord, Step<_1, X, _1>{});
-    // Step<X, _1, _1>: 从 B(N,K) 中取 N 和 K 维度的 tile，跳过 M
+    // Step<X, _1, _1>: take the tile along the N and K dimensions from `B(N,K)`, skipping M
     Tensor gB = local_tile(mB, cta_tiler, cta_coord, Step<X, _1, _1>{});
-    // Step<_1, _1, X>: 从 C(M,N) 中取 M 和 N 维度的 tile，跳过 K
+    // Step<_1, _1, X>: take the tile along the M and N dimensions from `C(M,N)`, skipping K
     Tensor gC = local_tile(mC, cta_tiler, cta_coord, Step<_1, _1, X>{});
 
-    // ---- 共享内存分配 ----
+    // ---- Shared-memory allocation ----
     extern __shared__ char smem_buf[];
     Tensor sA = make_tensor(make_smem_ptr(reinterpret_cast<T*>(smem_buf)),
                             SmemLayoutA{});
@@ -776,67 +776,67 @@ __global__ void cute_gemm_kernel(
                             smem_buf + cosize(SmemLayoutA{}) * sizeof(T))),
                             SmemLayoutB{});
 
-    // ---- G→S Copy: 用 cp.async 128-bit 从全局内存搬到共享内存 ----
+    // ---- G→S Copy: use 128-bit `cp.async` to move data from global memory to shared memory ----
     auto g2s_copy = make_tiled_copy(
         typename Config::G2SCopyAtom{},
-        Layout<Shape<_32, _4>, Stride<_4, _1>>{},   // 128 线程排成 32×4
-        Layout<Shape< _1, _8>>{}                     // 每线程搬 1×8 个 half_t
+        Layout<Shape<_32, _4>, Stride<_4, _1>>{},   // 128 128 threads arranged as 32×4
+        Layout<Shape< _1, _8>>{}                     // each thread moves 1×8 `half_t` values
     );
     auto g2s_thr_copy_A = g2s_copy.get_slice(tid);
-    Tensor tAgA_g = g2s_thr_copy_A.partition_S(gA);  // 当前线程在 GMEM 中的视图
-    Tensor tAsA_s = g2s_thr_copy_A.partition_D(sA);  // 当前线程在 SMEM 中的视图
+    Tensor tAgA_g = g2s_thr_copy_A.partition_S(gA);  // this thread's GMEM view
+    Tensor tAsA_s = g2s_thr_copy_A.partition_D(sA);  // this thread's SMEM view
 
     auto g2s_thr_copy_B = g2s_copy.get_slice(tid);
     Tensor tBgB_g = g2s_thr_copy_B.partition_S(gB);
     Tensor tBsB_s = g2s_thr_copy_B.partition_D(sB);
 
-    // ---- TiledMMA + 寄存器 Fragment ----
+    // ---- TiledMMA + register fragments ----
     typename Config::TiledMMA tiled_mma;
     auto thr_mma = tiled_mma.get_slice(tid);
 
-    // partition_fragment_A/B: 在寄存器中分配 MMA 操作数空间
-    Tensor tCrA = thr_mma.partition_fragment_A(sA(_, _, 0));   // A 的寄存器 fragment
-    Tensor tCrB = thr_mma.partition_fragment_B(sB(_, _, 0));   // B 的寄存器 fragment
-    Tensor tCrC = thr_mma.partition_fragment_C(gC);            // C 的 FP32 累加器
-    clear(tCrC);  // 初始化为 0
+    // partition_fragment_A/B: allocate MMA operand storage in registers
+    Tensor tCrA = thr_mma.partition_fragment_A(sA(_, _, 0));   // A register fragment
+    Tensor tCrB = thr_mma.partition_fragment_B(sB(_, _, 0));   // B register fragment
+    Tensor tCrC = thr_mma.partition_fragment_C(gC);            // C FP32 accumulator
+    clear(tCrC);  // initialize to 0
 
-    // ---- S→R Copy: 用 ldmatrix 从共享内存搬到寄存器 ----
-    // make_tiled_copy_A: 自动构造与 TiledMMA 兼容的 S→R copy
+    // ---- S→R Copy: use `ldmatrix` to move data from shared memory into registers ----
+    // make_tiled_copy_A: automatically construct an S→R copy compatible with `TiledMMA`
     auto s2r_copy_A = make_tiled_copy_A(typename Config::S2RCopyAtomA{}, tiled_mma);
     auto s2r_thr_copy_A = s2r_copy_A.get_slice(tid);
-    Tensor tCsA = s2r_thr_copy_A.partition_S(sA);       // SMEM 中的 copy 视图
-    Tensor tCrA_view = s2r_thr_copy_A.retile_D(tCrA);   // 寄存器的 copy 视图
-    // tCrA 和 tCrA_view 是同一块寄存器的两个"视角"
+    Tensor tCsA = s2r_thr_copy_A.partition_S(sA);       // copy view in SMEM
+    Tensor tCrA_view = s2r_thr_copy_A.retile_D(tCrA);   // copy view in registers
+    // `tCrA` and `tCrA_view` are two "views" of the same registers
 
     auto s2r_copy_B = make_tiled_copy_B(typename Config::S2RCopyAtomB{}, tiled_mma);
     auto s2r_thr_copy_B = s2r_copy_B.get_slice(tid);
     Tensor tCsB = s2r_thr_copy_B.partition_S(sB);
     Tensor tCrB_view = s2r_thr_copy_B.retile_D(tCrB);
 
-    // ==================== 软件流水线 ====================
+    // ==================== Software pipeline ====================
     int num_k_tiles = ceil_div(K, kBlockK);
     constexpr int num_mma_k = size<2>(tCrA);   // kBlockK / MMA_K = 32/16 = 2
 
-    // ---- Pipeline Fill: 预加载前 (kStages-1) 个 tile ----
+    // ---- Pipeline Fill: preload the first `(kStages-1)` tiles ----
     CUTE_UNROLL
     for (int stage = 0; stage < kStages - 1; ++stage) {
         if (stage < num_k_tiles) {
             copy(g2s_copy, tAgA_g(_, _, _, stage), tAsA_s(_, _, _, stage));
             copy(g2s_copy, tBgB_g(_, _, _, stage), tBsB_s(_, _, _, stage));
         }
-        cp_async_fence();   // 每个 stage 作为独立的 fence group
+        cp_async_fence();   // treat each stage as an independent fence group
     }
 
-    // ---- Main Loop: 边算边加载 ----
-    int smem_pipe_read  = 0;              // 当前计算的 stage
-    int smem_pipe_write = kStages - 1;    // 下一次写入的 stage
+    // ---- Main Loop: compute while loading ----
+    int smem_pipe_read  = 0;              // stage currently being computed
+    int smem_pipe_write = kStages - 1;    // stage to write next
 
     for (int k_tile = 0; k_tile < num_k_tiles; ++k_tile) {
-        // Step 1: 等待当前 stage 数据就绪
-        cp_async_wait<kStages - 2>();     // wait<1>: 允许 1 组仍在飞行
+        // Step 1: wait for the current stage data to be ready
+        cp_async_wait<kStages - 2>();     // wait<1>: allow 1 group to remain in flight
         __syncthreads();
 
-        // Step 2: 异步加载下一个 tile（如果还有）
+        // Step 2: asynchronously load the next tile (if any)
         int next_tile = k_tile + kStages - 1;
         if (next_tile < num_k_tiles) {
             copy(g2s_copy, tAgA_g(_, _, _, next_tile),
@@ -846,7 +846,7 @@ __global__ void cute_gemm_kernel(
         }
         cp_async_fence();
 
-        // Step 3: S→R (ldmatrix) + MMA 计算
+        // Step 3: S→R (ldmatrix) + MMA compute
         CUTE_UNROLL
         for (int k_inner = 0; k_inner < num_mma_k; ++k_inner) {
             copy(s2r_copy_A, tCsA(_, _, k_inner, smem_pipe_read),
@@ -856,20 +856,20 @@ __global__ void cute_gemm_kernel(
         }
         gemm(tiled_mma, tCrC, tCrA, tCrB, tCrC);   // tCrC += tCrA @ tCrB
 
-        // Step 4: 推进环形缓冲区
+        // Step 4: advance the ring buffer
         smem_pipe_read  = (smem_pipe_read  + 1) % kStages;
         smem_pipe_write = (smem_pipe_write + 1) % kStages;
         __syncthreads();
     }
 
-    // ==================== Epilogue: FP32 → FP16, 写回 GMEM ====================
-    Tensor tCgC = thr_mma.partition_C(gC);            // C 在 GMEM 中的当前线程视图
-    Tensor tCrC_out = make_tensor_like<T>(tCrC);      // 分配 FP16 寄存器
-    copy(tCrC, tCrC_out);                             // FP32 → FP16 截断转换
-    copy(AutoVectorizingCopy{}, tCrC_out, tCgC);      // 自动向量化写回
+    // ==================== Epilogue: FP32 → FP16, write back to GMEM ====================
+    Tensor tCgC = thr_mma.partition_C(gC);            // C the current thread's GMEM view
+    Tensor tCrC_out = make_tensor_like<T>(tCrC);      // allocate FP16 registers
+    copy(tCrC, tCrC_out);                             // FP32 → FP16 truncating conversion
+    copy(AutoVectorizingCopy{}, tCrC_out, tCgC);      // automatically vectorized writeback
 }
 
-// ==================== Host 端 PyTorch 接口 ====================
+// ==================== Host-side PyTorch interface ====================
 torch::Tensor cutlass_gemm(torch::Tensor A, torch::Tensor B) {
     TORCH_CHECK(A.device().type() == torch::kCUDA, "A must be on CUDA");
     TORCH_CHECK(B.device().type() == torch::kCUDA, "B must be on CUDA");
@@ -882,7 +882,7 @@ torch::Tensor cutlass_gemm(torch::Tensor A, torch::Tensor B) {
     int K = A.size(1);
     int N = B.size(1);
 
-    // B: (K,N) row-major → Bt: (N,K) row-major，符合 TN 约定
+    // B: (K,N) row-major → Bt: (N,K) row-major，matches the TN convention
     auto Bt = B.t().contiguous();
     auto C = torch::empty({M, N}, A.options());
 
@@ -890,16 +890,16 @@ torch::Tensor cutlass_gemm(torch::Tensor A, torch::Tensor B) {
 
     dim3 block(Config::kThreadNum);   // 128 threads
     dim3 grid(
-        (N + Config::kBlockN - 1) / Config::kBlockN,   // N 方向
-        (M + Config::kBlockM - 1) / Config::kBlockM    // M 方向
+        (N + Config::kBlockN - 1) / Config::kBlockN,   // N direction
+        (M + Config::kBlockM - 1) / Config::kBlockM    // M direction
     );
 
-    // 共享内存: A(24KB) + B(24KB) = 48KB
+    // Shared memory: A(24KB) + B(24KB) = 48KB
     constexpr int smem_size =
         cosize(SmemLayoutA{}) * sizeof(half_t) +
         cosize(SmemLayoutB{}) * sizeof(half_t);
 
-    // 超过 48KB 需要显式请求
+    // If it exceeds 48KB, an explicit request is required
     if constexpr (smem_size > 48 * 1024) {
         cudaFuncSetAttribute(
             cute_gemm_kernel<Config>,
@@ -918,51 +918,51 @@ torch::Tensor cutlass_gemm(torch::Tensor A, torch::Tensor B) {
 ```
 
 ```
-[Kernel-1] 构造全局视图 mA(M,K), mB(N,K), mC(M,N)（gmem_ptr + row-major layout）
-[Kernel-2] CTA 切块：用 blockIdx 选当前 CTA 的 global tile 视图 gA(BM,BK,ktile), gB(BN,BK,ktile), gC(BM,BN)
-[Kernel-3] 动态共享内存切分：sA(BM,BK,stages), sB(BN,BK,stages)（smem_ptr + swizzled SmemLayout）
-[Kernel-4] 构造 G2S tiled_copy(cp.async 128b) 并对每线程 partition：tAgA_g/tAsA_s 与 tBgB_g/tBsB_s（thread-local GMEM/SMEM copy 视图）
-[Kernel-5] 构造 tiled_mma(mma.sync) 并对每线程分配寄存器 fragment：tCrA,tCrB,tCrC；clear(tCrC)
-[Kernel-6] 构造 S2R tiled_copy_A/B(ldmatrix) 并对每线程 partition：tCsA/tCsB（SMEM 读视图）与 tCrA_view/tCrB_view=retile_D(tCrA/tCrB)（REG 写视图）
-[Kernel-7] Pipeline 预热：for stage in [0..kStages-2] 若 stage<num_k_tiles 则 cp.async copy(gA→sA[stage]) 与 copy(gB→sB[stage])；cp_async_fence() 提交一组
-[Kernel-8] 主循环：for k_tile in [0..num_k_tiles-1] 执行 cp_async_wait(kStages-2)+__syncthreads() 等待当前读 stage ready
-[Kernel-9] 主循环并行预取：计算 next_tile=k_tile+kStages-1；若存在则 cp.async copy(next_tile 的 gA/gB → 写入 sA/sB[smem_pipe_write])；cp_async_fence()
-[Kernel-10] 主循环计算：for k_inner in [0..BK/16-1] 用 ldmatrix 把 sA/sB[smem_pipe_read] → tCrA_view/tCrB_view；随后 gemm(tiled_mma): tCrC += tCrA @ tCrB
-[Kernel-11] 推进环形 stage：smem_pipe_read=(read+1)%kStages；smem_pipe_write=(write+1)%kStages；__syncthreads()
-[Kernel-12] Epilogue：tCgC=partition_C(gC) 得到本线程 GMEM 写回视图；tCrC_out(FP16) = convert(tCrC FP32→FP16)；向量化 copy(tCrC_out→tCgC)
+[Kernel-1] Construct global views mA(M,K), mB(N,K), mC(M,N)（gmem_ptr + row-major layout）
+[Kernel-2] CTA CTA tiling: use `blockIdx` to select the current CTA's global tile views gA(BM,BK,ktile), gB(BN,BK,ktile), gC(BM,BN)
+[Kernel-3] Dynamic shared-memory partitioning：sA(BM,BK,stages), sB(BN,BK,stages)（smem_ptr + swizzled SmemLayout）
+[Kernel-4] Construct `G2S tiled_copy` (`cp.async` 128b) and partition it per thread: `tAgA_g`/`tAsA_s` and `tBgB_g`/`tBsB_s` (thread-local GMEM/SMEM copy views)
+[Kernel-5] Construct `tiled_mma` (`mma.sync`) and allocate register fragments per thread：tCrA,tCrB,tCrC；clear(tCrC)
+[Kernel-6] Construct `S2R tiled_copy_A/B` (`ldmatrix`) and partition them per thread: `tCsA`/`tCsB` (SMEM read views) and `tCrA_view`/`tCrB_view = retile_D(tCrA/tCrB)` (register write views)
+[Kernel-7] Pipeline warm-up: for `stage in [0..kStages-2]`, if `stage < num_k_tiles`, then issue `cp.async copy(gA→sA[stage])` and `copy(gB→sB[stage])`; `cp_async_fence()` commits one group
+[Kernel-8] Main loop：for k_tile in [0..num_k_tiles-1] execute cp_async_wait(kStages-2)+__syncthreads() wait until the current read stage is ready
+[Kernel-9] Main-loop parallel prefetch: compute `next_tile = k_tile + kStages - 1`; if it exists, then issue `cp.async copy(next_tile's gA/gB → sA/sB[smem_pipe_write])`; `cp_async_fence()`
+[Kernel-10] Main-loop compute: for `k_inner in [0..BK/16-1]`, use `ldmatrix` to move `sA/sB[smem_pipe_read] → tCrA_view/tCrB_view`; then run `gemm(tiled_mma): tCrC += tCrA @ tCrB`
+[Kernel-11] advance the ring-buffer stage：smem_pipe_read=(read+1)%kStages；smem_pipe_write=(write+1)%kStages；__syncthreads()
+[Kernel-12] Epilogue：tCgC=partition_C(gC) obtain this thread's GMEM writeback view；tCrC_out(FP16) = convert(tCrC FP32→FP16)；vectorized copy(tCrC_out→tCgC)
 ```
 
-##### CuTe 核心 API 速查表
+##### CuTe Core API Cheat Sheet
 
-| API | 作用 | 返回 |
+| API | Function | Return |
 |-----|------|------|
-| `make_tensor(ptr, layout)` | 创建 tensor | Tensor |
-| `make_layout(shape, stride)` | 创建布局 | Layout |
-| `local_tile(tensor, tiler, coord, step)` | 提取子 tile | Tensor |
-| `make_tiled_copy(atom, thr_layout, val_layout)` | 创建协作拷贝 | TiledCopy |
-| `make_tiled_mma(atom, thr_layout, val_tile)` | 创建协作 MMA | TiledMMA |
-| `partition_S(tensor)` / `partition_D(tensor)` | 按 copy 分区（Source/Dest） | Tensor |
-| `partition_fragment_A/B/C(tensor)` | 按 MMA 分区（寄存器 fragment） | Tensor |
-| `retile_D(tensor)` | 重新分区已有寄存器（零开销视图转换） | Tensor (alias) |
-| `copy(copy_op, src, dst)` | 执行拷贝 | void |
-| `gemm(mma, D, A, B, C)` | 执行 MMA: D = A × B + C | void |
-| `cp_async_fence()` | 标记 async 组边界 | void |
-| `cp_async_wait<N>()` | 等待到 ≤N 组未完成 | void |
-| `composition(swizzle, layout)` | 应用 swizzle 变换 | Layout |
-| `tile_to_shape(layout, shape)` | 复制 tile 到目标 shape | Layout |
-| `cosize(layout)` | 布局的 co-domain 大小（实际占用元素数） | int |
+| `make_tensor(ptr, layout)` | Create tensor | Tensor |
+| `make_layout(shape, stride)` | Create layout | Layout |
+| `local_tile(tensor, tiler, coord, step)` | Extract sub-tile | Tensor |
+| `make_tiled_copy(atom, thr_layout, val_layout)` | Create a collaborative copy | TiledCopy |
+| `make_tiled_mma(atom, thr_layout, val_tile)` | Create collaborative MMA | TiledMMA |
+| `partition_S(tensor)` / `partition_D(tensor)` | Partition by copy (Source/Dest) | Tensor |
+| `partition_fragment_A/B/C(tensor)` | Partition by MMA (register fragment) | Tensor |
+| `retile_D(tensor)` | Repartition existing registers (zero-overhead view conversion) | Tensor (alias) |
+| `copy(copy_op, src, dst)` | Perform copy | void |
+| `gemm(mma, D, A, B, C)` | Execute MMA: D = A × B + C | void |
+| `cp_async_fence()` | Mark async group boundaries | void |
+| `cp_async_wait<N>()` | Wait until ≤N groups are not completed | void |
+| `composition(swizzle, layout)` | Apply the swizzle transformation | Layout |
+| `tile_to_shape(layout, shape)` | Copy tile to target shape | Layout |
+| `cosize(layout)` | The co-domain size of the layout (actual number of occupied elements) | int |
 
-##### 全局视角：数据流与瓶颈
+##### Global View: Data Flow and Bottlenecks
 
-计算 `C = A × B`（FP16 计算、FP32 累加、FP16 输出）在 GPU 上需要同时解决三个瓶颈：
+Computing `C = A × B` (FP16 compute, FP32 accumulation, FP16 output) requires solving three bottlenecks simultaneously on the GPU:
 
-| 瓶颈 | 根因 | CUTLASS 的解法 |
+| Bottleneck | Root cause | CUTLASS solution |
 |------|------|---------------|
-| **全局内存带宽** | HBM 延迟 ~400 cycles | 多级 Tiling + 数据复用 |
-| **共享内存 Bank Conflict** | 32 bank × 4B，同 bank 串行 | Swizzle 地址重排 |
-| **指令发射 / 计算吞吐** | MMA 单元需要持续喂饱 | 软件流水线，重叠 load 与 compute |
+| **Global memory bandwidth** | HBM latency ~400 cycles | Multi-level tiling + data reuse |
+| **Shared-memory bank conflicts** | 32 banks × 4B, same-bank accesses serialize | Swizzled address remapping |
+| **Instruction issue / compute throughput** | The MMA units must be fed continuously | Software pipelining with overlapped load and compute |
 
-整个 kernel 的数据流路径：
+The data flow path of the entire kernel:
 
 ```
 Global Memory (HBM)
@@ -980,85 +980,85 @@ Accumulator (FP32 regs)
 Global Memory (HBM)
 ```
 
-每一步都有专门的硬件指令和 CuTe 抽象与之对应。理解这条数据流是理解整个 kernel 的关键。
+Each stage has a corresponding hardware instruction and CuTe abstraction. Understanding this data flow is the key to understanding the full kernel.
 
-##### 三级 Tiling 架构
+##### Three-Level Tiling Architecture
 
-CUTLASS 的核心设计模式是**三级 Tiling**——把一个巨大的矩阵乘法层层分解：
+The core design pattern in CUTLASS is **three-level tiling**—decomposing a large matrix multiplication hierarchically:
 
 ```
 Level 1: CTA Tile (Thread Block)
-    问题：整个 M×N 的 C 矩阵太大
-    解法：每个 thread block 负责 128×128 的 C 子块
-    K 维度以 kBlockK=32 为步长循环
+    Problem: the full `M×N` matrix C is too large
+    Solution：Each thread block is responsible for a 128×128 sub-block of C
+    The K dimension iterates with step size `kBlockK=32`
 
 Level 2: Warp Tile
-    问题：128×128 对单个 warp 还是太大
-    解法：TiledMMA 自动把 block tile 划分给多个 warp
-    Layout<Shape<_2, _2, _1>>  → 4 个 warp，M 方向 2 个，N 方向 2 个
+    Problem：128×128 is still too large for a single warp
+    Solution: `TiledMMA` automatically partitions the block tile across multiple warps
+    Layout<Shape<_2, _2, _1>>  → 4 warps: 2 along M and 2 along N
 
 Level 3: MMA Instruction
-    问题：每个 warp 需要执行实际的矩阵乘
-    解法：SM80_16x8x16 MMA atom，每次算 16×8 的 C 子块，消耗 16 深的 K
+    Problem: each warp must execute the actual matrix multiplication
+    Solution：SM80_16x8x16 MMA atom，computes a 16×8 sub-block of C each time, consuming K depth 16
 ```
 
-**关键参数关系**：
+**Key parameter relationship**:
 
 ```
 Block Tile:    128 × 128 × 32  (kBlockM × kBlockN × kBlockK)
 MMA Atom:       16 ×   8 × 16  (MMA_M × MMA_N × MMA_K)
-Thread Layout:   2 ×   2 ×  1  (warp 在 M, N, K 方向的复制次数)
-Value Tile:     64 ×  64 × 16  (每个 warp 覆盖的 M, N, K 范围)
+Thread Layout:   2 ×   2 ×  1  (warp replication counts along the M, N, and K directions)
+Value Tile:     64 ×  64 × 16  (M, N, K extent covered by each warp)
 
-验证覆盖完整性：
-  M 方向: 64 × 2 = 128 = kBlockM ✓
-  N 方向: 64 × 2 = 128 = kBlockN ✓
-  K 方向: 16 × 1 =  16 (MMA_K，内层循环需迭代 32/16=2 次) ✓
+Validate full coverage：
+  M direction: 64 × 2 = 128 = kBlockM ✓
+  N direction: 64 × 2 = 128 = kBlockN ✓
+  K direction: 16 × 1 = 16 (`MMA_K`; the inner loop must iterate `32/16 = 2` times) ✓
 ```
 
-`make_tiled_mma` 做的事情就是把这三层关系编码成一个对象，后续的 `partition_fragment_A/B/C` 能自动算出每个线程负责的寄存器片段。
+`make_tiled_mma` encodes these three levels into a single object, after which `partition_fragment_A/B/C` can automatically derive the register fragments owned by each thread.
 
-##### TN 布局约定
+##### The TN Layout Convention
 
-这是 CUTLASS 最容易让人困惑的地方。理解它需要区分**存储布局**和 **MMA 期望布局**。
+This is one of the most confusing parts of CUTLASS. The key is to distinguish **storage layout** from the **layout expected by the MMA instruction**.
 
-MMA 指令 `SM80_16x8x16_F32F16F16F32_TN` 的含义：
-- **T (Transposed)**：A 操作数以行优先（row-major）方式在寄存器中排列
-- **N (Normal)**：B 操作数以列优先（column-major）方式在寄存器中排列
+The MMA instruction `SM80_16x8x16_F32F16F16F32_TN` means:
+- **T (Transposed)**: the A operands are arranged in registers in row-major form
+- **N (Normal)**: the B operands are arranged in registers in column-major form
 
-代码中的对应：
+Correspondence in code:
 
 ```cpp
-// A 存储: (M, K) row-major，stride = (K, 1)
-// → 直接符合 "T"，不需要额外转置
+// A Storage: (M, K) row-major，stride = (K, 1)
+// → directly matches "T"，no additional transpose is needed
 
-// B 存储: PyTorch 给的是 (K, N) row-major
-// → kernel 需要 (N, K) row-major（每行 N 对应一个 output column）
-// → 所以 host 端做了 B.t().contiguous()
-// → 然后声明为 make_shape(N, K), make_stride(K, 1)
+// B Storage: PyTorch provides (K, N) row-major
+// → the kernel requires `(N, K)` row-major (each row of N corresponds to one output column)
+// → so the host side performs B.t().contiguous()
+// → and then declares it as make_shape(N, K), make_stride(K, 1)
 ```
 
-为什么用 TN 而不是 NN 或 TT？因为当 A 是 row-major、B 也是 row-major（经转置后变成 (N,K)）时，TN 恰好匹配。这是 CUTLASS 最常用的路径，大多数优化都针对它做过。
+Why `TN` instead of `NN` or `TT`? Because when A is row-major and B is also row-major after being transposed to `(N, K)`, the `TN` form matches exactly. This is the most common path in CUTLASS, and most optimizations target it.
 
-##### TiledCopy 与 TiledMMA 详解
+##### Detailed Explanation of TiledCopy and TiledMMA
 
-**TiledCopy：数据搬运的分工方案**
+**TiledCopy: The Work Partition for Data Movement**
 
 ```cpp
 auto g2s_copy = make_tiled_copy(
-    G2SCopyAtom{},                              // 硬件指令：cp.async 128-bit
-    Layout<Shape<_32, _4>, Stride<_4, _1>>{},   // 线程排布：32行×4列
-    Layout<Shape<_1, _8>>{}                      // 每线程搬 1×8 个元素
+    G2SCopyAtom{},                              // hardware instruction：cp.async 128-bit
+    Layout<Shape<_32, _4>, Stride<_4, _1>>{},   // Thread layout: 32 rows × 4 columns
+    Layout<Shape<_1, _8>>{}                      // Each thread moves 1×8 elements
 );
 ```
 
-这个配置的物理意义：
-- 128 个线程排成 32×4 的网格
-- 每个线程用 `cp.async` 一次搬 128 bit = 8 个 `half_t`
-- 单次调用覆盖 32×(4×8) = 32×32 = 1024 个元素
-- 我们的 tile 是 128×32，所以 `partition_S` 会把它分成多个 "CPY_M" 块，每次 `copy` 调用在循环中搬完所有块
+The physical meaning of this configuration is:
+- 128 threads arranged in a 32×4 grid
+- Each thread uses `cp.async` to move 128 bits = 8 `half_t` values at a time
+- A single call covers 32×(4×8) = 32×32 = 1024 elements
+- Our tile is 128×32, so `partition_S` splits it into multiple `CPY_M` blocks, and each `copy` call moves all blocks in the loop
 
-如果画图的话这种layout长下面这样
+If you draw a picture, this layout looks like this:
 ```
 Shape = 32 rows × 4 cols
 
@@ -1070,13 +1070,13 @@ r=3       12   13   14   15
 r=4       16   17   18   19
 r=5       20   21   22   23
 r=6       24   25   26   27
-r=7       28   29   30   31   ← warp0（tid 0..31）刚好覆盖 r=0..7 的整块 8×4
-r=8       32   33   34   35   ← warp1 开始
+r=7       28   29   30   31   ← warp0 (`tid 0..31`) exactly covers the full 8×4 block for `r=0..7`
+r=8       32   33   34   35   ← warp1 starts
 ...
 
 ```
 
-作为对比的话Layout<Shape<32,4>, Stride<1,32>>长下面这样
+For comparison, `Layout<Shape<32,4>, Stride<1,32>>` looks like this:
 ```
           c=0  c=1  c=2   c=3
 r=0        0   32   64    96
@@ -1092,101 +1092,101 @@ r=31      31   63   95   127
 
 ```
 
-**partition_S 与 partition_D**
+**partition_S and partition_D**
 
 ```cpp
-Tensor tAgA_g = g2s_thr_copy_A.partition_S(gA);  // Source: 全局内存
-Tensor tAsA_s = g2s_thr_copy_A.partition_D(sA);  // Dest:   共享内存
+Tensor tAgA_g = g2s_thr_copy_A.partition_S(gA);  // Source: global memory
+Tensor tAsA_s = g2s_thr_copy_A.partition_D(sA);  // Dest:   shared memory
 ```
 
-partition 后的 tensor 维度变为 `(CPY, CPY_M, CPY_K, ...)`：
-- **CPY**：一条 copy 指令搬的元素数（8 个 half_t）
-- **CPY_M, CPY_K**：这个线程需要在 M 和 K 方向上迭代的次数
-- 末尾维度：K-tile 索引或 stage 索引
+After partitioning, the tensor dimensions become `(CPY, CPY_M, CPY_K, ...)`:
+- **CPY**: the number of elements moved by one copy instruction (8 `half_t` values)
+- **CPY_M, CPY_K**: the number of iterations this thread must traverse along the M and K dimensions
+- Final dimension: the K-tile index or stage index
 
-调用 `copy(g2s_copy, src, dst)` 时，CuTe 会自动展开 CPY_M × CPY_K 的循环。
+When calling `copy(g2s_copy, src, dst)`, CuTe automatically unrolls the `CPY_M × CPY_K` loop.
 
-**TiledMMA 的双重视图技巧**
+**TiledMMA’s Double View Technique**
 
-这是一个精妙的设计：
+This is an elegant design:
 
 ```cpp
-// MMA 视图（gemm() 使用）
+// MMA view (used by `gemm()`)
 Tensor tCrA = thr_mma.partition_fragment_A(sA(_, _, 0));
 
-// Copy 视图（copy() 使用）
+// Copy view (used by `copy()`)
 Tensor tCrA_view = s2r_thr_copy_A.retile_D(tCrA);
 ```
 
-**tCrA** 和 **tCrA_view 指向完全相同的寄存器**，但布局不同：
-- `tCrA` 的布局对齐 MMA 指令的操作数格式
-- `tCrA_view` 的布局对齐 `ldmatrix` 的输出格式
+**`tCrA`** and **`tCrA_view` point to the exact same registers**, but with different layouts:
+- The layout of `tCrA` matches the operand format expected by the MMA instruction
+- The layout of `tCrA_view` matches the output format of `ldmatrix`
 
-`retile_D` 就是做这个布局转换的——它不移动数据，只改变逻辑视图。这样 `copy(s2r, src, tCrA_view)` 把数据搬进寄存器后，`gemm(mma, tCrC, tCrA, tCrB, tCrC)` 能直接用，无需任何寄存器内的数据重排。
+`retile_D` performs this layout transformation without moving data; it only changes the logical view. As a result, once `copy(s2r, src, tCrA_view)` loads the data into registers, `gemm(mma, tCrC, tCrA, tCrB, tCrC)` can use it directly with no further register rearrangement.
 
-##### 软件流水线（Pipeline）
+##### Software Pipeline
 
-这是整个 kernel 性能的关键所在。
+This is the key to the performance of the entire kernel.
 
-**为什么需要流水线？**
+**Why is a pipeline needed?**
 
-`cp.async` 从全局内存搬数据到共享内存的延迟大约 **400-800 cycles**。如果采用朴素方式：
+The latency of `cp.async` when moving data from global memory to shared memory is roughly **400-800 cycles**. In a naive implementation:
 
 ```
-load A[0], B[0] to smem     ← 等 400 cycles
+load A[0], B[0] to smem     ← wait 400 cycles
 __syncthreads()
-compute on smem data         ← 计算 ~100 cycles
+compute on smem data         ← compute ~100 cycles
 ```
 
-计算单元有 80% 的时间在空等！
+The compute unit spends 80% of its time waiting!
 
-**流水线的核心思想——重叠**：
+**Core idea of pipelined overlap**:
 
 ```
-朴素方式:
+Naive approach:
   [===LOAD===][COMPUTE][===LOAD===][COMPUTE][===LOAD===][COMPUTE]
 
-流水线 (3 stage):
+Pipeline (3 stage):
   [===LOAD 0===]
        [===LOAD 1===]
             [===LOAD 2===][===LOAD 3===][===LOAD 4===]
   [          ][COMPUTE 0 ][COMPUTE 1   ][COMPUTE 2   ][COMPUTE 3]...
 
-当 GPU 在计算 tile i 时，tile i+2 的加载已经在异步进行！
+While the GPU is computing tile `i`, the load for tile `i+2` is already happening asynchronously!
 ```
 
-**kStages = 3 的含义**——共享内存中同时存在 3 份 tile：
+**What `kStages = 3` means**: three tile copies coexist in shared memory at the same time:
 
 ```
-SMEM 布局:
+SMEM layout:
   ┌──────────┬──────────┬──────────┐
   │ Stage 0  │ Stage 1  │ Stage 2  │
   │ 128×32   │ 128×32   │ 128×32   │
   └──────────┴──────────┴──────────┘
      ↑ read     ↑ read     ↑ write
-     (正在计算)  (已加载)   (正在加载)
+     (currently computing)  (already loaded)   (currently loading)
 ```
 
-三个 stage 是延迟隐藏和资源占用之间的经典平衡点：
-- **2 stage**：只能隐藏一个 tile 的延迟，不够
-- **3 stage**：能隐藏两个 tile 的延迟，通常足够
-- **4+ stage**：共享内存占用过大，限制 occupancy
+Three stages are the classic trade-off between latency hiding and resource usage:
+- **2 stages**: can hide only one tile's latency, which is often not enough
+- **3 stages**: can hide the latency of two tiles, which is usually sufficient
+- **4+ stages**: consume too much shared memory and reduce occupancy
 
-**cp.async 的关键特性**：
+**Key features of cp.async**:
 
-`cp.async` 是 SM80 引入的异步拷贝指令，它有两个重要特性：
+`cp.async` is an asynchronous copy instruction introduced in SM80. It has two important properties:
 
-1. **非阻塞**：发射后线程立即继续执行，数据在后台搬运
-2. **绕过寄存器**：数据直接从全局内存到共享内存，不经过寄存器文件
+1. **Non-blocking**: the thread continues execution immediately after issuing the copy, while the data transfer proceeds in the background
+2. **Register bypass**: data is copied directly from global memory to shared memory without passing through the register file
 
-配合 `cp_async_fence()` 和 `cp_async_wait<N>()`：
+With `cp_async_fence()` and `cp_async_wait<N>()`:
 
 ```cpp
-cp_async_fence();       // 插入一个"栅栏"，标记到此为止的所有 cp.async 为一组
-cp_async_wait<N>();     // 等待直到最多还剩 N 组未完成
+cp_async_fence();       // insert a "fence", marking all `cp.async` operations issued so far as one group
+cp_async_wait<N>();     // Wait until at most N groups remain unfinished
 ```
 
-**Swizzle 与多 Stage 的配合**：
+**Swizzle and multi-stage cooperation**:
 
 ```cpp
 using SmemLayoutA = decltype(
@@ -1195,13 +1195,13 @@ using SmemLayoutA = decltype(
 );
 ```
 
-`tile_to_shape` 在第三维度上做 tile 复制——相当于在共享内存里开了 3 块独立的 128×32 缓冲区，每块都保持 swizzle 布局。这就是流水线的硬件基础。
+`tile_to_shape` replicates the tile along a third dimension, which is equivalent to allocating three independent 128×32 buffers in shared memory, each preserving the swizzled layout. This is the hardware foundation of the pipeline.
 
-##### 主循环的精密编排
+##### Precise Structure of the Main Loop
 
-这是整个 kernel 中逻辑最精密的部分。
+This is the most intricate part of the kernel logically.
 
-**流水线填充（Pipeline Fill）**
+**Pipeline Fill**
 
 ```cpp
 for (int stage = 0; stage < kStages - 1; ++stage) {    // stage = 0, 1
@@ -1209,40 +1209,40 @@ for (int stage = 0; stage < kStages - 1; ++stage) {    // stage = 0, 1
         copy(g2s_copy, tAgA_g(_, _, _, stage), tAsA_s(_, _, _, stage));
         copy(g2s_copy, tBgB_g(_, _, _, stage), tBsB_s(_, _, _, stage));
     }
-    cp_async_fence();    // 每个 stage 的加载作为独立的一组
+    cp_async_fence();    // treat each stage's loads as an independent group
 }
 ```
 
-填充阶段预加载 `kStages - 1 = 2` 个 tile。每个 tile 的加载后面跟一个 fence，这样后续可以用 `cp_async_wait` 精确等待特定组。
+The fill phase preloads `kStages - 1 = 2` tiles. Each tile load is followed by a fence so that `cp_async_wait` can later wait for exactly the right group.
 
-**主循环四步曲**
+**Main Loop Four Steps**
 
-每次迭代执行四个严格有序的步骤：
+Each iteration executes four strictly ordered steps:
 
 ```cpp
-int smem_pipe_read  = 0;          // 正在计算的 stage
-int smem_pipe_write = kStages - 1; // 下一次写入的 stage
+int smem_pipe_read  = 0;          // Stage currently being computed
+int smem_pipe_write = kStages - 1; // stage to write next
 ```
 
-**步骤 1：等待当前 stage 数据就绪**
+**Step 1: Wait for the current stage data to be ready**
 
 ```cpp
-cp_async_wait<kStages - 2>();   // wait<1>: 最多 1 组未完成
+cp_async_wait<kStages - 2>();   // wait<1>: at most 1 group may remain unfinished
 __syncthreads();
 ```
 
-`cp_async_wait<1>` 的语义是"等到未完成的 fence group 数量 ≤ 1"。由于我们在每次迭代中都发射一个新的 group，这保证了 `smem_pipe_read` 对应的 group 已经完成。
+The semantics of `cp_async_wait<1>` is "wait until the number of outstanding fenced groups is ≤ 1". Since we issue a new group on each iteration, this guarantees that the group corresponding to `smem_pipe_read` has completed.
 
-为什么是 `kStages - 2 = 1` 而不是 0？因为我们希望**允许一组加载仍在飞行中**——这就是流水线的精髓：
+Why `kStages - 2 = 1` instead of 0? Because we intentionally allow one set of loads to remain in flight—this is the essence of pipelining:
 
 ```
-当前状态（k_tile = 0 时）:
-  group 0 (stage 0): ✅ 完成 (等待保证)
-  group 1 (stage 1): 🔄 可能还在传输 (允许)
-  → 我们可以安全地计算 stage 0 的数据
+Current state (when `k_tile = 0`):
+  group 0 (stage 0): ✅ complete (guaranteed by the wait)
+  group 1 (stage 1): 🔄 may still be transferring (allowed)
+  → we can safely compute using the data in stage 0
 ```
 
-**步骤 2：异步加载下一个 tile**
+**Step 2: Load the next tile asynchronously**
 
 ```cpp
 int next_tile = k_tile + kStages - 1;
@@ -1253,22 +1253,22 @@ if (next_tile < num_k_tiles) {
 cp_async_fence();
 ```
 
-`smem_pipe_write` 指向的 stage 是**已经被计算过的**（或还没用过的），可以安全覆写。
+The stage pointed to by `smem_pipe_write` has either already been consumed or has not yet been used, so it can safely be overwritten.
 
-**步骤 3：S→R 拷贝 + MMA 计算**
+**Step 3: S→R copy + MMA calculation**
 
 ```cpp
 for (int k_inner = 0; k_inner < num_mma_k; ++k_inner) {   // 0, 1 (32/16=2)
-    // ldmatrix: 从共享内存搬到寄存器
+    // ldmatrix: move data from shared memory into registers
     copy(s2r_copy_A, tCsA(_, _, k_inner, smem_pipe_read), tCrA_view(_, _, k_inner));
     copy(s2r_copy_B, tCsB(_, _, k_inner, smem_pipe_read), tCrB_view(_, _, k_inner));
 }
 gemm(tiled_mma, tCrC, tCrA, tCrB, tCrC);
 ```
 
-`kBlockK = 32` 被 MMA 的 K 维度（16）切成 `num_mma_k = 2` 块。`ldmatrix` 和 `mma` 交替执行允许编译器做指令级流水线——当 MMA 单元在执行乘加时，`ldmatrix` 可以在 load 单元上准备下一块数据。
+`kBlockK = 32` is split into `num_mma_k = 2` chunks by the MMA K dimension (16). Interleaving `ldmatrix` and `mma` lets the compiler perform instruction-level pipelining: while the MMA unit executes a multiply-accumulate, `ldmatrix` can prepare the next chunk on the load path.
 
-**步骤 4：推进环形缓冲区**
+**Step 4: Advance the Ring Buffer**
 
 ```cpp
 smem_pipe_read  = (smem_pipe_read  + 1) % kStages;
@@ -1276,14 +1276,14 @@ smem_pipe_write = (smem_pipe_write + 1) % kStages;
 __syncthreads();
 ```
 
-`% kStages` 实现了环形缓冲区。`__syncthreads()` 确保所有线程完成当前 stage 的读取后才可能覆写它。
+`% kStages` implements a ring buffer. `__syncthreads()` ensures that all threads have finished reading the current stage before it is overwritten.
 
-**完整时间线**（K=160, kBlockK=32, kStages=3, num_k_tiles=5）：
+**Full Timeline** (K=160, kBlockK=32, kStages=3, num_k_tiles=5):
 
 ```
-操作          │ k=0      │ k=1      │ k=2      │ k=3      │ k=4
+Operation      │ k=0      │ k=1      │ k=2      │ k=3      │ k=4
 ─────────────┼──────────┼──────────┼──────────┼──────────┼─────────
-Fill (预填充) │ G→S[0,1] │          │          │          │
+Fill (prefill) │ G→S[0,1] │          │          │          │
 Wait         │ wait≤1   │ wait≤1   │ wait≤1   │ wait≤1   │ wait≤1
 Load (async) │ G→S[2]   │ G→S[3]   │ G→S[4]   │ (skip)   │ (skip)
 Compute      │ stage 0  │ stage 1  │ stage 2  │ stage 0  │ stage 1
@@ -1291,180 +1291,180 @@ Compute      │ stage 0  │ stage 1  │ stage 2  │ stage 0  │ stage 1
 read_idx     │ 0        │ 1        │ 2        │ 0        │ 1
 write_idx    │ 2        │ 0        │ 1        │ 2        │ 0
 
-飞行中的组:
-k=0: group[0]✅ group[1]🔄 →发射→ group[2]🔄
-k=1: group[1]✅ group[2]🔄 →发射→ group[3]🔄
-k=2: group[2]✅ group[3]🔄 →发射→ group[4]🔄
-k=3: group[3]✅ group[4]🔄  (无新发射)
-k=4: group[4]✅             (无新发射)
+Groups in flight:
+k=0: group[0]✅ group[1]🔄 →issue→ group[2]🔄
+k=1: group[1]✅ group[2]🔄 →issue→ group[3]🔄
+k=2: group[2]✅ group[3]🔄 →issue→ group[4]🔄
+k=3: group[3]✅ group[4]🔄  (no new issue)
+k=4: group[4]✅             (no new issue)
 ```
 
-##### Epilogue：累加器回写
+##### Epilogue: Accumulator Write-Back
 
-MMA 在 FP32 寄存器中累加（精度需要），但输出矩阵 C 是 FP16（存储效率）：
+MMA accumulates into FP32 registers for accuracy, but the output matrix C is stored in FP16 for memory efficiency:
 
 ```cpp
-Tensor tCgC = thr_mma.partition_C(gC);         // 全局内存的 MMA 分区视图
-Tensor tCrC_out = make_tensor_like<T>(tCrC);    // 分配 FP16 寄存器空间
-copy(tCrC, tCrC_out);                           // FP32 → FP16 截断
-copy(AutoVectorizingCopy{}, tCrC_out, tCgC);    // 写回全局内存
+Tensor tCgC = thr_mma.partition_C(gC);         // MMA partition view in global memory
+Tensor tCrC_out = make_tensor_like<T>(tCrC);    // Allocate FP16 register space
+copy(tCrC, tCrC_out);                           // FP32 → FP16 truncation
+copy(AutoVectorizingCopy{}, tCrC_out, tCgC);    // Write back to global memory
 ```
 
-`thr_mma.partition_C(gC)` 返回的 tensor 只包含**当前线程负责的那些 C 元素**在全局内存中的位置，形状和 `tCrC` 一一对应，所以直接 copy 就行。`AutoVectorizingCopy` 让 CuTe 自动选择最宽的向量化 store 指令（如 `ST.128`）。
+The tensor returned by `thr_mma.partition_C(gC)` contains only the global-memory locations of the C elements owned by the current thread. Its shape matches `tCrC` one-to-one, so a direct copy is sufficient. `AutoVectorizingCopy` lets CuTe automatically choose the widest possible vectorized store instruction (such as `ST.128`).
 
-> **💡 Tip: 生产级 Epilogue 的额外考虑**
+> **💡 Tip: Additional considerations for production-grade Epilogue**
 >
-> 本代码是简化版。完整的 CUTLASS epilogue 还需要处理：
-> 1. **边界条件**：当 M 或 N 不是 block tile 的整数倍时，需要 predication 避免越界写
-> 2. **Epilogue Fusion**：bias 加法、activation（ReLU/GELU）、residual connection 等可以在写回时一起做，避免额外的 kernel launch（详见第 7 章）
-> 3. **Split-K**：当 K 很大而 M×N 较小时，可以让多个 block 分担 K 维度，最后做 reduction
+> This code is a simplified version. The complete CUTLASS epilogue also requires processing:
+> 1. **Boundary condition**: When M or N is not an integer multiple of the block tile, predication is required to avoid out-of-bounds writes
+> 2. **Epilogue Fusion**: bias addition, activation (ReLU/GELU), residual connection, etc. can be done together during writeback to avoid additional kernel launch (see Chapter 7 for details)
+> 3. **Split-K**: When K is large and M×N is small, multiple blocks can be used to share the K dimension, and finally reduction is done
 
-### 3.3 Triton 设计哲学与核心抽象
+### 3.3 Triton Design Philosophy and Core Abstractions
 
-[Triton](https://github.com/triton-lang/triton) 是由 OpenAI 开发的基于 Python 的 GPU 编程语言和编译器。与 CUTLASS 的 C++ 模板方法截然不同，Triton 采用了"**编写 block-level 伪代码，编译器生成高效 GPU 代码**"的设计哲学。
+[Triton](https://github.com/triton-lang/triton) is a Python-based GPU programming language and compiler developed by OpenAI. Unlike CUTLASS's C++ template approach, Triton follows the philosophy of "**write block-level pseudocode, and let the compiler generate efficient GPU code**".
 
-#### 3.3.1 Block-Level 编程模型
+#### 3.3.1 Block-Level Programming Model
 
-Triton 的核心创新在于其**编程粒度**：
+Triton's core innovation lies in its **programming granularity**:
 
-- 在 CUDA 中，开发者编写单个 **thread** 的行为，然后启动成千上万个 thread
-- 在 Triton 中，开发者编写单个 **program instance**（对应一个 threadblock）的行为，操作的基本单元是 **block**（一个小的 2D tensor）
+- In CUDA, developers write the behavior of a single **thread**, then launch thousands of threads
+- In Triton, developers write the behavior of a single **program instance** (roughly corresponding to a thread block), and the basic unit of operation is a **block** (a small 2D tensor)
 
-这意味着开发者不需要关心：
-- 线程如何在 warp 内协作（编译器决定）
-- Shared memory 何时分配、数据如何放置（编译器决定）
-- Register 如何分配给各个线程（编译器决定）
-- Bank conflict 如何避免（编译器的 swizzle pass 处理）
-- 指令如何调度以隐藏延迟（编译器的 scheduling pass 处理）
+This means developers do not need to worry about:
+- How threads cooperate within a warp (decided by the compiler)
+- When shared memory is allocated and how data is laid out (decided by the compiler)
+- How registers are allocated to each thread (decided by the compiler)
+- How bank conflicts are avoided (handled by the compiler's swizzle pass)
+- How instructions are scheduled to hide latency (handled by the compiler's scheduling pass)
 
-开发者只需要描述 block-level 的算法逻辑，Triton 编译器负责将其高效地映射到硬件。
+Developers only need to describe the block-level algorithm, and the Triton compiler maps it efficiently to hardware.
 
-> **💡 Tip: Triton Block vs CUDA Block——名字相似，含义不同**
+> **💡 Tip: Triton Block vs CUDA Block - similar names, different meanings**
 >
-> 两者名字相似，但指代的东西完全不同：
+> The two have similar names, but refer to completely different things:
 >
-> **CUDA Block (Thread Block)**：是一组线程的集合（如 256 个线程）。你需要手动管理每个线程做什么：线程索引、shared memory 分配、同步（`__syncthreads`）、内存合并访问等。层级结构：Grid → Block → Thread。一个 block 内的线程共享 shared memory，可以同步。
+> **CUDA Block (Thread Block)**: a collection of threads (for example, 256 threads). You must manually manage what each thread does: thread indexing, shared-memory allocation, synchronization (`__syncthreads`), coalesced memory access, and so on. The hierarchy is Grid → Block → Thread. Threads within a block share shared memory and can synchronize.
 >
-> **Triton Block (Tile / Block of Data)**：指的是一块数据（如一个 `(128, 32)` 的矩阵切片）。Triton 中没有"线程"的概念暴露给用户——你操作的是整个 tile。`BLOCK_SIZE_M`、`BLOCK_SIZE_K` 等都是描述数据分块的大小，不是线程数量。底层的线程调度、shared memory、合并访问全部由 Triton 编译器自动处理。
-> **本质映射**：Triton 的一个 program（`tl.program_id(0)` 对应的一个实例）在底层会被编译成一个 CUDA thread block。Triton 编译器根据你声明的 `BLOCK_SIZE_*` 自动决定这个 CUDA block 里需要多少线程、怎么分配 shared memory、怎么排布内存访问。
+> **Triton Block (Tile / Block of Data)**: a block of data (for example, a `(128, 32)` matrix slice). Triton does not expose threads directly to the user—you operate on the entire tile. `BLOCK_SIZE_M`, `BLOCK_SIZE_K`, and similar parameters describe data-block sizes, not thread counts. Under the hood, thread scheduling, shared memory, and coalesced accesses are all handled automatically by the Triton compiler.
+> **Essential mapping**: a Triton program (an instance identified by `tl.program_id(0)`) is ultimately lowered to a CUDA thread block. Based on the declared `BLOCK_SIZE_*` values, the Triton compiler automatically decides how many threads are needed, how shared memory is allocated, and how memory accesses are organized.
 >
-> 简单来说：**CUDA block = 你管理线程，自己搬数据；Triton block = 你声明要处理的数据形状，编译器帮你管线程和搬数据。** 这也是为什么模板里我们只写 `tl.load` / `tl.dot` / `tl.store` 这种 tile 级别的操作，而不需要关心 `threadIdx` 或 shared memory。
+> In short: **CUDA block = you manage threads and move data yourself; Triton block = you declare the shape of the data to process, and the compiler manages threads and data movement for you.** That is why Triton kernels are written using tile-level operations such as `tl.load`, `tl.dot`, and `tl.store`, without directly touching `threadIdx` or shared memory.
 
-#### 3.3.2 Triton Kernel 编写蓝图
+#### 3.3.2 A Blueprint for Writing Triton Kernels
 
-任何 Triton kernel 的编写都遵循同一套固定流程。掌握这个蓝图后，无论是写 vector add、softmax 还是 Flash Attention，你只需要往蓝图的每一步填入具体的计算逻辑即可。
+Almost every Triton kernel follows the same fixed process. Once you understand this blueprint, writing vector addition, softmax, or FlashAttention mostly comes down to filling in the operation-specific logic for each step.
 
 ```
-Step 1: 确定 pid → tile 的映射（"我负责输出的哪一块？"）
+Step 1: Determine the `pid → tile` mapping ("which output tile am I responsible for?")
         │
-Step 2: 根据 tile 坐标构造输入指针（tl.arange + 指针算术）
+Step 2: Construct input pointers from tile coordinates (`tl.arange` + pointer arithmetic)
         │
-Step 3: 加载数据（tl.load + mask 处理边界）
+Step 3: Load data (`tl.load` + `mask` for boundary handling)
         │
-Step 4: 计算（标量运算 / tl.dot / tl.sum / ...）
+Step 4: compute（scalar ops / tl.dot / tl.sum / ...）
         │
-Step 5: 存储结果（tl.store + mask）
+Step 5: Store the result (`tl.store` + `mask`)
 ```
 
-**Step 1 是最关键的一步**——它决定了整个 kernel 的并行策略和数据访问模式。其余步骤都是围绕 Step 1 的结果展开的机械操作。下面用两个例子说明 Step 1 如何随问题复杂度升级。
+**Step 1 is the most important step**: it determines the parallelization strategy and data-access pattern of the entire kernel. The remaining steps are largely mechanical transformations built on top of Step 1. The next two examples illustrate how Step 1 evolves as the problem becomes more complex.
 
 ---
 
-**例 1：Vector Add——最简单的一维映射**
+**Example 1: Vector Add - the Simplest 1D Mapping**
 
-输出是一维向量，长度为 N。每个 program 处理 `BLOCK_SIZE` 个连续元素：
+The output is a 1D vector of length N. Each program handles `BLOCK_SIZE` consecutive elements:
 
 ```
-输出向量: [ ---- BLOCK_SIZE ---- | ---- BLOCK_SIZE ---- | ... | -- 剩余 -- ]
+Output vector: [ ---- BLOCK_SIZE ---- | ---- BLOCK_SIZE ---- | ... | -- remainder -- ]
              pid=0                  pid=1                       pid=G-1
 
-Grid 大小: G = cdiv(N, BLOCK_SIZE)
+Grid size: G = cdiv(N, BLOCK_SIZE)
 ```
 
-映射代码只需一行：
+The mapping logic fits in one line:
 
 ```python
-pid = tl.program_id(0)                              # 我是第几个 program
-offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)  # 我负责的元素下标
-mask = offsets < N                                     # 最后一个 block 可能越界
+pid = tl.program_id(0)                              # which program am I
+offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)  # indices of the elements I am responsible for
+mask = offsets < N                                     # the last block may go out of bounds
 ```
 
-这里没有 `pid_m` / `pid_n` 的概念——因为数据是一维的，一个 `pid` 就够了。
+There is no need for `pid_m` / `pid_n`: because the data is one-dimensional, a single `pid` is sufficient.
 
 ---
 
-**例 2：GEMM——二维映射 + Grouped Ordering（Swizzle）**
+**Example 2: GEMM - 2D Mapping + Grouped Ordering (Swizzle)**
 
-输出是二维矩阵 C (M×N)。每个 program 负责一个 `(BLOCK_M, BLOCK_N)` 的 tile。现在需要把一维的 `pid` 映射到二维的 `(pid_m, pid_n)`：
+The output is a 2D matrix C (M×N). Each program is responsible for one `(BLOCK_M, BLOCK_N)` tile. Now we need to map a 1D `pid` onto 2D coordinates `(pid_m, pid_n)`:
 
 ```
-输出矩阵 C:
-         N 方向 →
+Output matrix C:
+         N direction →
         ┌──────────┬──────────┬──────────┬──────────┐
-        │(0,0)     │(0,1)     │(0,2)     │(0,3)     │  ← 每格是一个
+        │(0,0)     │(0,1)     │(0,2)     │(0,3)     │  ← each cell is one
    M    │ BLOCK_M  │          │          │          │    (BLOCK_M × BLOCK_N)
-   方   │ × BLOCK_N│          │          │          │    的 tile
-   向   ├──────────┼──────────┼──────────┼──────────┤
+       │ × BLOCK_N│          │          │          │    `(BLOCK_M × BLOCK_N)` tile
+       ├──────────┼──────────┼──────────┼──────────┤
    ↓    │(1,0)     │(1,1)     │(1,2)     │(1,3)     │
         ├──────────┼──────────┼──────────┼──────────┤
         │(2,0)     │(2,1)     │(2,2)     │(2,3)     │
         └──────────┴──────────┴──────────┴──────────┘
 
-Grid 大小: G = cdiv(M, BLOCK_M) × cdiv(N, BLOCK_N)
+Grid size: G = cdiv(M, BLOCK_M) × cdiv(N, BLOCK_N)
 ```
 
-**朴素映射（行优先）**：
+**Naive mapping (row-major)**:
 
 ```python
-pid = tl.program_id(0)       # 一维 pid: 0, 1, 2, ..., G-1
-pid_m = pid // num_pid_n     # 行号
-pid_n = pid  % num_pid_n     # 列号
+pid = tl.program_id(0)       # 1D pid: 0, 1, 2, ..., G-1
+pid_m = pid // num_pid_n     # row index
+pid_n = pid  % num_pid_n     # column index
 ```
 
-pid 分配结果：
+pid allocation result:
 
 ```
         col0  col1  col2  col3
-row0  [  0     1     2     3  ]  ← pid 0~3 同时运行，需要 A 的同一行
-row1  [  4     5     6     7  ]    但 B 的 4 个不同列 → L2 cache 利用率差
+row0  [  0     1     2     3  ]  ← `pid 0~3` run simultaneously and need the same row of A
+row1  [  4     5     6     7  ]    but need 4 different columns of B → poor L2 cache utilization
 row2  [  8     9    10    11  ]
 ```
 
-**Grouped ordering（swizzle）**：把相邻 pid 分到一个小矩形组内，组内列优先排列：
+**Grouped ordering (swizzle)**: group adjacent pids into a small rectangular group, and iterate over columns first within the group:
 
 ```python
 pid = tl.program_id(0)
 num_pid_m = tl.cdiv(M, BLOCK_M)
 num_pid_n = tl.cdiv(N, BLOCK_N)
-num_pid_in_group = GROUP_SIZE_M * num_pid_n     # 每组的 tile 总数
-group_id = pid // num_pid_in_group              # 属于哪个组
-first_pid_m = group_id * GROUP_SIZE_M           # 组的起始行
+num_pid_in_group = GROUP_SIZE_M * num_pid_n     # total number of tiles per group
+group_id = pid // num_pid_in_group              # which group it belongs to
+first_pid_m = group_id * GROUP_SIZE_M           # starting row of the group
 group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)  # 组内列优先
+pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)  # column-major within the group
 pid_n = (pid % num_pid_in_group) // group_size_m
 ```
 
-`GROUP_SIZE_M=2` 时的 pid 分配：
+pid allocation when `GROUP_SIZE_M=2`:
 
 ```
         col0  col1  col2  col3
-row0  [  0     2     4     6  ]  ← pid 0,1 共享 B 的 col0
-row1  [  1     3     5     7  ]    pid 0,2 共享 A 的 row0
-row2  [  8    10    12    14  ]    → 同时运行的 program 共享更多数据
-row3  [  9    11    13    15  ]    → L2 cache 命中率显著提高
+row0  [  0     2     4     6  ]  ← pid 0,1 share col0 of B
+row1  [  1     3     5     7  ]    pid 0,2 share row0 of A
+row2  [  8    10    12    14  ]    → simultaneously running programs share more data
+row3  [  9    11    13    15  ]    → L2 cache hit rate improves significantly
 ```
 
 ---
 
-**蓝图的价值**：一旦 Step 1 确定了 `pid_m, pid_n`（或者更简单的 `pid + offsets`），后面的步骤就是模式化的——用 `pid_m, pid_n` 算出输入指针、加载、计算、写回。**不同 kernel 之间的区别几乎只在 Step 1（怎么分 tile）和 Step 4（怎么算）**。后面的所有代码示例都会遵循这个蓝图。
+**Why the blueprint matters**: once Step 1 determines `pid_m, pid_n` (or, more simply, `pid + offsets`), the remaining steps become highly regular: derive input pointers, load data, compute, and write back. **The main differences across kernels are usually Step 1 (how tiles are partitioned) and Step 4 (how computation is performed).** All the code examples below follow this blueprint.
 
 ---
 
-#### 3.3.3 核心抽象与代码示例
+#### 3.3.3 Core abstraction and code examples
 
-**1. Program ID 与 Grid——工作分配**
+**1. Program ID and Grid - Work Assignment**
 
-Triton kernel 的第一步是确定当前 program instance 负责哪部分数据：
+The first step in a Triton kernel is to determine which portion of the data the current program instance is responsible for:
 
 ```python
 import triton
@@ -1474,30 +1474,30 @@ import triton.language as tl
 def vector_add_kernel(
     x_ptr, y_ptr, out_ptr,
     N,
-    BLOCK_SIZE: tl.constexpr,  # 编译期常量
+    BLOCK_SIZE: tl.constexpr,  # compile-time constant
 ):
-    # 获取当前 program instance 的 ID（类似 blockIdx.x）
+    # Get the ID of the current program instance (similar to `blockIdx.x`)
     pid = tl.program_id(axis=0)
 
-    # 计算当前 block 负责的元素范围
+    # Compute the element range handled by the current block
     block_start = pid * BLOCK_SIZE
     offsets = block_start + tl.arange(0, BLOCK_SIZE)  # shape: (BLOCK_SIZE,)
 
-    # 生成 mask 处理边界情况（最后一个 block 可能越界）
+    # Generate a mask to handle boundary conditions（the last block may go out of bounds）
     mask = offsets < N
 
-    # Block-level 加载：一次加载整个 block 的数据
+    # Block-level load：load the entire block of data at once
     x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
     y = tl.load(y_ptr + offsets, mask=mask, other=0.0)
 
-    # Block-level 计算
+    # Block-level compute
     result = x + y
 
-    # Block-level 存储
+    # Block-level Storage
     tl.store(out_ptr + offsets, result, mask=mask)
 ```
 
-启动 kernel：
+Launch the kernel:
 
 ```python
 import torch
@@ -1507,47 +1507,47 @@ x = torch.randn(N, device='cuda')
 y = torch.randn(N, device='cuda')
 out = torch.empty(N, device='cuda')
 
-# 计算 grid 大小
+# Compute the grid size
 grid = lambda meta: (triton.cdiv(N, meta['BLOCK_SIZE']),)
 
-# 启动 kernel
+# Launch the kernel
 vector_add_kernel[grid](x, y, out, N, BLOCK_SIZE=1024)
 ```
 
-**2. 指针算术——Block 级指针构造**
+**2. Pointer Arithmetic - Block-Level Pointer Construction**
 
-Triton 的指针模型是其区别于 NumPy 的关键所在。在 NumPy 中我们操作数组切片，在 Triton 中我们构造指针 block：
+Triton's pointer model is one of the key differences from NumPy. In NumPy, we operate on array slices; in Triton, we explicitly construct pointer blocks:
 
 ```python
 @triton.jit
 def softmax_kernel(input_ptr, output_ptr, n_cols, BLOCK_SIZE: tl.constexpr):
-    # 每个 program instance 处理一行
+    # Each program instance processes one row
     row_idx = tl.program_id(0)
 
-    # 构造列偏移向量
+    # Construct the column-offset vector
     col_offsets = tl.arange(0, BLOCK_SIZE)  # [0, 1, 2, ..., BLOCK_SIZE-1]
 
-    # 构造指向当前行各元素的指针 block
+    # Construct the pointer block to all elements in the current row
     input_ptrs = input_ptr + row_idx * n_cols + col_offsets
     mask = col_offsets < n_cols
 
-    # 加载整行数据
+    # Load the entire row
     row = tl.load(input_ptrs, mask=mask, other=-float('inf'))
 
-    # Block-level softmax 计算
+    # Block-level softmax compute
     row_max = tl.max(row, axis=0)
     numerator = tl.exp(row - row_max)
     denominator = tl.sum(numerator, axis=0)
     result = numerator / denominator
 
-    # 写回
+    # write back
     output_ptrs = output_ptr + row_idx * n_cols + col_offsets
     tl.store(output_ptrs, result, mask=mask)
 ```
 
-**3. `tl.dot()`——Block 级矩阵乘法**
+**3. `tl.dot()`——Block-Level Matrix Multiplication**
 
-`tl.dot()` 是 Triton 进行矩阵乘法的核心操作。它自动利用 Tensor Core，将两个 2D block 相乘并累加：
+`tl.dot()` is Triton's core matrix-multiplication primitive. It automatically uses Tensor Cores to multiply and accumulate two 2D blocks:
 
 ```python
 @triton.jit
@@ -1561,63 +1561,63 @@ def matmul_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    # 计算当前 block 负责的输出 tile 坐标
+    # Compute the output-tile coordinates handled by the current block
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
 
-    # 构造行/列偏移
+    # Construct row/column offsets
     offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)  # (BLOCK_M,)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)  # (BLOCK_N,)
     offs_k = tl.arange(0, BLOCK_K)                     # (BLOCK_K,)
 
-    # 构造 A 和 B 的指针 block
+    # Construct the pointer blocks for A and B
     # A: (BLOCK_M, BLOCK_K), B: (BLOCK_K, BLOCK_N)
     a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
     b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
 
-    # 初始化 FP32 累加器
+    # Initialize the FP32 accumulator
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
-    # 沿 K 维度迭代
+    # Iterate along the K dimension
     for k in range(0, K, BLOCK_K):
-        # 加载 A 和 B 的当前 tile
+        # Load the current tiles of A and B
         a = tl.load(a_ptrs, mask=(offs_m[:, None] < M) & (offs_k[None, :] < K), other=0.0)
         b = tl.load(b_ptrs, mask=(offs_k[:, None] < K) & (offs_n[None, :] < N), other=0.0)
 
-        # Block-level 矩阵乘法——自动使用 Tensor Core
+        # Block-level matrix multiplication — automatically uses Tensor Cores
         # a: (BLOCK_M, BLOCK_K), b: (BLOCK_K, BLOCK_N) → acc += a @ b
         acc = tl.dot(a, b, acc)
 
-        # 移动指针到下一个 K-tile
+        # Move the pointers to the next K-tile
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
         offs_k += BLOCK_K
 
-    # 将 FP32 累加结果转回 FP16 并写回
+    # Convert the FP32 accumulated result back to FP16 and write it back
     c = acc.to(tl.float16)
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
     tl.store(c_ptrs, c, mask=mask)
 ```
 
-注意这段代码的简洁性：不到 40 行 Python 代码就完成了一个 Tensor Core GEMM kernel，而等价的 CUDA 代码通常需要 200+ 行。
+Notice how concise this is: fewer than 40 lines of Python implement a Tensor Core GEMM kernel, whereas the equivalent CUDA code often takes more than 200 lines.
 
-**4. `tl.constexpr`——编译期常量**
+**4. `tl.constexpr`——Compile-Time Constants**
 
-所有标记为 `tl.constexpr` 的参数在编译期确定，这使得编译器可以：
+All parameters marked `tl.constexpr` are fixed at compile time, allowing the compiler to:
 
-- 完全展开循环（`for k in range(0, K, BLOCK_K)` 中 `BLOCK_K` 已知）
-- 静态分配 shared memory 和 register
-- 优化指令选择（根据 block shape 选择最佳的 Tensor Core 指令）
+- Fully unroll the loop (`for k in range(0, K, BLOCK_K)` where `BLOCK_K` is known)
+- Statically allocate shared memory and registers
+- Optimize instruction selection (choose the best Tensor Core instruction for the block shape)
 
 ```python
-BLOCK_SIZE: tl.constexpr  # 编译器在 JIT 编译时确定具体值
-# 每个不同的 BLOCK_SIZE 值会生成一个不同的 kernel 二进制文件
+BLOCK_SIZE: tl.constexpr  # the compiler fixes the concrete value during JIT compilation
+# each distinct `BLOCK_SIZE` value produces a different kernel binary
 ```
 
-**5. `@triton.autotune`——自动调优**
+**5. `@triton.autotune`——Autotuning**
 
-手动搜索最优的 tile size 配置既繁琐又容易遗漏好的选择。Triton 提供了内置的 autotune 装饰器：
+Manually searching for the best tile-size configuration is tedious and easy to get wrong. Triton provides a built-in autotuning decorator:
 
 ```python
 @triton.autotune(
@@ -1639,7 +1639,7 @@ BLOCK_SIZE: tl.constexpr  # 编译器在 JIT 编译时确定具体值
             num_stages=3, num_warps=8
         ),
     ],
-    key=['M', 'N', 'K'],  # 当这些值变化时重新搜索最优配置
+    key=['M', 'N', 'K'],  # re-search for the optimal configuration when these values change
 )
 @triton.jit
 def matmul_kernel(
@@ -1650,37 +1650,37 @@ def matmul_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    # ... kernel 实现 ...
+    # ... kernel implementation ...
     pass
 ```
 
-Autotune 的工作流程：
-1. 首次调用时，对所有候选配置运行 benchmark
-2. 选择耗时最短的配置
-3. 后续调用直接使用最优配置（缓存结果按 `key` 参数索引）
+Autotuning workflow:
+1. On the first call, benchmark all candidate configurations
+2. Choose the configuration that takes the shortest time
+3. Subsequent calls reuse the best configuration directly (cached results are indexed by the `key` parameter)
 
-#### 3.3.4 Triton 编译器流水线
+#### 3.3.4 Triton Compiler Pipeline
 
-理解 Triton 编译器的工作流程有助于理解其性能特征和限制：
+Understanding the Triton compiler pipeline helps explain both its performance characteristics and its limitations:
 
 ```
-Python 源代码 (@triton.jit 装饰的函数)
+Python source code (function decorated with `@triton.jit`)
         │
         ▼
-    Python AST 解析
+    Python AST parsing
         │
         ▼
     Triton IR (MLIR Dialect)
-    ├─ 类型推断
-    ├─ Block-level 操作语义
-    └─ 尚未涉及线程映射
+    ├─ type inference
+    ├─ Block-level operation semantics
+    └─ thread mapping has not been decided yet
         │
         ▼
     Triton GPU IR
-    ├─ 自动插入 shared memory 操作
-    ├─ 确定线程/warp 到数据的映射
-    ├─ 生成 software pipelining (根据 num_stages)
-    ├─ 应用 memory coalescing 优化
+    ├─ automatically insert shared-memory operations
+    ├─ determine the mapping from threads/warps to data
+    ├─ generate software pipelining (according to `num_stages`)
+    ├─ apply memory-coalescing optimizations
     └─ Bank conflict avoidance (swizzle)
         │
         ▼
@@ -1693,20 +1693,20 @@ Python 源代码 (@triton.jit 装饰的函数)
     PTX Assembly
         │
         ▼
-    SASS (通过 ptxas 编译)——最终的机器码
+    SASS (compiled by `ptxas`)——the final machine code
 ```
 
-编译器自动完成的关键优化包括：
+Key optimizations performed automatically by the compiler include:
 
-- **Shared memory allocation**：分析 `tl.load` / `tl.store` 模式，自动决定哪些数据缓存到 shared memory
-- **Software pipelining**：根据 `num_stages` 参数，将数据加载和计算重叠执行。例如 `num_stages=3` 意味着同时有 3 个 K-tile 的数据在流水线中
-- **Register tiling**：将 block-level 操作分解到每个线程的寄存器操作
-- **Vectorized loads**：当检测到连续访问模式时，自动生成 128-bit 向量加载指令
-- **Tensor Core lowering**：将 `tl.dot` 自动降低为适当的 `mma` 指令序列
+- **Shared-memory allocation**: analyze `tl.load` / `tl.store` patterns and automatically decide which data should be cached in shared memory
+- **Software pipelining**: overlap data loading and computation according to the `num_stages` parameter. For example, `num_stages=3` means that three K-tiles can be in flight simultaneously
+- **Register tiling**: lower block-level operations into per-thread register operations
+- **Vectorized loads**: generate 128-bit vector load instructions automatically when contiguous access patterns are detected
+- **Tensor Core lowering**: lower `tl.dot` automatically into the appropriate `mma` instruction sequence
 
-#### 3.3.5 实战：Triton 高性能 GEMM
+#### 3.3.5 Case Study: Triton High-Performance GEMM
 
-有了蓝图和核心抽象的知识，我们现在来看一个完整的、生产级的 Triton GEMM 实现。对比第 2 章手写 CUDA（2.3-2.6）需要手动管理共享内存、寄存器分块、bank conflict、向量化访问等底层细节（~200 行），Triton 只需要 ~60 行核心逻辑，编译器自动处理其余一切。
+With the blueprint and core abstractions in place, we can now look at a complete production-grade Triton GEMM implementation. Compared with the handwritten CUDA in Chapter 2 (Sections 2.3-2.6), which requires manually managing low-level details such as shared memory, register blocking, bank conflicts, and vectorized access (~200 lines), Triton needs only ~60 lines of core logic, and the compiler takes care of the rest.
 
 ```python
 import triton
@@ -1714,7 +1714,7 @@ import triton.language as tl
 import torch
 
 @triton.autotune(
-    # 自动搜索最优配置（类似 CUTLASS 的 tile size 选择）
+    # Automatically search for the best configuration (similar to CUTLASS tile-size selection)
     configs=[
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64,  'BLOCK_K': 32, 'GROUP_SIZE_M': 8}, num_stages=4, num_warps=4),
@@ -1722,38 +1722,38 @@ import torch
         triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128, 'BLOCK_K': 32, 'GROUP_SIZE_M': 8}, num_stages=2, num_warps=8),
         triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64,  'BLOCK_K': 32, 'GROUP_SIZE_M': 8}, num_stages=3, num_warps=8),
     ],
-    key=['M', 'N', 'K'],  # 根据矩阵尺寸重新搜索最优配置
+    key=['M', 'N', 'K'],  # re-search for the optimal configuration when matrix sizes change
 )
 @triton.jit
 def gemm_kernel(
-    # 矩阵指针
+    # matrix pointers
     A_ptr, B_ptr, C_ptr,
-    # 矩阵维度
+    # matrix dimensions
     M, N, K,
-    # 矩阵 leading dimension（支持非连续布局）
+    # matrix leading dimensions (supports non-contiguous layouts)
     stride_am, stride_ak,
     stride_bk, stride_bn,
     stride_cm, stride_cn,
-    # 缩放因子
+    # scale factor
     alpha,
-    # 编译期常量（由 autotune 确定）
+    # compile-time constants (chosen by autotune)
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
 ):
     """
-    计算 C = alpha * A @ B
+    Compute C = alpha * A @ B
     A: (M, K), B: (K, N), C: (M, N)
 
-    每个 Triton program instance 计算 C 中一个 (BLOCK_M, BLOCK_N) 的 tile。
+    Each Triton program instance computes one `(BLOCK_M, BLOCK_N)` tile of C.
     """
-    # ==================== Step 1: pid → tile 映射 ====================
-    # pid 是当前 program 的一维索引，需要映射到 C 矩阵的二维 tile 坐标
+    # ==================== Step 1: pid → tile mapping ====================
+    # `pid` is the current program's 1D index and must be mapped to 2D tile coordinates in matrix C
     pid = tl.program_id(axis=0)
 
-    # Grouped ordering（L2 cache 友好的 tile 访问顺序）
-    # 参见 3.3.2 蓝图中的 GEMM swizzle 示例
+    # Grouped ordering (an L2-cache-friendly tile traversal order)
+    # See the GEMM swizzle example in the blueprint in Section 3.3.2
     num_pid_m = tl.cdiv(M, BLOCK_M)
     num_pid_n = tl.cdiv(N, BLOCK_N)
     num_pid_in_group = GROUP_SIZE_M * num_pid_n
@@ -1763,24 +1763,24 @@ def gemm_kernel(
     pid_m = first_pid_m + ((pid % num_pid_in_group) % group_size_m)
     pid_n = (pid % num_pid_in_group) // group_size_m
 
-    # ==================== Step 2: 构造输入指针 ====================
+    # ==================== Step 2: Construct input pointers ====================
     offs_am = (pid_m * BLOCK_M + tl.arange(0, BLOCK_M)) % M
     offs_bn = (pid_n * BLOCK_N + tl.arange(0, BLOCK_N)) % N
     offs_k = tl.arange(0, BLOCK_K)
 
-    # 二维指针数组：广播 (BLOCK_M,1) + (1,BLOCK_K) → (BLOCK_M, BLOCK_K)
+    # 2D pointer arrays: broadcast `(BLOCK_M,1)` + `(1,BLOCK_K)` → `(BLOCK_M, BLOCK_K)`
     a_ptrs = A_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = B_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
 
-    # ==================== Step 3+4: 加载 + 计算（沿 K 维分块累加）====================
-    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)  # FP32 累加
+    # ==================== Step 3+4: load + compute (blockwise accumulation along the K dimension) ====================
+    accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)  # FP32 accumulation
 
     for k_start in range(0, tl.cdiv(K, BLOCK_K)):
         k_remaining = K - k_start * BLOCK_K
         a = tl.load(a_ptrs, mask=offs_k[None, :] < k_remaining, other=0.0)
         b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
 
-        # tl.dot 自动使用 Tensor Core、自动管理 SMEM 和寄存器 tiling
+        # tl.dot automatically uses Tensor Cores and automatically manages SMEM and register tiling
         accumulator = tl.dot(a, b, accumulator)
 
         a_ptrs += BLOCK_K * stride_ak
@@ -1788,7 +1788,7 @@ def gemm_kernel(
 
     c = (accumulator * alpha).to(tl.float16)
 
-    # ==================== Step 5: 写回结果 ====================
+    # ==================== Step 5: write back the result ====================
     offs_cm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
     c_ptrs = C_ptr + (offs_cm[:, None] * stride_cm + offs_cn[None, :] * stride_cn)
@@ -1798,12 +1798,12 @@ def gemm_kernel(
 
 def gemm_triton(a: torch.Tensor, b: torch.Tensor, alpha: float = 1.0) -> torch.Tensor:
     """Triton GEMM wrapper: a (M,K) @ b (K,N) → c (M,N)"""
-    assert a.shape[1] == b.shape[0], "矩阵维度不匹配"
+    assert a.shape[1] == b.shape[0], "matrix dimensions do not match"
     M, K = a.shape
     K, N = b.shape
     c = torch.empty((M, N), device=a.device, dtype=torch.float16)
 
-    # 1D launch grid：总共 ceil(M/BLOCK_M) * ceil(N/BLOCK_N) 个 program
+    # 1D launch grid: a total of `ceil(M/BLOCK_M) * ceil(N/BLOCK_N)` programs
     grid = lambda META: (triton.cdiv(M, META['BLOCK_M']) * triton.cdiv(N, META['BLOCK_N']),)
 
     gemm_kernel[grid](
@@ -1816,22 +1816,19 @@ def gemm_triton(a: torch.Tensor, b: torch.Tensor, alpha: float = 1.0) -> torch.T
     return c
 ```
 
-注意代码中的注释标注了蓝图的 5 个步骤。对比第 2 章的手写 CUDA：
+Notice that the comments in the code explicitly mark the five blueprint steps. Compared with the handwritten CUDA implementation in Chapter 2:
 
-| 维度               | CUDA（第 2 章手写）               | Triton（本节）               |
+| Dimension | CUDA (Chapter 2, handwritten) | Triton (this section) |
 | ---------------- | --------------------------- | ------------------------ |
-| 代码量              | ~200 行                      | ~60 行核心逻辑                |
-| 抽象层级             | 线程级（`threadIdx`, `warp_id`） | Block 级（`tl.program_id`） |
-| 共享内存             | 手动声明、加载、padding             | 编译器自动管理                  |
-| 寄存器分块            | 手动 `reg_a/reg_b/reg_c`      | `tl.dot()` 内部自动处理        |
-| Bank conflict    | 手动 +4 padding               | 编译器自动消除                  |
-| Double buffering | 手动两个 buffer 交替              | `num_stages` 参数，编译器生成流水线 |
-| Tensor Core      | 手动 WMMA API                 | `tl.dot()` 自动使用          |
-| Tile size 调优     | 手动尝试                        | `@triton.autotune` 自动搜索  |
-| 性能               | 手动优化可达 cuBLAS 90%+          | 通常达到 cuBLAS 80-90%       |
-
-
-
+| Code size | ~200 lines | ~60 lines of core logic |
+| Abstraction level | Thread level (`threadIdx`, `warp_id`) | Block level (`tl.program_id`) |
+| Shared memory | Manual declaration, loading, padding | Automatically managed by the compiler |
+| Register blocking | Manual `reg_a/reg_b/reg_c` | Handled internally by `tl.dot()` |
+| Bank conflict | Manual +4 padding | Automatic elimination by compiler |
+| Double buffering | Manually alternate two buffers | `num_stages` parameter, the compiler generates a pipeline |
+| Tensor Core | Manual WMMA API | Automatically used by `tl.dot()` |
+| Tile-size tuning | Manual trial and error | Automatic search via `@triton.autotune` |
+| Performance | Hand-tuned implementations can reach cuBLAS 90%+ | Typically reaches cuBLAS 80-90% |
 
 
 

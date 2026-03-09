@@ -1,64 +1,64 @@
-## 5. Softmax 与归一化操作
+## 5. Softmax and Normalization Operations
 
-Softmax 和归一化操作包含**归约（reduction）**步骤——每个输出元素依赖同一行所有输入元素的全局统计量，这天然地限制了并行度。本章深入讲解 Online Softmax 算法（理解 Flash Attention 的关键前置知识），然后用 Triton 实现 Softmax、LayerNorm、RMSNorm。
+Softmax and normalization operations involve **reduction** steps—each output element depends on the global statistics of all input elements in the same row, which inherently limits parallelism. This chapter explains the Online Softmax algorithm in depth (a key prerequisite for understanding Flash Attention), and then uses Triton to implement Softmax, LayerNorm, and RMSNorm.
 
 ---
 
-### 5.1 Online Softmax 算法原理
+### 5.1 Principles of the Online Softmax Algorithm
 
-#### 5.1.1 标准 Softmax（3-pass 算法）
+#### 5.1.1 Standard Softmax (3-Pass Algorithm)
 
-给定输入向量 $\mathbf{x} = [x_1, x_2, \dots, x_N]$：
+Given an input vector $\mathbf{x} = [x_1, x_2, \dots, x_N]$:
 
-**第一遍（Pass 1）—— 求最大值：**
+**First pass (Pass 1) — compute the maximum:**
 $$m = \max_{i=1}^{N} x_i$$
-**第二遍（Pass 2）—— 求指数和：**
+**Second pass (Pass 2) — compute the sum of exponentials:**
 $$\ell = \sum_{i=1}^{N} \exp(x_i - m)$$
-**第三遍（Pass 3）—— 归一化输出：**
+**Third pass (Pass 3) — normalize the output:**
 $$y_i = \frac{\exp(x_i - m)}{\ell}$$
-减去最大值 $m$ 是为了数值稳定性：避免 $\exp(x_i)$ 溢出。
+Subtracting the maximum value $m$ ensures numerical stability by preventing $\exp(x_i)$ from overflowing.
 
-**问题**：三遍各需完整遍历整行数据，总共从 HBM 加载 $3N$ 个元素。GPU 上全局内存带宽是最昂贵的资源。
+**Problem**: Each of the three passes must traverse the entire row of data, for a total of $3N$ elements loaded from HBM. On GPUs, global memory bandwidth is the most expensive resource.
 
-#### 5.1.2 Online Softmax（1-pass 统计量计算）
+#### 5.1.2 Online Softmax (1-Pass Statistics Computation)
 
-Online Softmax 的核心思想：**在单次遍历中同时维护 running max 和 running exp sum，遇到新最大值时通过校正因子修正之前的部分和。**
+The core idea of Online Softmax is: **maintain the running max and running exp-sum simultaneously in a single pass, and when a new maximum appears, rescale the previous partial sum with a correction factor.**
 
-初始化：$m_0 = -\infty$，$\ell_0 = 0$
+Initialization: $m_0 = -\infty$, $\ell_0 = 0$
 
-处理第 $j$ 个元素 $x_j$ 时：
+When processing the $j$-th element $x_j$:
 $$m_j = \max(m_{j-1}, x_j)$$
 $$\ell_j = \ell_{j-1} \times \exp(m_{j-1} - m_j) + \exp(x_j - m_j)$$
-**正确性推导**：处理完前 $j-1$ 个元素后，$\ell_{j-1} = \sum_{i=1}^{j-1} \exp(x_i - m_{j-1})$。新元素到来后，新最大值 $m_j = \max(m_{j-1}, x_j)$，我们需要：
+**Correctness derivation**: After processing the first $j-1$ elements, $\ell_{j-1} = \sum_{i=1}^{j-1} \exp(x_i - m_{j-1})$. When the new element arrives, the new maximum becomes $m_j = \max(m_{j-1}, x_j)$, and we need:
 $$\ell_j = \sum_{i=1}^{j} \exp(x_i - m_j)$$
-拆开：
-$$= \underbrace{\sum_{i=1}^{j-1} \exp(x_i - m_{j-1})}_{\ell_{j-1}} \cdot \underbrace{\exp(m_{j-1} - m_j)}_{\text{校正因子}} + \exp(x_j - m_j)$$
-注意当 $m_j = m_{j-1}$ 时，校正因子 $= 1$，退化为简单累加。
+Expanding this gives:
+$$= \underbrace{\sum_{i=1}^{j-1} \exp(x_i - m_{j-1})}_{\ell_{j-1}} \cdot \underbrace{\exp(m_{j-1} - m_j)}_{\text{correction factor}} + \exp(x_j - m_j)$$
+Note that when $m_j = m_{j-1}$, the correction factor is $1$, which degenerates to a simple accumulation.
 
-处理完所有元素后仍需第二遍计算 $y_i = \exp(x_i - m_N) / \ell_N$。**总结：3-pass → 2-pass，内存流量 $3N → 2N$。**
+After all elements have been processed, a second pass is still needed to compute $y_i = \exp(x_i - m_N) / \ell_N$. **In summary: 3-pass → 2-pass, and memory traffic drops from $3N$ to $2N$.**
 
-#### 5.1.3 Block-wise Online Softmax（Flash Attention 的核心）
+#### 5.1.3 Block-wise Online Softmax (the Core of Flash Attention)
 
-GPU 上以 block 为单位处理数据。设当前全局统计量 $(m, \ell)$，处理新 block $B_j$：
+On GPUs, data is processed block by block. Suppose the current global statistics are $(m, \ell)$, and we process a new block $B_j$:
 
-**Step 1：block 内局部统计量**
+**Step 1: local statistics within the block**
 $$m_j^{\text{local}} = \max_{x \in B_j} x, \quad \ell_j^{\text{local}} = \sum_{x \in B_j} \exp(x - m_j^{\text{local}})$$
-**Step 2：更新全局统计量**
+**Step 2: update the global statistics**
 $$m^{\text{new}} = \max(m, m_j^{\text{local}})$$
 $$\ell^{\text{new}} = \ell \cdot \exp(m - m^{\text{new}}) + \ell_j^{\text{local}} \cdot \exp(m_j^{\text{local}} - m^{\text{new}})$$
-**Step 3：校正之前的输出**（Flash Attention 中累积的 $O$ 矩阵）
+**Step 3: correct the previous output** (the accumulated $O$ matrix in Flash Attention)
 $$O^{\text{new}} = O \cdot \frac{\ell \cdot \exp(m - m^{\text{new}})}{\ell^{\text{new}}} + \frac{\exp(m_j^{\text{local}} - m^{\text{new}})}{\ell^{\text{new}}} \cdot P_j \cdot V_j$$
-这个公式就是 Flash Attention 的核心：**不需要物化完整的注意力矩阵**，只需在 SRAM 中逐 block 处理 K/V 并用 online softmax 维护归一化。
+This formula is the core of Flash Attention: **there is no need to materialize the full attention matrix**. Instead, K/V blocks are processed incrementally in SRAM while normalization is maintained via online softmax.
 
 ---
 
-### 5.2 Triton Grid 模式总览
+### 5.2 Overview of Triton Grid Patterns
 
-不同类型的 kernel 对应不同的 grid 划分策略。核心原则：**有几个独立的并行维度，grid 就需要几维**。以下总结常见模式，后续各 kernel 实现可对照参考。
+Different kinds of kernels correspond to different grid partitioning strategies. The core principle is: **the number of independent parallel dimensions determines the number of grid dimensions you need**. The common patterns are summarized below for reference in the kernel implementations that follow.
 
-#### 1. 向量运算（elementwise）— 1D grid
+#### 1. Vector operations (elementwise) — 1D grid
 
-$N$ 个元素，每个 program 处理 `BLOCK_SIZE` 个，最简单的情况。
+There are $N$ elements, and each program processes `BLOCK_SIZE` elements. This is the simplest case.
 
 ```python
 # Triton
@@ -68,52 +68,52 @@ pid = tl.program_id(0)
 offs = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
 ```
 ```c
-// CUDA 等价
+// CUDA equivalent
 dim3 grid(cdiv(N, BLOCK_SIZE));
 int idx = blockIdx.x * blockDim.x + threadIdx.x;
 ```
 
-#### 2. 矩阵运算（GEMM: M×K @ K×N）— 2D grid
+#### 2. Matrix operations (GEMM: M×K @ K×N) — 2D grid
 
-每个 program 负责输出矩阵的一个 `BLOCK_M × BLOCK_N` tile。M 和 N 方向的 tile 互相独立，K 方向在内层循环累加。
+Each program is responsible for one `BLOCK_M × BLOCK_N` tile of the output matrix. Tiles along the M and N dimensions are independent of each other, while accumulation along K happens in the inner loop.
 
 ```python
-# 方案 A: 2D grid
+# Option A: 2D grid
 grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
 
-# 方案 B: 1D 展平（更常见，方便做 swizzle 优化）
+# Option B: 1D flattening (more common, convenient for swizzle optimization)
 grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N),)
 
 pid = tl.program_id(0)
 grid_n = triton.cdiv(N, BLOCK_N)
-pid_m = pid // grid_n     # 输出的行 block
-pid_n = pid % grid_n      # 输出的列 block
+pid_m = pid // grid_n     # output row block
+pid_n = pid % grid_n      # output column block
 ```
 
 ```
-输出矩阵 C (M × N):
-         N 方向 →
+Output matrix C (M × N):
+         N direction →
     ┌────┬────┬────┐
 M   │0,0 │0,1 │0,2 │
-方  ├────┼────┼────┤
-向  │1,0 │1,1 │1,2 │
+dim ├────┼────┼────┤
+↓   │1,0 │1,1 │1,2 │
 ↓   ├────┼────┼────┤
     │2,0 │2,1 │2,2 │
     └────┴────┴────┘
-每个格子 = 一个 program, 大小 BLOCK_M × BLOCK_N
-内层循环沿 K 维度累加
+Each cell = one program, size BLOCK_M × BLOCK_N
+The inner loop accumulates along the K dimension
 ```
 
-#### 3. Batch GEMM — 加 batch 维度
+#### 3. Batched GEMM — add a batch dimension
 
 ```python
-# 方案 A: 3D grid
+# Option A: 3D grid
 grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N), batch)
 pid_m = tl.program_id(0)
 pid_n = tl.program_id(1)
 pid_b = tl.program_id(2)
 
-# 方案 B: 把 M×N tile 压入 axis=0，batch 放 axis=1（更常见）
+# Option B: flatten the M×N tile into axis=0, put batch on axis=1 (more common)
 grid = (triton.cdiv(M, BLOCK_M) * triton.cdiv(N, BLOCK_N), batch)
 pid   = tl.program_id(0)
 pid_b = tl.program_id(1)
@@ -121,23 +121,23 @@ pid_m = pid // grid_n
 pid_n = pid % grid_n
 ```
 
-#### 4. Flash Attention — batch×heads 压扁
+#### 4. Flash Attention — flatten `batch × heads`
 
 ```python
 grid = (triton.cdiv(seq_len, BLOCK_M), batch * heads)
 
-# axis 0: Q 的分块索引（内层循环遍历 K/V blocks）
-# axis 1: batch 和 head 压扁成一维（它们之间完全独立）
+# axis 0: tiled index of Q (the inner loop traverses K/V blocks)
+# axis 1: batch and head flattened into one dimension (they are fully independent)
 ```
 
-为什么 `batch × heads` 压扁？它们之间完全独立，没必要占两个维度；Triton grid 最多 3 维，省一维给可能的扩展。
+Why flatten `batch × heads`? These dimensions are completely independent, so there is no need to dedicate two separate axes to them. Triton grids support at most 3 dimensions, so flattening preserves an axis for possible future extensions.
 
-#### 5. 2D 卷积 — 3D grid
+#### 5. 2D convolution — 3D grid
 
 ```python
 grid = (
-    triton.cdiv(out_H, BLOCK_H) * triton.cdiv(out_W, BLOCK_W),  # 空间维度压扁
-    out_C,                                                         # 输出通道
+    triton.cdiv(out_H, BLOCK_H) * triton.cdiv(out_W, BLOCK_W),  # flatten spatial dimensions
+    out_C,                                                         # output channel
     batch,                                                         # batch
 )
 
@@ -148,155 +148,155 @@ pid_h = pid_spatial // grid_w
 pid_w = pid_spatial % grid_w
 ```
 
-#### 6. Reduction（softmax, layernorm）— 1D grid
+#### 6. Reductions (softmax, layernorm) — 1D grid
 
-每个 program 处理一整行的归约，行间独立并行。
+Each program processes the reduction for an entire row, and rows are parallelized independently.
 
 ```python
-# softmax: 输入 (M, N), 每行独立归一化
+# softmax: input (M, N), each row is normalized independently
 grid = (M,)
 
-pid = tl.program_id(0)    # 第几行
+pid = tl.program_id(0)    # row index
 offs = tl.arange(0, BLOCK_N)
 x = tl.load(X_ptr + pid * stride + offs, mask=offs < N)
-# ... 整行的 max → exp → sum → normalize
+# ... whole-row max → exp → sum → normalize
 ```
 
-#### 7. Batch LayerNorm — 2D grid
+#### 7. Batched LayerNorm — 2D grid
 
 ```python
-# 输入 (batch, seq_len, hidden_dim), 每个 (batch, position) 独立归一化
+# input (batch, seq_len, hidden_dim), each (batch, position) is normalized independently
 grid = (seq_len, batch)
 
-pid_s = tl.program_id(0)  # 序列位置
+pid_s = tl.program_id(0)  # sequence position
 pid_b = tl.program_id(1)  # batch
-# 在 hidden_dim 维度上做 reduce
+# reduce along the hidden_dim dimension
 ```
 
-**总结规律**：独立的输出 tile → grid 维度；归约/累加的维度 → 内层循环。当独立维度超过 3 个时，将完全独立的维度压扁（如 `batch × heads`）以适应 Triton 的 3 维 grid 限制。
+**General rule**: independent output tiles map to grid dimensions; reduction/accumulation dimensions belong in the inner loop. When there are more than 3 independent dimensions, flatten fully independent dimensions (such as `batch × heads`) to fit Triton’s 3D grid limit.
 
-#### Grid 维度设计方法论
+#### Methodology for Designing Grid Dimensions
 
-Grid 的维度数和问题本身的维度数是**解耦**的——不是"问题几维 grid 就几维"，而是取决于哪些维度需要归约。
+The number of grid dimensions is **decoupled** from the dimensionality of the problem itself—it is not “the problem has N dimensions, so the grid has N dimensions.” What matters is which dimensions require reduction.
 
-**Step 1：列出问题的所有维度，标记并行/归约**
+**Step 1: list all problem dimensions and label them as parallel or reduction**
 
-| 维度角色 | 去哪里 | 原因 |
+| Dimension role | Where it goes | Why |
 |---|---|---|
-| **并行维**：各 block 之间不需要通信 | → Grid 维度 | 可以独立并行 |
-| **归约维**：需要累加/比较/聚合 | → 内层循环 | 必须串行或协作完成 |
+| **Parallel dimension**: no communication is needed across blocks | → grid dimension | Can run independently in parallel |
+| **Reduction dimension**: requires accumulation/comparison/aggregation | → inner loop | Must be handled serially or cooperatively |
 
-以几个核心 kernel 为例：
+Take several core kernels as examples:
 
 ```
 GEMM: C[M,N] = A[M,K] @ B[K,N]
-  M → 并行（每行独立）
-  N → 并行（每列独立）
-  K → 归约（要累加）
+  M → parallel (each row is independent)
+  N → parallel (each column is independent)
+  K → reduction (must be accumulated)
 
 Flash Attention: O[B,H,M,d] = softmax(Q @ K^T) @ V
-  B → 并行
-  H → 并行
-  M → 并行（每个 query 位置独立）
-  N → 归约（要遍历所有 key 做 softmax + 累加）
-  d → 一个 block 内完整处理，不切分
+  B → parallel
+  H → parallel
+  M → parallel (each query position is independent)
+  N → reduction (must traverse all keys for softmax + accumulation)
+  d → processed entirely within one block, not split
 
 LayerNorm: y[B,S,D] = norm(x[B,S,D], dim=-1)
-  B → 并行
-  S → 并行
-  D → 归约（要算 mean/var）
+  B → parallel
+  S → parallel
+  D → reduction (must compute mean/var)
 
 2D Conv: out[B,OC,OH,OW]
-  B  → 并行
-  OC → 并行
-  OH → 并行
-  OW → 并行
-  IC, KH, KW → 归约
+  B  → parallel
+  OC → parallel
+  OH → parallel
+  OW → parallel
+  IC, KH, KW → reduction
 ```
 
-**Step 2：把并行维映射到 grid（最多 3 维，多了就压扁）**
+**Step 2: map parallel dimensions to the grid (up to 3 dimensions; flatten if there are more)**
 
 ```
-并行维数量     做法
+Number of parallel dims     Strategy
 ─────────────────────────────────
-  1 个        1D grid，直接映射
-  2 个        2D grid，直接映射
-  3 个        3D grid，直接映射
-  ≥4 个       压扁：把某些维合并成一维
+  1           1D grid, map directly
+  2           2D grid, map directly
+  3           3D grid, map directly
+  ≥4          Flatten: merge some dimensions into one
 ```
 
-压扁策略——优先压扁语义相关或大小较小的维度：
+Flattening strategy—prefer flattening dimensions that are semantically related or relatively small:
 
 ```python
-# Flash Attention: 4个并行维(B,H,M,d) 但 d 不切分，实际3个
-# B 和 H 语义接近（都是"哪一组"），压扁
+# Flash Attention: 4 parallel dims (B,H,M,d), but d is not split, so effectively 3
+# B and H are semantically similar (both indicate "which group"), so flatten them
 grid = (cdiv(M, BLOCK_M), B * H)            # 2D
 
-# 2D Conv: 4个并行维(B,OC,OH,OW)
-# OH 和 OW 是空间维度，压扁
+# 2D Conv: 4 parallel dims (B,OC,OH,OW)
+# OH and OW are spatial dimensions, so flatten them
 grid = (cdiv(OH,BH) * cdiv(OW,BW), OC, B)   # 3D
 
-# Batch GEMM: 3个并行维(B,M,N)
-# M 和 N 压扁（方便做 swizzle 优化 L2 cache）
+# Batch GEMM: 3 parallel dims (B,M,N)
+# Flatten M and N (convenient for swizzle optimization of L2 cache)
 grid = (cdiv(M,BM) * cdiv(N,BN), B)          # 2D
 ```
 
-**Step 3：归约维放进内层循环**
+**Step 3: place reduction dimensions in the inner loop**
 
 ```python
-# GEMM: K 是归约维
+# GEMM: K is the reduction dimension
 for k in range(0, K, BLOCK_K):
-    a = load(A_block)   # 流式加载
+    a = load(A_block)   # streaming load
     b = load(B_block)
-    acc += dot(a, b)     # 累加
+    acc += dot(a, b)     # accumulate
 
-# Flash Attention: N(key 序列)是归约维
+# Flash Attention: N (key sequence) is the reduction dimension
 for start_n in range(0, N_CTX, BLOCK_N):
-    k = load(K_block)   # 流式加载
+    k = load(K_block)   # streaming load
     v = load(V_block)
-    # online softmax + 累加
+    # online softmax + accumulation
 ```
 
-#### 实际工程考量
+#### Practical Engineering Considerations
 
-除了并行/归约的基本划分，还有三个因素会影响最终决策：
+Beyond the basic parallel/reduction split, three additional factors affect the final design choice:
 
-**1. SRAM 容量限制 → 决定哪些维度必须切分**
+**1. SRAM capacity limits → determines which dimensions must be tiled**
 
 ```
-SRAM 大小有限（A100 ~192KB/SM），需要放得下：
+SRAM capacity is limited (A100 ~192KB/SM), it must fit:
   Q block:  BLOCK_M × d     = 128 × 64 × 2B = 16KB
   K block:  BLOCK_N × d     = 64 × 64 × 2B  = 8KB
   V block:  BLOCK_N × d     = 64 × 64 × 2B  = 8KB
   acc:      BLOCK_M × d     = 128 × 64 × 4B = 32KB
   ──────────────────────────────────────────────
-  总共 ~64KB ✓ 放得下
+  Total ~64KB ✓ fits
 
-如果 d=256，可能放不下 → 需要把 d 也变成归约维，加循环
+If d=256, it may not fit → d must also become a reduction dimension, with an extra loop
 ```
 
-**2. SM 利用率 → grid 总大小要足够**
+**2. SM utilization → the total grid size must be large enough**
 
-A100 有 108 个 SM，grid 总 program 数要远大于 108 才能充分利用。
+An A100 has 108 SMs, so the total number of programs in the grid should be much larger than 108 to fully utilize the chip.
 
 ```
-Flash Attention 例子:
-  grid = (4, 16) = 64 个 program
-  只用了 64/108 ≈ 59% 的 SM → 浪费
+Flash Attention example:
+  grid = (4, 16) = 64 programs
+  Only 64/108 ≈ 59% of the SMs are used → wasteful
 
-如果 seq_len 很短，可以把 BLOCK_M 调小让 axis 0 更多
+If seq_len is very short, you can reduce BLOCK_M to create more work on axis 0
 ```
 
-**3. L2 Cache 友好性 → 影响压扁和遍历顺序**
+**3. L2 cache friendliness → affects flattening and traversal order**
 
 ```python
-# GEMM 经典优化：swizzle 遍历顺序
-# 不是简单的 row-major，而是按 "grouped" 顺序
-# 让相邻 program 访问相邻的 K/V 数据，提高 L2 命中率
+# Classic GEMM optimization: swizzled traversal order
+# Not simple row-major, but a "grouped" order
+# This makes neighboring programs access neighboring K/V data and improves L2 hit rate
 
 pid = tl.program_id(0)
-# 不用 pid_m = pid // grid_n; pid_n = pid % grid_n
-# 而是 swizzle:
+# Instead of pid_m = pid // grid_n; pid_n = pid % grid_n
+# use swizzling:
 GROUP_SIZE = 8
 group_id = pid // (GROUP_SIZE * grid_n)
 group_m  = group_id * GROUP_SIZE + (pid % GROUP_SIZE)
@@ -307,9 +307,9 @@ pid_n    = (pid % (GROUP_SIZE * grid_n)) // GROUP_SIZE
 
 ### 5.3 Triton Softmax
 
-当一行数据能完全装入一个 `BLOCK_SIZE` 时（实践中最常见），可以做到**真正的单次遍历**：1 次 load + 1 次 store，理论最优内存流量 $2N$。
+When an entire row fits inside a single `BLOCK_SIZE` (the most common case in practice), you can achieve a **true single pass**: 1 load + 1 store, which is the theoretical minimum memory traffic of $2N$.
 
-**为什么整行装得进才能 1-pass，装不进就必须 2-pass？** 关键在于 SRAM 能否同时持有原始数据和最终统计量。装得进时，整行 $x$ 一次性加载到 SRAM，在寄存器中依次完成 max → exp → sum → 归一化，计算 $y_i = \exp(x_i - m)/\ell$ 时 $x_i$、$m$、$\ell$ 三者同时可用。装不进时，SRAM 一次只能放一个 block，遍历所有 block 算出最终 $m$ 和 $\ell$ 时，之前 block 的原始数据 $x$ 已被后续 block 覆盖。而归一化公式 $y_i = \exp(x_i - m_{\text{final}})/\ell_{\text{final}}$ 既需要原始 $x_i$，又需要全局统计量——两者无法同时在 SRAM 中共存，只能重新从 HBM 加载 $x$，被迫多一遍扫描。
+**Why is a 1-pass implementation possible only when the whole row fits, and otherwise 2 passes are unavoidable?** The key is whether SRAM can simultaneously hold both the original data and the final statistics. If the row fits, the entire row $x$ is loaded into SRAM once, and max → exp → sum → normalization are all completed in registers, so when computing $y_i = \exp(x_i - m)/\ell$, all three quantities $x_i$, $m$, and $\ell$ are simultaneously available. If the row does not fit, SRAM can hold only one block at a time. By the time the final $m$ and $\ell$ have been computed after traversing all blocks, the original data $x$ from earlier blocks has already been overwritten by later blocks. But the normalization formula $y_i = \exp(x_i - m_{\text{final}})/\ell_{\text{final}}$ requires both the original $x_i$ and the global statistics. Since the two cannot coexist in SRAM at the same time, $x$ must be reloaded from HBM, forcing an extra pass.
 
 ```python
 import torch
@@ -325,35 +325,35 @@ def softmax_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     """
-    单 block Softmax：整行数据一次性加载到 SRAM，在寄存器中完成全部计算。
+    Single-block Softmax: load the entire row into SRAM at once and complete all computation in registers.
 
-    内存流量分析：
-      本实现: N (load) + N (store) = 2N（理论最优）
-      标准 3-pass: 3N (load) + N (store) = 4N
+    Memory traffic analysis:
+      This implementation: N (load) + N (store) = 2N (theoretical optimum)
+      Standard 3-pass: 3N (load) + N (store) = 4N
       Online 2-pass: 2N (load) + N (store) = 3N
     """
     row_idx = tl.program_id(0)
     col_offs = tl.arange(0, BLOCK_SIZE)
     mask = col_offs < n_cols
 
-    # 一次性加载整行到寄存器/SRAM
-    # other=-inf 的选择：
-    #   不影响 tl.max: max(x_valid, -inf) = x_valid
-    #   不影响 tl.sum: exp(-inf) = 0
-    #   保证输出为 0: exp(-inf - m) / l = 0
+    # Load the entire row into registers/SRAM at once
+    # Why choose other=-inf:
+    #   Does not affect tl.max: max(x_valid, -inf) = x_valid
+    #   Does not affect tl.sum: exp(-inf) = 0
+    #   Guarantees output 0: exp(-inf - m) / l = 0
     x = tl.load(
         input_ptr + row_idx * input_row_stride + col_offs,
         mask=mask, other=float('-inf')
     )
 
-    # Softmax 三步在寄存器中完成
-    # tl.max 底层使用 warp shuffle 归约 (__shfl_xor_sync)
+    # Complete the three softmax steps in registers
+    # tl.max uses warp-shuffle reduction underneath (__shfl_xor_sync)
     x_max = tl.max(x, axis=0)
-    x_exp = tl.exp(x - x_max)        # 数值稳定：减去 max
-    x_sum = tl.sum(x_exp, axis=0)     # warp shuffle 归约求和
+    x_exp = tl.exp(x - x_max)        # numerical stability: subtract max
+    x_sum = tl.sum(x_exp, axis=0)     # warp-shuffle reduction for the sum
     result = x_exp / x_sum
 
-    # 一次性写回
+    # Write back in one shot
     tl.store(
         output_ptr + row_idx * output_row_stride + col_offs,
         result, mask=mask
@@ -368,13 +368,13 @@ def softmax_online_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     """
-    Online Softmax：当 n_cols > BLOCK_SIZE 时使用。
-    第一遍用 online 算法计算 (m, l)，第二遍输出。总计 2-pass。
+    Online Softmax: used when n_cols > BLOCK_SIZE.
+    First pass computes (m, l) with the online algorithm, second pass writes the output. Total: 2 passes.
     """
     row_idx = tl.program_id(0)
     row_start = input_ptr + row_idx * input_row_stride
 
-    # ========== 第一遍：Online 统计量 ==========
+    # ========== First pass: online statistics ==========
     m_i = float('-inf')
     l_i = 0.0
 
@@ -384,11 +384,11 @@ def softmax_online_kernel(
 
         m_ij = tl.max(x, axis=0)
         m_new = tl.maximum(m_i, m_ij)
-        # 核心：online softmax 更新
+        # Core: online softmax update
         l_i = l_i * tl.exp(m_i - m_new) + tl.sum(tl.exp(x - m_new), axis=0)
         m_i = m_new
 
-    # ========== 第二遍：归一化输出 ==========
+    # ========== Second pass: normalized output ==========
     out_start = output_ptr + row_idx * output_row_stride
     for block_start in range(0, n_cols, BLOCK_SIZE):
         col_offs = block_start + tl.arange(0, BLOCK_SIZE)
@@ -399,7 +399,7 @@ def softmax_online_kernel(
 
 
 def softmax(x: torch.Tensor) -> torch.Tensor:
-    """统一入口：根据行长度自动选择最优版本。"""
+    """Unified entry point: automatically choose the optimal version based on row length."""
     M, N = x.shape
     output = torch.empty_like(x)
     BLOCK_SIZE = triton.next_power_of_2(min(N, 65536))
@@ -413,11 +413,11 @@ def softmax(x: torch.Tensor) -> torch.Tensor:
     return output
 ```
 
-**为什么 Softmax kernel 不像 GEMM 那样做 2D tiling？** GEMM 的输出是 M×N 矩阵，各 output tile 互相独立，因此需要 `pid → (pid_m, pid_n) → (offs_m, offs_n)` 把一维 program ID 映射到二维 tile 坐标。而 Softmax 的每一行内部有归约依赖（max、sum 必须看完整行），**列方向不能拆成独立 tile**——一行只能由一个 program 负责。因此 grid 天然是 1D 的 `(M,)`（M = 行数），`program_id(0)` 直接就是行号，不需要 tile 坐标拆分。并行度仅存在于行与行之间。
+**Why doesn’t the Softmax kernel use 2D tiling like GEMM?** GEMM outputs an M×N matrix, and its output tiles are independent of each other, so it needs a mapping of `pid → (pid_m, pid_n) → (offs_m, offs_n)` from a 1D program ID to 2D tile coordinates. In contrast, Softmax has reduction dependencies within each row (max and sum must see the full row), so **the column dimension cannot be split into independent tiles**—one row must be handled by exactly one program. Therefore, the grid is naturally 1D, `(M,)` where M is the number of rows, and `program_id(0)` directly serves as the row index, with no need for tile-coordinate decomposition. Parallelism exists only across rows.
 
-**`tl.max` 和 `tl.sum` 的实现原理**：当 `BLOCK_SIZE = 1024` 时，一个 block 有 32 个 warp。`tl.max(x, axis=0)` 先在每个线程内对其元素求 max，再通过 `__shfl_xor_sync` 在 warp 内归约，最后通过 shared memory 在 warp 间归约。Triton 编译器自动生成全部代码。
+**How `tl.max` and `tl.sum` work**: when `BLOCK_SIZE = 1024`, one block contains 32 warps. `tl.max(x, axis=0)` first computes local maxima within each thread, then uses `__shfl_xor_sync` for warp-level reduction, and finally uses shared memory for reduction across warps. Triton’s compiler generates all of this code automatically.
 
-**精度策略**：`tl.exp` 在 PTX 层面编译为 `ex2.approx.ftz.f32`（以 2 为底的近似指数），比精确 `expf` 快约 2 倍。对 softmax 的近似误差可忽略。
+**Precision strategy**: at the PTX level, `tl.exp` compiles to `ex2.approx.ftz.f32` (an approximate base-2 exponential), which is about 2× faster than precise `expf`. The approximation error is negligible for softmax.
 
 ---
 
@@ -434,28 +434,28 @@ def layer_norm_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     """
-    LayerNorm：每个 program 处理一行。
+    LayerNorm: each program processes one row.
 
-    精度关键点：
-    - mean/var 必须在 FP32 下计算。FP16 精度 2^{-10} ≈ 0.001，
-      累加 4096 次后误差可达 4.096（灾难性取消）。
-      FP32 精度 2^{-23}，累加 4096 次后误差仅 ~5×10^{-4}。
-    - 使用两步法（先减 mean 再算 var），而非 E[x²]-E[x]²（数值不稳定）。
+    Precision-critical points:
+    - mean/var must be computed in FP32. FP16 precision is 2^{-10} ≈ 0.001,
+      and after 4096 accumulations the error can reach 4.096 (catastrophic cancellation).
+      FP32 precision is 2^{-23}, and after 4096 accumulations the error is only ~5×10^{-4}.
+    - Use the two-step method (subtract mean first, then compute var), rather than E[x²]-E[x]² (numerically unstable).
     """
     row_idx = tl.program_id(0)
     col_offs = tl.arange(0, BLOCK_SIZE)
     mask = col_offs < n_cols
 
-    # 加载并转为 FP32
+    # Load and convert to FP32
     x = tl.load(input_ptr + row_idx * input_row_stride + col_offs,
                 mask=mask, other=0.0).to(tl.float32)
 
-    # 均值和方差
+    # Mean and variance
     mean = tl.sum(x, axis=0) / n_cols
     x_centered = tl.where(mask, x - mean, 0.0)
     var = tl.sum(x_centered * x_centered, axis=0) / n_cols
 
-    # 归一化 + 仿射变换
+    # Normalization + affine transform
     inv_std = 1.0 / tl.sqrt(var + eps)
     x_norm = x_centered * inv_std
     gamma = tl.load(gamma_ptr + col_offs, mask=mask, other=1.0).to(tl.float32)
@@ -466,17 +466,17 @@ def layer_norm_kernel(
              result.to(tl.float16), mask=mask)
 ```
 
-**`col_offs` 的作用与 Triton 线程分配机制**：`col_offs = tl.arange(0, BLOCK_SIZE)` 生成列索引向量 $[0, 1, \dots, \text{BLOCK\_SIZE}-1]$。一个 Triton program 对应一个 CUDA thread block（CTA），假设 `BLOCK_SIZE=1024`、`num_warps=4`，则 CTA 有 $4 \times 32 = 128$ 个线程，每个线程负责 $1024/128=8$ 个元素。`x`、`gamma`、`beta` 都用同一个 `col_offs` 索引加载，因此**同一线程持有的 `x[i]`、`gamma[i]`、`beta[i]` 天然对应同一列**。逐元素操作（`x_norm * gamma + beta`、`x - mean`、`exp`）各线程独立计算自己的元素，无需线程间通信。只有归约操作（`tl.sum`）需要协作：线程内先局部求和，再通过 warp shuffle 在 warp 内归约，最后通过 shared memory 在 warp 间归约，归约结果广播回所有线程。因此 `mean` 和 `var` 计算完后每个线程拿到相同的标量值，后续 `x - mean` 又回到各线程独立的逐元素操作。
+**The role of `col_offs` and Triton’s thread assignment mechanism**: `col_offs = tl.arange(0, BLOCK_SIZE)` generates the column index vector $[0, 1, \dots, \text{BLOCK\_SIZE}-1]$. One Triton program corresponds to one CUDA thread block (CTA). Suppose `BLOCK_SIZE=1024` and `num_warps=4`; then the CTA contains $4 \times 32 = 128$ threads, and each thread is responsible for $1024/128=8$ elements. `x`, `gamma`, and `beta` are all loaded using the same `col_offs` indices, so **the `x[i]`, `gamma[i]`, and `beta[i]` held by the same thread naturally correspond to the same column**. Elementwise operations (`x_norm * gamma + beta`, `x - mean`, `exp`) are computed independently by each thread on its own elements, with no thread-to-thread communication. Only reduction operations (`tl.sum`) require cooperation: each thread first computes a local partial sum, then warp shuffle reduces within each warp, then shared memory reduces across warps, and the final reduction result is broadcast back to all threads. Thus, once `mean` and `var` are computed, every thread holds the same scalar values, and the later `x - mean` returns to purely elementwise per-thread computation.
 
-**如果 `n_cols` 超过单个 BLOCK_SIZE 怎么办？** 当前实现假设 `BLOCK_SIZE >= n_cols`（整行一次加载），这对实践中常见的 hidden_dim（4096~8192，FP16 仅 8~16 KB）完全够用。若 `n_cols` 极大，需要分 block 循环处理，但**与 softmax 不同，LayerNorm 的累加不需要校正因子**。原因在于：softmax 的 $\ell = \sum \exp(x_i - m)$ 依赖全局 max $m$，新 block 可能刷新 max 导致之前的 exp-sum 全部失效，必须乘 $\exp(m_{\text{old}} - m_{\text{new}})$ 校正；而 LayerNorm 的 $\sum x_i$ 是简单加法，新 block 来了直接累加，之前的部分和不会因为新数据而"变错"。不过仍然需要多遍扫描——mean 和 var 之间有顺序依赖（var 需要先知道 mean），朴素实现需要 3 遍（第 1 遍求 mean，第 2 遍求 var，第 3 遍输出）。可优化为 2 遍：第 1 遍同时累加 $\sum x_i$ 和 $\sum x_i^2$，利用 $\sigma^2 = E[x^2] - (E[x])^2$ 一遍算出 mean 和 var（代价是数值稳定性略差），第 2 遍归一化输出。无论哪种方案，多遍扫描的根本原因与 softmax 一致：**全局统计量和原始数据无法同时驻留 SRAM。**
+**What if `n_cols` exceeds a single `BLOCK_SIZE`?** The current implementation assumes `BLOCK_SIZE >= n_cols` (the whole row is loaded at once), which is sufficient for common hidden dimensions in practice (4096–8192, only 8–16 KB in FP16). If `n_cols` becomes very large, block-by-block looping is required, but **unlike softmax, LayerNorm accumulation does not need a correction factor**. The reason is that softmax uses $\ell = \sum \exp(x_i - m)$, which depends on the global max $m$; a new block may update the max, invalidating the previous exp-sum and requiring a correction by $\exp(m_{\text{old}} - m_{\text{new}})$. By contrast, LayerNorm uses $\sum x_i$, which is plain addition; when a new block arrives, you simply keep accumulating, and previous partial sums do not become “wrong.” However, multiple passes are still required—there is an ordering dependency between mean and variance (variance needs the mean first). A naive implementation requires 3 passes (first pass for mean, second for variance, third for output). It can be optimized to 2 passes by accumulating both $\sum x_i$ and $\sum x_i^2$ in the first pass, then using $\sigma^2 = E[x^2] - (E[x])^2$ to obtain mean and variance in one shot (at the cost of slightly worse numerical stability), followed by a second pass for normalization. In either case, the root cause of the extra passes is the same as in softmax: **the global statistics and the original data cannot reside in SRAM simultaneously.**
 
-**LayerNorm 是纯 memory-bound 操作**：算术强度极低，性能完全由 HBM 带宽决定。单次遍历加载 $N$（input）+ $N$（gamma）+ $N$（beta），写出 $N$（output），总共 $4N$ 次内存操作。优化方向是减少遍历次数和最大化内存带宽利用率。
+**LayerNorm is a purely memory-bound operation**: its arithmetic intensity is extremely low, so performance is determined entirely by HBM bandwidth. A single pass loads $N$ input values, $N$ `gamma` values, and $N$ `beta` values, and writes $N$ output values, for a total of $4N$ memory operations. The optimization directions are to reduce the number of passes and maximize effective memory bandwidth.
 
 ---
 
 ### 5.5 Triton RMSNorm
 $$y = \frac{x}{\text{RMS}(x)} \cdot \gamma, \quad \text{RMS}(x) = \sqrt{\frac{1}{N}\sum_{i=1}^{N} x_i^2 + \epsilon}$$
-相比 LayerNorm，RMSNorm **去掉了均值中心化和偏置**：少 1 次 sum 归约 + 少 1 次逐元素减法 + 少加载 $N$ 个 beta 参数，综合节省约 30% 计算量和 25% 内存流量。
+Compared with LayerNorm, RMSNorm **removes mean-centering and bias**: one fewer sum reduction, one fewer elementwise subtraction, and no need to load the $N$ `beta` parameters, saving roughly 30% of the computation and 25% of the memory traffic overall.
 
 ```python
 @triton.jit
@@ -507,93 +507,94 @@ def rms_norm_kernel(
              result.to(tl.float16), mask=mask)
 ```
 
-现代大模型（LLaMA、Mistral 等）几乎全部使用 RMSNorm。研究表明均值中心化对模型性能贡献微乎其微，但占据了 LayerNorm 约 1/3 的计算开销。
+Modern large models (LLaMA, Mistral, etc.) almost universally use RMSNorm. Studies show that mean-centering contributes very little to model quality while accounting for roughly one-third of LayerNorm’s compute overhead.
 
 ---
 
 ## 6. Flash Attention
 
-### 6.1 动机
+### 6.1 Motivation
 
-标准自注意力 $\text{Attention}(Q, K, V) = \text{softmax}(QK^T / \sqrt{d}) \times V$ 需要物化 $N \times N$ 的注意力矩阵（$Q, K, V \in \mathbb{R}^{N \times d}$），内存 $O(N^2)$，带宽开销巨大。
+Standard self-attention, $\text{Attention}(Q, K, V) = \text{softmax}(QK^T / \sqrt{d}) \times V$, requires materializing an $N \times N$ attention matrix (with $Q, K, V \in \mathbb{R}^{N \times d}$), which costs $O(N^2)$ memory and enormous bandwidth.
 
-Flash Attention 的核心思路：
-1. **永远不物化 $N \times N$ 矩阵**：通过 tiling 在 SRAM 中逐块计算
-2. **用 block-wise online softmax 增量式处理**（第 5 章已详述原理）
-3. **中间结果保持在 SRAM**：GPU SRAM 带宽约 19 TB/s vs HBM 2 TB/s
-4. **内存 $O(N^2) \to O(N)$**：只存输出 $O$ 和少量 softmax 统计量 $(m, \ell)$
+The core ideas of Flash Attention are:
+
+1. **Never materialize the $N \times N$ matrix**: compute it block by block in SRAM via tiling
+2. **Process incrementally with block-wise online softmax** (the principle was detailed in Section 5)
+3. **Keep intermediate results in SRAM**: GPU SRAM bandwidth is roughly 19 TB/s versus 2 TB/s for HBM
+4. **Reduce memory from $O(N^2)$ to $O(N)$**: store only the output $O$ and a small set of softmax statistics $(m, \ell)$
 
 ---
 
-### 6.2 Flash Attention 2 算法
+### 6.2 The Flash Attention 2 Algorithm
 
-**输入**：Q, K, V $\in \mathbb{R}^{N \times d}$，**输出**：O = softmax(QK^T / √d) × V
+**Input**: Q, K, V $\in \mathbb{R}^{N \times d}$, **output**: O = softmax(QK^T / √d) × V
 
-**分块**：Q 分为 $T_r$ 块（每块 $B_r$ 行），K/V 分为 $T_c$ 块（每块 $B_c$ 行）。
+**Blocking**: Q is split into $T_r$ blocks (each with $B_r$ rows), while K/V are split into $T_c$ blocks (each with $B_c$ rows).
 
 ```
-输入: Q_i ∈ R^{B_r × d}
-初始化: O_i = 0, m_i = -∞, l_i = 0
+Input: Q_i ∈ R^{B_r × d}
+Initialize: O_i = 0, m_i = -∞, l_i = 0
 
-对每个 K,V 块 j = 1, ..., T_c:
-    S_ij = Q_i × K_j^T / √d              // 在 SRAM 中计算
-    m_ij = rowmax(S_ij)                   // 当前块的行最大值
-    m_new = max(m_i, m_ij)               // 更新全局最大值
+For each K,V block j = 1, ..., T_c:
+    S_ij = Q_i × K_j^T / √d              // computed in SRAM
+    m_ij = rowmax(S_ij)                   // row-wise maximum of the current block
+    m_new = max(m_i, m_ij)               // update the global maximum
 
-    // 校正之前的结果（block-wise online softmax，见 5.1.3）
+    // Correct the previous results (block-wise online softmax, see 5.1.3)
     l_i = l_i × exp(m_i - m_new)
     O_i = O_i × exp(m_i - m_new)
 
-    P_ij = exp(S_ij - m_new)             // softmax 分子
+    P_ij = exp(S_ij - m_new)             // softmax numerator
     l_i = l_i + rowsum(P_ij)
     O_i = O_i + P_ij × V_j              // GEMM-II
 
     m_i = m_new
 
-O_i = O_i / l_i                          // 最终归一化
+O_i = O_i / l_i                          // final normalization
 ```
 
-**正确性**：修正因子 $\exp(m_{\text{old}} - m_{\text{new}})$ 将之前相对于 $m_{\text{old}}$ 计算的指数值转换为相对于 $m_{\text{new}}$ 的值：$\exp(x - m_{\text{old}}) \times \exp(m_{\text{old}} - m_{\text{new}}) = \exp(x - m_{\text{new}})$。展开后与标准公式完全一致。
+**Correctness**: The correction factor $\exp(m_{\text{old}} - m_{\text{new}})$ converts previously computed exponentials relative to $m_{\text{old}}$ into values relative to $m_{\text{new}}$: $\exp(x - m_{\text{old}}) \times \exp(m_{\text{old}} - m_{\text{new}}) = \exp(x - m_{\text{new}})$. Expanding the formula shows it is exactly equivalent to the standard definition.
 
-**内存**：HBM 只需存储 Q, K, V（$3Nd$）、O（$Nd$）、统计量 m, l（$2N$）。SRAM 中临时存储 $O(B_r d + B_c d + B_r B_c)$，不随 $N$ 增长。
+**Memory**: HBM only needs to store Q, K, V ($3Nd$), O ($Nd$), and the statistics m, l ($2N$). SRAM temporarily stores $O(B_r d + B_c d + B_r B_c)$, which does not grow with $N$.
 
-### 6.3 Triton Flash Attention 实现
+### 6.3 Triton Implementation of Flash Attention
 
-**Stride 与地址计算**：Q 的 shape 是 `(batch, heads, seq_len, d_model)`，`stride` 是沿每个维度移动一个元素需要跳过的元素数。对行优先连续张量（`batch=2, heads=8, seq_len=512, d_model=64`）：
+**Stride and address computation**: Q has shape `(batch, heads, seq_len, d_model)`, and `stride` gives the number of elements to skip when moving by one step along each dimension. For a contiguous row-major tensor (`batch=2, heads=8, seq_len=512, d_model=64`):
 
-| stride | 对应维度 | 值 | 含义 |
+| stride | Corresponding dimension | Value | Meaning |
 |---|---|---|---|
-| `stride_qb` | batch | $8 \times 512 \times 64 = 262144$ | 跳到下一个 batch |
-| `stride_qh` | heads | $512 \times 64 = 32768$ | 跳到下一个 head |
-| `stride_qm` | seq_len | $64$ | 跳到下一行（token） |
-| `stride_qk` | d_model | $1$ | 跳到下一列（最内层连续） |
+| `stride_qb` | batch | $8 \times 512 \times 64 = 262144$ | jump to the next batch |
+| `stride_qh` | heads | $512 \times 64 = 32768$ | jump to the next head |
+| `stride_qm` | seq_len | $64$ | jump to the next row (token) |
+| `stride_qk` | d_model | $1$ | jump to the next column (innermost contiguous dimension) |
 
-访问 `Q[b, h, m, k]` 的地址：`Q_ptr + b*stride_qb + h*stride_qh + m*stride_qm + k*stride_qk`。
+The address of `Q[b, h, m, k]` is: `Q_ptr + b*stride_qb + h*stride_qh + m*stride_qm + k*stride_qk`.
 
-代码中 `off_hz = tl.program_id(1)` 是 `batch × heads` 压扁后的索引，基地址用 `off_hz * stride_qh` 而非拆开算。这成立是因为连续 layout 下 `stride_qb = heads × stride_qh`，所以 `b * stride_qb + h * stride_qh = (b * heads + h) * stride_qh = off_hz * stride_qh`，一次乘法搞定。若 tensor 不连续（如做过 `transpose`），则需拆成 `off_hz // heads * stride_qb + off_hz % heads * stride_qh`。
+In the code, `off_hz = tl.program_id(1)` is the flattened `batch × heads` index, and the base address uses `off_hz * stride_qh` instead of explicitly decomposing it. This works because under a contiguous layout, `stride_qb = heads × stride_qh`, so `b * stride_qb + h * stride_qh = (b * heads + h) * stride_qh = off_hz * stride_qh`. One multiplication is enough. If the tensor is non-contiguous (for example after a `transpose`), then it must be decomposed as `off_hz // heads * stride_qb + off_hz % heads * stride_qh`.
 
-**Q block 的指针矩阵构造**：`q_ptrs = Q_ptr + q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk` 构造了一个 `[BLOCK_M, BLOCK_DMODEL]` 的指针矩阵，本质是把多维索引 `Q[b,h,m,d]` 手动展开为一维地址。分三部分：
-
-```
-Q_ptr + q_offset                → 定位到 (batch, head) 块的起始地址
-+ offs_m[:, None] * stride_qm   → 行偏移，[BLOCK_M, 1] 列向量
-+ offs_d[None, :] * stride_qk   → 列偏移，[1, BLOCK_DMODEL] 行向量
-```
-
-两个偏移通过广播相加得到完整的 2D 指针矩阵（假设 `start_m=1`, `stride_qm=64`, `stride_qk=1`）：
+**Constructing the pointer matrix for a Q block**: `q_ptrs = Q_ptr + q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk` constructs a `[BLOCK_M, BLOCK_DMODEL]` pointer matrix. Conceptually, it manually flattens the multidimensional index `Q[b,h,m,d]` into linear addresses. It has three parts:
 
 ```
-行偏移 (×64)          列偏移 (×1)              结果（相对偏移）
+Q_ptr + q_offset                → locate the starting address of the (batch, head) block
++ offs_m[:, None] * stride_qm   → row offsets, [BLOCK_M, 1] column vector
++ offs_d[None, :] * stride_qk   → column offsets, [1, BLOCK_DMODEL] row vector
+```
+
+Broadcasting adds the two offsets to form the full 2D pointer matrix (assuming `start_m=1`, `stride_qm=64`, `stride_qk=1`):
+
+```
+Row offsets (×64)     Column offsets (×1)      Result (relative offsets)
 ┌──────┐              ┌──────────────┐         ┌─────────────────────┐
 │ 8192 │              │ 0  1  ... 63 │         │ 8192  8193  ... 8255│ ← Q[128, 0:64]
 │ 8256 │       +      │ 0  1  ... 63 │    =    │ 8256  8257  ... 8319│ ← Q[129, 0:64]
 │  ... │              │     ...      │         │         ...         │
 │16320 │              │ 0  1  ... 63 │         │16320 16321  ...16383│ ← Q[255, 0:64]
 └──────┘              └──────────────┘         └─────────────────────┘
-[128,1] 广播           [1,64] 广播              [128,64] 指针矩阵
+[128,1] broadcast     [1,64] broadcast         [128,64] pointer matrix
 ```
 
-每个格子是一个内存地址，`tl.load(q_ptrs)` 一次将整个 `[BLOCK_M, BLOCK_DMODEL]` 的 Q block 加载到 SRAM。Triton 没有多维数组原生支持，所以必须用指针算术 + 广播来模拟 2D 块加载。
+Each cell is a memory address, and `tl.load(q_ptrs)` loads the entire `[BLOCK_M, BLOCK_DMODEL]` Q block into SRAM in one shot. Since Triton does not have native multidimensional array support, 2D block loads must be simulated through pointer arithmetic plus broadcasting.
 
 ```python
 import triton
@@ -614,13 +615,13 @@ def flash_attention_forward_kernel(
     BLOCK_DMODEL: tl.constexpr,
 ):
     """
-    Flash Attention 2 Forward — Triton 实现。
-    每个 program 处理一个 Q block (BLOCK_M 行) 在一个 (batch, head) 上。
+    Flash Attention 2 Forward — Triton implementation.
+    Each program processes one Q block (BLOCK_M rows) for one (batch, head).
     """
     start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
 
-    # 基地址偏移
+    # Base address offsets
     q_offset = off_hz * stride_qh
     k_offset = off_hz * stride_kh
     v_offset = off_hz * stride_vh
@@ -630,20 +631,20 @@ def flash_attention_forward_kernel(
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
-    # 加载 Q block（整个计算过程中驻留 SRAM）
+    # Load the Q block (resides in SRAM throughout the computation)
     q_ptrs = Q_ptr + q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
     q = tl.load(q_ptrs, mask=offs_m[:, None] < N_CTX, other=0.0)
 
-    # 初始化 online softmax 状态
+    # Initialize online softmax state
     m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float('inf')
     l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
     acc = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
-    # 主循环：遍历 K/V blocks
+    # Main loop: traverse K/V blocks
     for start_n in range(0, N_CTX, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
 
-        # 加载 K block
+        # Load K block
         k_ptrs = K_ptr + k_offset + (start_n + offs_n)[:, None] * stride_kn + offs_d[None, :] * stride_kk
         k = tl.load(k_ptrs, mask=(start_n + offs_n)[:, None] < N_CTX, other=0.0)
 
@@ -654,25 +655,25 @@ def flash_attention_forward_kernel(
         s = tl.where(offs_m[:, None] < N_CTX, s, float('-inf'))
         s = tl.where((start_n + offs_n)[None, :] < N_CTX, s, float('-inf'))
 
-        # Online softmax 更新（核心：block-wise 版本，见 5.1.3）
+        # Online softmax update (core: block-wise version, see 5.1.3)
         m_ij = tl.max(s, axis=1)
         m_new = tl.maximum(m_i, m_ij)
-        alpha = tl.exp(m_i - m_new)          # 校正因子
-        p = tl.exp(s - m_new[:, None])       # softmax 分子
+        alpha = tl.exp(m_i - m_new)          # correction factor
+        p = tl.exp(s - m_new[:, None])       # softmax numerator
         l_i = l_i * alpha + tl.sum(p, axis=1)
-        acc = acc * alpha[:, None]            # 校正之前的输出
+        acc = acc * alpha[:, None]            # correct the previous output
 
-        # 加载 V block 并累加
+        # Load the V block and accumulate
         v_ptrs = V_ptr + v_offset + (start_n + offs_n)[:, None] * stride_vn + offs_d[None, :] * stride_vk
         v = tl.load(v_ptrs, mask=(start_n + offs_n)[:, None] < N_CTX, other=0.0)
         acc += tl.dot(p.to(tl.float16), v)
 
         m_i = m_new
 
-    # 最终归一化
+    # Final normalization
     acc = acc / l_i[:, None]
 
-    # 写回
+    # Write back
     o_ptrs = O_ptr + o_offset + offs_m[:, None] * stride_om + offs_d[None, :] * stride_ok
     tl.store(o_ptrs, acc.to(tl.float16), mask=offs_m[:, None] < N_CTX)
 
@@ -701,35 +702,35 @@ def flash_attention_triton(q, k, v):
 
 
 
-### 6.4 反向传播
+### 6.4 Backpropagation
 
-Flash Attention 的反向传播比前向更复杂，因为需要重新计算注意力矩阵（前向只存了 $O$, $m$, $\ell$，不存 $P$）。
+Backpropagation for Flash Attention is more complex than the forward pass because the attention matrix must be recomputed (the forward pass stores only $O$, $m$, and $\ell$, not $P$).
 
-#### 6.4.1 反向传播的数学
+#### 6.4.1 Backpropagation Mathematics
 
-设 $P = \text{softmax}(S/\sqrt{d})$，$S = QK^T$，$O = PV$。给定上游梯度 $dO$：
+Let $P = \text{softmax}(S/\sqrt{d})$, $S = QK^T$, and $O = PV$. Given the upstream gradient $dO$:
 
-**Step 1**：计算辅助量 $D_i = \sum_j dO_{ij} \cdot O_{ij}$（逐行点积）
+**Step 1**: compute the auxiliary quantity $D_i = \sum_j dO_{ij} \cdot O_{ij}$ (row-wise dot product)
 
-**Step 2**：对每对 (Q block $i$, KV block $j$)：
-- 重新计算 $S_{ij} = Q_i K_j^T / \sqrt{d}$
-- 重新计算 $P_{ij} = \exp(S_{ij} - m_i) / \ell_i$（使用前向保存的 $m$, $\ell$）
+**Step 2**: for each pair of (Q block $i$, KV block $j$):
+- Recompute $S_{ij} = Q_i K_j^T / \sqrt{d}$
+- Recompute $P_{ij} = \exp(S_{ij} - m_i) / \ell_i$ (using the forward-saved $m$, $\ell$)
 - $dV_j \mathrel{+}= P_{ij}^T \cdot dO_i$
 - $dP_{ij} = dO_i \cdot V_j^T$
-- $dS_{ij} = P_{ij} \odot (dP_{ij} - D_i)$（逐元素，softmax 反传公式）
+- $dS_{ij} = P_{ij} \odot (dP_{ij} - D_i)$ (elementwise, the softmax backward formula)
 - $dQ_i \mathrel{+}= dS_{ij} \cdot K_j / \sqrt{d}$
 - $dK_j \mathrel{+}= dS_{ij}^T \cdot Q_i / \sqrt{d}$
 
-#### 6.4.2 Triton 反向传播（近似版本）
+#### 6.4.2 Triton Backpropagation (Approximate Version)
 
-以下是反向传播的概念性 Triton 实现。实际生产代码通常分为两个 kernel（分别计算 dQ 和 dK/dV），此处合并展示核心逻辑。**注意：此版本为教学目的的简化版，可能存在边界处理和性能上的不足。**
+The following is a conceptual Triton implementation of the backward pass. Production code typically splits it into two kernels (one for dQ and one for dK/dV); here they are combined to highlight the core logic. **Note: this version is a simplified teaching implementation and may have limitations in boundary handling and performance.**
 
 ```python
 @triton.jit
 def flash_attention_backward_kernel(
     Q_ptr, K_ptr, V_ptr, O_ptr, dO_ptr,
     dQ_ptr, dK_ptr, dV_ptr,
-    L_ptr, M_ptr,             # 前向保存的 log-sum-exp (l) 和 max (m)
+    L_ptr, M_ptr,             # forward-saved log-sum-exp (l) and max (m)
     stride_qb, stride_qh, stride_qm, stride_qk,
     stride_kb, stride_kh, stride_kn, stride_kk,
     stride_vb, stride_vh, stride_vn, stride_vk,
@@ -740,9 +741,9 @@ def flash_attention_backward_kernel(
     BLOCK_DMODEL: tl.constexpr,
 ):
     """
-    Flash Attention 反向传播 — 简化版。
-    每个 program 处理一个 Q block，遍历所有 K/V block 计算 dQ。
-    dK 和 dV 通过 atomic_add 累加（生产代码应使用专门的 kernel 避免 atomic）。
+    Flash Attention backward pass — simplified version.
+    Each program processes one Q block and traverses all K/V blocks to compute dQ.
+    dK and dV are accumulated via atomic_add (production code should use dedicated kernels to avoid atomics).
     """
     start_m = tl.program_id(0)
     off_hz = tl.program_id(1)
@@ -755,7 +756,7 @@ def flash_attention_backward_kernel(
     offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_d = tl.arange(0, BLOCK_DMODEL)
 
-    # 加载 Q block, O block, dO block
+    # Load Q block, O block, and dO block
     q_ptrs = Q_ptr + q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
     q = tl.load(q_ptrs, mask=offs_m[:, None] < N_CTX, other=0.0)
 
@@ -765,7 +766,7 @@ def flash_attention_backward_kernel(
     do_ptrs = dO_ptr + o_offset + offs_m[:, None] * stride_om + offs_d[None, :] * stride_ok
     do = tl.load(do_ptrs, mask=offs_m[:, None] < N_CTX, other=0.0)
 
-    # 加载前向保存的 softmax 统计量
+    # Load the softmax statistics saved during the forward pass
     m_ptrs = M_ptr + off_hz * N_CTX + offs_m
     l_ptrs = L_ptr + off_hz * N_CTX + offs_m
     m_i = tl.load(m_ptrs, mask=offs_m < N_CTX, other=0.0)
@@ -774,64 +775,64 @@ def flash_attention_backward_kernel(
     # Step 1: D_i = rowsum(dO * O)
     D_i = tl.sum(do.to(tl.float32) * o.to(tl.float32), axis=1)  # (BLOCK_M,)
 
-    # 初始化 dQ 累加器
+    # Initialize the dQ accumulator
     dq = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
 
     offs_n = tl.arange(0, BLOCK_N)
 
-    # Step 2: 遍历 K/V blocks
+    # Step 2: traverse K/V blocks
     for start_n in range(0, N_CTX, BLOCK_N):
-        # 加载 K, V blocks
+        # Load K and V blocks
         k_ptrs = K_ptr + k_offset + (start_n + offs_n)[:, None] * stride_kn + offs_d[None, :] * stride_kk
         v_ptrs = V_ptr + v_offset + (start_n + offs_n)[:, None] * stride_vn + offs_d[None, :] * stride_vk
         k = tl.load(k_ptrs, mask=(start_n + offs_n)[:, None] < N_CTX, other=0.0)
         v = tl.load(v_ptrs, mask=(start_n + offs_n)[:, None] < N_CTX, other=0.0)
 
-        # 重新计算 S 和 P
+        # Recompute S and P
         s = tl.dot(q, tl.trans(k)) * sm_scale                    # (BLOCK_M, BLOCK_N)
-        p = tl.exp(s - m_i[:, None]) / l_i[:, None]              # 重新计算 softmax
+        p = tl.exp(s - m_i[:, None]) / l_i[:, None]              # recompute softmax
         p = tl.where((start_n + offs_n)[None, :] < N_CTX, p, 0.0)
 
         # dP = dO @ V^T
         dp = tl.dot(do, tl.trans(v))                              # (BLOCK_M, BLOCK_N)
 
-        # dS = P * (dP - D_i)  — softmax 反传公式
+        # dS = P * (dP - D_i)  — softmax backward formula
         ds = p * (dp - D_i[:, None]) * sm_scale                  # (BLOCK_M, BLOCK_N)
 
         # dQ += dS @ K
         dq += tl.dot(ds.to(tl.float16), k)
 
-        # dV += P^T @ dO (简化: atomic_add，生产代码应避免)
-        # dK += dS^T @ Q (简化: atomic_add)
-        # 这里省略 dV/dK 的原子累加，实际实现需要专门处理
+        # dV += P^T @ dO (simplified: atomic_add, production code should avoid this)
+        # dK += dS^T @ Q (simplified: atomic_add)
+        # The atomic accumulation for dV/dK is omitted here; a real implementation needs dedicated handling
 
-    # 写回 dQ
+    # Write back dQ
     dq_ptrs = dQ_ptr + q_offset + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
     tl.store(dq_ptrs, dq.to(tl.float16), mask=offs_m[:, None] < N_CTX)
 ```
 
-**上述简化版的已知问题**：
-1. **前向未保存统计量**：反向期望从 `M_ptr`/`L_ptr` 加载 $m$ 和 $\ell$，但前向 kernel 没有将它们写回 HBM。完整实现需要在前向最终归一化前增加 `tl.store` 写出 `m_i` 和 `l_i`。
-2. **dK/dV 完全缺失**：代码只计算了 dQ，dK 和 dV 的累加在注释中提及但未实现。
-3. **精度损失**：`ds.to(tl.float16)` 在 `tl.dot` 前将梯度截断为 FP16。反向传播中梯度值可能很小，FP16 截断会导致明显的数值误差。应保持 FP32 或使用 BF16。
-4. **缺少编译器提示**：前向有 `tl.multiple_of(start_n, BLOCK_N)` 帮助编译器优化，反向遗漏了。
+**Known issues in the simplified version above**:
+1. **Forward statistics were not saved**: the backward pass expects to load $m$ and $\ell$ from `M_ptr`/`L_ptr`, but the forward kernel does not write them back to HBM. A complete implementation must add `tl.store` before the final normalization in the forward pass to save `m_i` and `l_i`.
+2. **dK/dV are completely missing**: the code computes only dQ; dK and dV accumulation are mentioned in comments but not implemented.
+3. **Precision loss**: `ds.to(tl.float16)` truncates the gradient to FP16 before `tl.dot`. In backpropagation, gradients may be very small, and FP16 truncation can introduce significant numerical error. It should remain in FP32 or use BF16.
+4. **Missing compiler hints**: the forward pass includes `tl.multiple_of(start_n, BLOCK_N)` to help optimization, but the backward pass omits it.
 
-**反向传播的实现难点**：
-1. **dK/dV 的累加**：多个 Q block 需要对同一个 K/V block 的梯度求和，生产代码通常使用专门的 kernel（外层循环遍历 K/V block，内层遍历 Q block）以避免 atomic 操作。
-2. **重计算的代价**：反向需要重新计算 $S$ 和 $P$，计算量约为前向的 2.5 倍。但相比存储 $N \times N$ 的 $P$ 矩阵，重计算更划算。
-3. **数值精度**：反向中 $\exp(S_{ij} - m_i) / \ell_i$ 的重计算必须与前向一致，包括相同的 max 和 sum 值。
+**Implementation challenges in the backward pass**:
+1. **Accumulating dK/dV**: multiple Q blocks need to contribute gradients to the same K/V block. Production implementations usually use a dedicated kernel (outer loop over K/V blocks, inner loop over Q blocks) to avoid atomics.
+2. **The cost of recomputation**: the backward pass must recompute $S$ and $P$, making it about 2.5× as expensive as the forward pass. But compared with storing the full $N \times N$ matrix $P$, recomputation is still the better trade-off.
+3. **Numerical consistency**: the recomputed $\exp(S_{ij} - m_i) / \ell_i$ in the backward pass must exactly match the forward computation, including identical max and sum values.
 
 ---
 
-### 6.5 Flash Attention 3：Hopper 架构优化
+### 6.5 Flash Attention 3: Hopper-Specific Optimizations
 
-FA2 在 A100 上能达到 ~70% 利用率，但在 H100 上仅 ~35%。原因是 Hopper 引入了全新的硬件能力（异步 Tensor Core、TMA、FP8），FA2 的同步设计无法利用。FA3 是针对 Hopper 的完全重写。
+FA2 reaches about 70% utilization on A100, but only about 35% on H100. The reason is that Hopper introduces entirely new hardware capabilities (asynchronous Tensor Cores, TMA, FP8), and FA2’s synchronous design cannot exploit them. FA3 is a complete rewrite tailored for Hopper.
 
-#### 6.5.1 三大核心改进
+#### 6.5.1 Three Core Improvements
 
-**1. Warp 特化（Warp Specialization）**
+**1. Warp specialization**
 
-FA2 中所有 warp 同质化工作——既做数据加载又做计算。FA3 将 warp 分为两类角色：
+In FA2, all warps perform homogeneous work—they both load data and compute. FA3 divides warps into two roles:
 
 ```
 ┌─────────────────── CTA (Thread Block) ───────────────────┐
@@ -840,141 +841,141 @@ FA2 中所有 warp 同质化工作——既做数据加载又做计算。FA3 将
 │  ┌──────────────┐           ┌──────────────────────────┐  │
 │  │ TMA load K_j │──SMEM──→ │ WGMMA: S = Q @ K^T       │  │
 │  │ TMA load V_j │──SMEM──→ │ Softmax: P = softmax(S)  │  │
-│  │ (环形缓冲)    │           │ WGMMA: O += P @ V        │  │
+│  │ (ring buffer)   │           │ WGMMA: O += P @ V        │  │
 │  └──────────────┘           └──────────────────────────┘  │
-│  寄存器少 ← setmaxnreg → 寄存器多（GEMM 累加器）           │
+│  fewer registers ← setmaxnreg → more registers (GEMM accumulators) │
 └───────────────────────────────────────────────────────────┘
 ```
 
-- **Producer**：专门用 TMA（Tensor Memory Accelerator）从 HBM 异步加载数据到 shared memory 的环形缓冲区
-- **Consumer**：专门用 WGMMA（warpgroup 级矩阵乘）做计算
-- **`setmaxnreg`**：Hopper 新指令，动态重分配寄存器——producer 释放寄存器给 consumer，让 GEMM 累加器有更多空间
+- **Producer**: uses TMA (Tensor Memory Accelerator) exclusively to asynchronously load data from HBM into a shared-memory ring buffer
+- **Consumer**: uses WGMMA (warpgroup-level matrix multiply) exclusively for computation
+- **`setmaxnreg`**: a new Hopper instruction that dynamically reallocates registers—producer warps release registers to consumer warps, giving GEMM accumulators more register space
 
-**2. 两级流水线：GEMM-Softmax 交叠**
+**2. Two-stage pipeline: overlap GEMM and softmax**
 
-FA2 的瓶颈：两个 GEMM（$S = QK^T$ 和 $O = PV$）之间隔着 softmax，严格串行。FA3 利用 WGMMA 的异步语义打破这个依赖：
+The bottleneck in FA2 is that the two GEMMs ($S = QK^T$ and $O = PV$) are separated by softmax and therefore execute strictly serially. FA3 breaks this dependency using WGMMA’s asynchronous semantics:
 
 ```
-时间 →
+Time →
 ──────────────────────────────────────────────────
-迭代 j:   [GEMM0: S_j=QK_j^T]  [softmax(S_j)]  [GEMM1: O+=P_j·V_j]
-迭代 j+1:                       [GEMM0: S_{j+1}] [softmax(S_{j+1})]  [GEMM1]
+Iteration j:   [GEMM0: S_j=QK_j^T]  [softmax(S_j)]  [GEMM1: O+=P_j·V_j]
+Iteration j+1:                       [GEMM0: S_{j+1}] [softmax(S_{j+1})]  [GEMM1]
 
-↓ 交叠后：
+↓ After overlap:
 
-迭代 j:   [GEMM0_j] [softmax_j + GEMM0_{j+1}] [GEMM1_j]
-                     ↑ softmax 用标量单元(MUFU)
-                     ↑ GEMM0 用 Tensor Core
-                     → 两者可以同时执行！
+Iteration j:   [GEMM0_j] [softmax_j + GEMM0_{j+1}] [GEMM1_j]
+                     ↑ softmax uses scalar units (MUFU)
+                     ↑ GEMM0 uses Tensor Cores
+                     → the two can execute simultaneously!
 ```
 
-核心：发射 `GEMM0_{j+1}` 后不等待完成（`commit_group` 但不 `wait_group`），立刻用 MUFU 做 `softmax_j`。两者使用不同的硬件单元，真正并行。
+The key is: after launching `GEMM0_{j+1}`, FA3 does not wait for it to finish (`commit_group` but not `wait_group`), and immediately runs `softmax_j` on MUFU. The two use different hardware units, so they truly execute in parallel.
 
-**3. Pingpong 调度（双 Warpgroup 交替）**
+**3. Pingpong scheduling (alternating dual warpgroup execution)**
 
-即使有了两级流水线，softmax 的 MUFU 吞吐量（~3.9 TFLOPS）比 GEMM 的 Tensor Core（~989 TFLOPS FP16）低 ~256 倍，仍可能占据可观的时钟周期。Pingpong 用两个 warpgroup 互相掩盖：
+Even with the two-stage pipeline, MUFU throughput for softmax (~3.9 TFLOPS) is still about 256× lower than Tensor Core throughput for GEMM (~989 TFLOPS FP16), so softmax can still consume a noticeable number of cycles. Pingpong scheduling hides it using two warpgroups:
 
 ```
-时间 →
+Time →
 WarpGroup 0: [GEMM] [softmax] [GEMM] [softmax] ...
 WarpGroup 1:        [GEMM] [softmax] [GEMM] [softmax] ...
-                     ↑ WG1 做 GEMM 时 WG0 做 softmax
-                            → softmax 完全被隐藏
+                     ↑ while WG1 does GEMM, WG0 does softmax
+                            → softmax is fully hidden
 ```
 
-两个 warpgroup 通过 `bar.sync` 硬件屏障交替执行，softmax 延迟完全藏在对方的 GEMM 执行时间内。
+The two warpgroups alternate through the `bar.sync` hardware barrier, so the softmax latency is fully hidden under the other group’s GEMM execution time.
 
-#### 6.5.2 FP8 支持：Incoherent Processing
+#### 6.5.2 FP8 Support: Incoherent Processing
 
-FP8 的问题：transformer 中 Q/K 常有少量"outlier"维度值特别大，FP8 的动态范围无法同时表示大值和小值。
+The issue with FP8 is that Q/K in transformers often contain a small number of “outlier” dimensions with very large values, and FP8’s dynamic range cannot represent both large and small values well at the same time.
 
-**解决方案**：乘以随机正交矩阵 $M$（Hadamard + 随机符号翻转）"打散"outlier：
+**Solution**: multiply by a random orthogonal matrix $M$ (Hadamard + random sign flips) to “spread out” the outliers:
 $$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{(QM)(KM)^T}{\sqrt{d}}\right) V$$
-因为 $MM^T = I$，数学结果不变：$(QM)(KM)^T = QMM^TK^T = QK^T$。但乘以 $M$ 后各维度幅值趋于均匀，FP8 量化误差降低 2.6 倍。$M$ 的应用通过 Fast Walsh-Hadamard Transform 实现，复杂度 $O(d \log d)$，可与 RoPE 融合零额外开销。
+Because $MM^T = I$, the math is unchanged: $(QM)(KM)^T = QMM^TK^T = QK^T$. But after multiplying by $M$, the magnitudes across dimensions become more uniform, reducing FP8 quantization error by 2.6×. Applying $M$ can be implemented with the Fast Walsh-Hadamard Transform at complexity $O(d \log d)$, and it can be fused with RoPE at effectively zero additional cost.
 
-#### 6.5.3 Triton 实现的可行性与局限
+#### 6.5.3 Feasibility and Limitations in Triton
 
-| FA3 技术 | Triton 可行性 | 说明 |
+| FA3 technique | Feasibility in Triton | Notes |
 |---|---|---|
-| Warp 特化 | **不可行** | Triton 抽象层隐藏了 warp 级控制，无法指定 producer/consumer 角色 |
-| `setmaxnreg` | **不可行** | Triton 不暴露寄存器分配指令 |
-| TMA | **部分可行** | Triton 3.0+ 开始支持 `tl.async_copy` 等 TMA 原语，但不如 CUDA 灵活 |
-| WGMMA 异步语义 | **不可行** | Triton 的 `tl.dot` 是同步的，无法做 commit-without-wait 式流水线 |
-| Pingpong 调度 | **不可行** | 需要 warpgroup 级屏障控制，Triton 无此抽象 |
-| 两级 GEMM-softmax 流水线 | **有限** | Triton 编译器可能自动做一些指令级重排，但无法显式控制 |
-| FP8 + block 量化 | **可行** | Triton 支持 FP8 类型和 `tl.dot` 的 FP8 操作数 |
-| Incoherent processing | **可行** | Hadamard 变换是逐元素 + butterfly 操作，可用 Triton 实现 |
-| 基本的 online softmax tiling | **可行** | 这是 FA2 的核心，Triton 已能良好支持（如前文实现） |
+| Warp specialization | **Not feasible** | Triton’s abstraction hides warp-level control, so producer/consumer roles cannot be assigned explicitly |
+| `setmaxnreg` | **Not feasible** | Triton does not expose register allocation instructions |
+| TMA | **Partially feasible** | Triton 3.0+ supports TMA primitives such as `tl.async_copy`, but with less flexibility than CUDA |
+| WGMMA asynchronous semantics | **Not feasible** | Triton’s `tl.dot` is synchronous and cannot implement a commit-without-wait pipeline |
+| Pingpong scheduling | **Not feasible** | It requires warpgroup-level barrier control, which Triton does not expose |
+| Two-stage GEMM-softmax pipeline | **Limited** | The Triton compiler may perform some instruction reordering automatically, but explicit control is unavailable |
+| FP8 + block quantization | **Feasible** | Triton supports FP8 types and FP8 operands for `tl.dot` |
+| Incoherent processing | **Feasible** | The Hadamard transform is elementwise + butterfly structure, which Triton can implement |
+| Basic online-softmax tiling | **Feasible** | This is the core of FA2, and Triton already supports it well (as in the implementation above) |
 
-**结论**：FA3 的核心优势（warp 特化、异步流水线、pingpong）深度依赖 Hopper 的底层硬件原语，必须用 CUDA/CUTLASS 实现。Triton 能做的是 FA2 级别的 tiling + online softmax + FP8 量化，大约对应 FA3 性能的 50-60%。这也解释了为什么 FA3 是用 CUDA（基于 CUTLASS 3.x）而非 Triton 编写的。
-
----
-
-## 7. 激活函数融合优化
-
-### 7.1 融合的动机
-
-以全连接层 `D = GELU(A × B + bias)` 为例：
-
-```
-未融合（3 个独立 kernel）：
-  HBM → A, B → GEMM → C 写回 HBM     (2 读 + 1 写)
-  HBM → C, bias → 加法 → C' 写回 HBM  (2 读 + 1 写)
-  HBM → C' → GELU → D 写回 HBM         (1 读 + 1 写)
-  总共: 5 次 HBM 读 + 3 次 HBM 写
-
-融合（1 个 kernel）：
-  HBM → A, B, bias → 寄存器中: GELU(A×B + bias) → D 写回 HBM
-  总共: 3 次 HBM 读 + 1 次 HBM 写（省去 2 次中间结果的 HBM 往返）
-```
-
-中间结果 C（如 4096×4096 FP16 = 32 MB），一次写入+读取耗时约 32 μs（A100, 2 TB/s）——完全浪费的带宽。融合后 GEMM 结果直接在寄存器中经历 Bias 和 GELU，零额外 HBM 开销。
+**Conclusion**: FA3’s main advantages (warp specialization, asynchronous pipelining, pingpong scheduling) depend deeply on Hopper’s low-level hardware primitives and therefore must be implemented in CUDA/CUTLASS. What Triton can deliver is FA2-style tiling + online softmax + FP8 quantization, corresponding to roughly 50–60% of FA3 performance. This also explains why FA3 is written in CUDA (based on CUTLASS 3.x) rather than Triton.
 
 ---
 
-### 7.2 CUTLASS Epilogue 融合
+## 7. Activation Function Fusion Optimizations
 
-CUTLASS 的 GEMM kernel 分三阶段：Prologue（加载 A, B）→ Mainloop（分块矩阵乘法）→ **Epilogue（后处理 + 写回）**。
+### 7.1 Why Fuse?
 
-Epilogue 阶段 GEMM 结果仍在寄存器中（fragment 形式），任何逐元素操作都可以零开销融合。CUTLASS 通过 epilogue functor 模板实现：
+Take the fully connected layer `D = GELU(A × B + bias)` as an example:
+
+```
+Unfused (3 separate kernels):
+  HBM → A, B → GEMM → C written back to HBM     (2 reads + 1 write)
+  HBM → C, bias → addition → C' written back to HBM  (2 reads + 1 write)
+  HBM → C' → GELU → D written back to HBM         (1 read + 1 write)
+  Total: 5 HBM reads + 3 HBM writes
+
+Fused (1 kernel):
+  HBM → A, B, bias → in registers: GELU(A×B + bias) → D written back to HBM
+  Total: 3 HBM reads + 1 HBM write (eliminates 2 round trips of intermediate results to HBM)
+```
+
+The intermediate result C (for example, 4096×4096 FP16 = 32 MB) takes about 32 μs for one write + read round trip on an A100 at 2 TB/s—pure wasted bandwidth. After fusion, the GEMM result passes through Bias and GELU directly in registers, with zero additional HBM traffic.
+
+---
+
+### 7.2 CUTLASS Epilogue Fusion
+
+CUTLASS GEMM kernels have three stages: Prologue (load A and B) → Mainloop (tiled matrix multiplication) → **Epilogue (post-processing + writeback)**.
+
+In the epilogue, the GEMM result is still in registers (as fragments), so any elementwise operation can be fused at effectively zero cost. CUTLASS implements this through epilogue-functor templates:
 
 ```cpp
 // D = GELU(alpha * A×B + beta * C)
 using EpilogueOp = cutlass::epilogue::thread::LinearCombinationGeneric<
-    cutlass::epilogue::thread::GELU,     // 激活函数
-    cutlass::half_t,                     // 输出类型
-    8,                                   // 每次向量化写回的元素数
-    float,                               // 累加器类型 (FP32)
-    float                                // 计算类型
+    cutlass::epilogue::thread::GELU,     // activation function
+    cutlass::half_t,                     // output type
+    8,                                   // number of elements per vectorized writeback
+    float,                               // accumulator type (FP32)
+    float                                // compute type
 >;
 
-// 将 EpilogueOp 嵌入完整 GEMM 类型定义
+// Embed EpilogueOp into the full GEMM type definition
 using FusedGemm = cutlass::gemm::device::Gemm<
     cutlass::half_t, cutlass::layout::RowMajor,      // A
     cutlass::half_t, cutlass::layout::ColumnMajor,    // B
     cutlass::half_t, cutlass::layout::RowMajor,       // C/D
-    float,                                            // 累加器
+    float,                                            // accumulator
     cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
     cutlass::gemm::GemmShape<128, 128, 32>,           // CTA tile
     cutlass::gemm::GemmShape<64, 64, 32>,             // Warp tile
-    cutlass::gemm::GemmShape<16, 8, 16>,              // MMA 指令
-    EpilogueOp,                                       // ← 融合 GELU
+    cutlass::gemm::GemmShape<16, 8, 16>,              // MMA instruction
+    EpilogueOp,                                       // ← fused GELU
     cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<8>,
-    3                                                 // 流水线级数
+    3                                                 // number of pipeline stages
 >;
 ```
 
-**Epilogue 执行原理**：当 Mainloop 计算完一个 output tile（如 128×128），结果以 FP32 fragment 分布在各线程的寄存器中。Epilogue functor 对每个线程持有的元素执行 `output[i] = GELU(alpha * acc[i] + beta * source[i])`，然后向量化写回 HBM。整个过程不涉及额外的 SMEM 或 HBM 访问。
+**How the epilogue executes**: once the mainloop finishes computing an output tile (for example 128×128), the result is distributed as FP32 fragments across thread registers. The epilogue functor applies `output[i] = GELU(alpha * acc[i] + beta * source[i])` to the elements held by each thread, then writes them back to HBM in vectorized form. The entire process requires no additional SMEM or HBM accesses.
 
-Bias 可通过 C 矩阵接口传入：`{bias, stride=0}` 表示沿 M 维度广播，`beta=1.0` 表示 `D = GELU(A×B + bias)`。
+Bias can be passed through the C-matrix interface: `{bias, stride=0}` means broadcasting along the M dimension, and `beta=1.0` yields `D = GELU(A×B + bias)`.
 
 ---
 
-### 7.3 Triton 融合 Kernel
+### 7.3 Triton Fused Kernels
 
-Triton 的融合更直接——所有操作写在一个 kernel 内，无需特殊框架。
+Fusion is even more direct in Triton—all operations are written inside a single kernel, with no special framework required.
 
-#### 7.3.1 GEMM + Bias + GELU（完整实现）
+#### 7.3.1 GEMM + Bias + GELU (full implementation)
 
 ```python
 import torch
@@ -1004,11 +1005,11 @@ def gemm_bias_gelu_kernel(
     """
     C = GELU(A @ B + bias)
 
-    三步融合全部在寄存器中完成：
-    1. GEMM 累加到 FP32 寄存器 (acc)
-    2. bias 广播加到 acc（零 HBM 访问——bias 只有 N 个元素，一次加载）
-    3. GELU 直接在 acc 上计算
-    4. 一次性写回 HBM
+    All three fused steps are completed in registers:
+    1. GEMM accumulates into FP32 registers (acc)
+    2. bias is broadcast-added to acc (zero HBM overhead—bias has only N elements and is loaded once)
+    3. GELU is computed directly on acc
+    4. write back to HBM in one shot
     """
     pid = tl.program_id(0)
     num_pid_m = tl.cdiv(M, BLOCK_M)
@@ -1022,7 +1023,7 @@ def gemm_bias_gelu_kernel(
     a_ptrs = A_ptr + offs_m[:, None] * stride_am + offs_k[None, :] * stride_ak
     b_ptrs = B_ptr + offs_k[:, None] * stride_bk + offs_n[None, :] * stride_bn
 
-    # ---- GEMM 主循环 ----
+    # ---- GEMM main loop ----
     acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
     for k_offset in range(0, tl.cdiv(K, BLOCK_K)):
         k_remaining = K - k_offset * BLOCK_K
@@ -1032,25 +1033,25 @@ def gemm_bias_gelu_kernel(
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 
-    # ---- Bias（寄存器内广播加法）----
+    # ---- Bias (broadcast addition in registers) ----
     bias = tl.load(bias_ptr + offs_n, mask=offs_n < N, other=0.0)
-    acc += bias[None, :]  # (1, BLOCK_N) 广播到 (BLOCK_M, BLOCK_N)
+    acc += bias[None, :]  # (1, BLOCK_N) broadcast to (BLOCK_M, BLOCK_N)
 
-    # ---- GELU（寄存器内计算）----
-    # tanh 近似: GELU(x) = 0.5x(1 + tanh(√(2/π)(x + 0.044715x³)))
+    # ---- GELU (computed in registers) ----
+    # tanh approximation: GELU(x) = 0.5x(1 + tanh(√(2/π)(x + 0.044715x³)))
     kAlpha = 0.7978845608028654   # √(2/π)
     kBeta = 0.044715
     inner = kAlpha * (acc + kBeta * acc * acc * acc)
     acc = 0.5 * acc * (1.0 + tl.math.tanh(inner))
 
-    # ---- 写回（一次 store 包含 GEMM + Bias + GELU）----
+    # ---- Write back (one store includes GEMM + Bias + GELU) ----
     c_ptrs = C_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
     tl.store(c_ptrs, acc.to(tl.float16), mask=mask)
 
 
 def gemm_bias_gelu(A: torch.Tensor, B: torch.Tensor, bias: torch.Tensor):
-    """A: (M,K) fp16, B: (K,N) fp16, bias: (N,). 返回: (M,N) fp16."""
+    """A: (M,K) fp16, B: (K,N) fp16, bias: (N,). Returns: (M,N) fp16."""
     M, K = A.shape
     _, N = B.shape
     C = torch.empty((M, N), device=A.device, dtype=torch.float16)
@@ -1062,27 +1063,27 @@ def gemm_bias_gelu(A: torch.Tensor, B: torch.Tensor, bias: torch.Tensor):
     return C
 ```
 
-#### 7.3.2 SwiGLU 融合简述
+#### 7.3.2 Brief Note on SwiGLU Fusion
 
-SwiGLU（LLaMA 系列模型）：`output = Swish(X @ W_gate) ⊙ (X @ W_up)`
+SwiGLU (used in the LLaMA family): `output = Swish(X @ W_gate) ⊙ (X @ W_up)`
 
-融合的关键洞察：**两个 GEMM 共享输入 X**。在 K 维度迭代循环中，X tile 只需加载一次，分别与 W_gate 和 W_up 做 `tl.dot`，节省 50% 的输入带宽。Swish 和逐元素乘法在累加完成后的寄存器中执行。
+The key fusion insight is: **the two GEMMs share the same input X**. Inside the K-dimension iteration loop, the X tile only needs to be loaded once, then used in separate `tl.dot` operations with `W_gate` and `W_up`, saving 50% of the input bandwidth. Swish and the elementwise product are executed in registers after accumulation completes.
 
 ```python
-# SwiGLU 核心循环（概念代码）
+# SwiGLU core loop (conceptual code)
 gate_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 up_acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
 for k_start in range(0, D_in, BLOCK_K):
-    x = tl.load(...)           # X tile — 只加载一次
+    x = tl.load(...)           # X tile — loaded only once
     wg = tl.load(...)          # W_gate tile
     wu = tl.load(...)          # W_up tile
-    gate_acc += tl.dot(x, wg)  # 共享 x
-    up_acc += tl.dot(x, wu)    # 共享 x
+    gate_acc += tl.dot(x, wg)  # share x
+    up_acc += tl.dot(x, wu)    # share x
 
-# Swish + 逐元素乘（寄存器中完成）
+# Swish + elementwise multiply (done in registers)
 result = (gate_acc * tl.sigmoid(gate_acc)) * up_acc
 tl.store(out_ptrs, result.to(tl.float16), mask=mask)
 ```
 
-**融合策略原则**：优先融合 memory-bound 算子（激活函数、bias、残差连接），这些操作的计算/访存比极低，融合收益最大。两个大 GEMM 间的融合需谨慎——可能导致寄存器压力过大，降低 occupancy。
+**Principle for fusion strategy**: prioritize fusing memory-bound operators (activation functions, bias, residual connections). These operations have extremely low compute-to-memory ratios, so fusion delivers the greatest benefit. Fusion between two large GEMMs should be approached carefully, because it can create excessive register pressure and reduce occupancy.
