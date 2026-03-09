@@ -23,20 +23,36 @@ dist-ssr
 *.sln
 *.sw?
 
+# Local planning artifacts
+docs/plans/
+
 # Notes publishing control: keep drafts local until ready
 notes/Mlsys/*
 !notes/Mlsys/MLSYS1.md
+!notes/Mlsys/MLSYS1.en.md
 !notes/Mlsys/MLSYS2.md
+!notes/Mlsys/MLSYS2.en.md
 !notes/Mlsys/MLSYS3.md
+!notes/Mlsys/MLSYS3.en.md
 !notes/Mlsys/MLSYS4.md
+!notes/Mlsys/MLSYS4.en.md
 !notes/Mlsys/MLSYS5.md
+!notes/Mlsys/MLSYS5.en.md
 !notes/Mlsys/MLSYS6.md
+!notes/Mlsys/MLSYS6.en.md
 !notes/Mlsys/MLSYS7 Compute-Bound Kernel (1).md
+!notes/Mlsys/MLSYS7 Compute-Bound Kernel (1).en.md
 !notes/Mlsys/MLSYS8 Compute-Bound Kernel (2).md
+!notes/Mlsys/MLSYS8 Compute-Bound Kernel (2).en.md
 !notes/Mlsys/MLSYS9 Compute-bound kernel (3).md
+!notes/Mlsys/MLSYS9 Compute-bound kernel (3).en.md
 !notes/Mlsys/MLSYS10 parallelism.md
+!notes/Mlsys/MLSYS10 parallelism.en.md
 !notes/Mlsys/MLSYS11 nano-vllm-1.md
+!notes/Mlsys/MLSYS11 nano-vllm-1.en.md
 !notes/Mlsys/MLSYS12 nano-vllm-2.md
 !notes/Mlsys/MLSYS13 Quantization and precision.md
+!notes/Mlsys/MLSYS12 nano-vllm-2.en.md
+!notes/Mlsys/MLSYS13 Quantization and precision.en.md
 !notes/Mlsys/assets/
 !notes/Mlsys/assets/**

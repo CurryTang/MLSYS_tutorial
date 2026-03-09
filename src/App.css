@@ -130,6 +130,13 @@
   box-shadow: 0 8px 18px rgba(28, 50, 63, 0.1);
 }
 
+.reader-header-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
 .reader-header h2 {
   margin: 0.25rem 0;
   line-height: 1.2;
@@ -150,6 +157,37 @@
   font-family: "IBM Plex Mono", "Courier New", monospace;
   color: #2c5c72;
   font-weight: 600;
+}
+
+.language-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border-radius: 999px;
+  background: rgba(20, 56, 71, 0.08);
+  border: 1px solid rgba(18, 58, 78, 0.14);
+}
+
+.language-button {
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #264556;
+  font-family: "IBM Plex Mono", "Courier New", monospace;
+  font-size: 0.78rem;
+  padding: 0.5rem 0.8rem;
+  cursor: pointer;
+  transition: background 180ms ease, color 180ms ease, transform 180ms ease;
+}
+
+.language-button:hover {
+  transform: translateY(-1px);
+}
+
+.language-button.active {
+  background: #0d6d8f;
+  color: #f5fbff;
 }
 
 .markdown-body {
@@ -241,5 +279,14 @@
   .notes-panel {
     border-right: none;
     border-bottom: 1px solid rgba(35, 53, 66, 0.18);
+  }
+
+  .reader-header-top {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .language-toggle {
+    width: fit-content;
   }
 }

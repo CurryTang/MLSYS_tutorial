@@ -4,54 +4,93 @@ import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
-import note1Url from '../notes/Mlsys/MLSYS1.md?url';
-import note2Url from '../notes/Mlsys/MLSYS2.md?url';
-import note3Url from '../notes/Mlsys/MLSYS3.md?url';
-import note4Url from '../notes/Mlsys/MLSYS4.md?url';
-import note5Url from '../notes/Mlsys/MLSYS5.md?url';
-import note6Url from '../notes/Mlsys/MLSYS6.md?url';
-import note7Url from '../notes/Mlsys/MLSYS7 Compute-Bound Kernel (1).md?url';
-import note8Url from '../notes/Mlsys/MLSYS8 Compute-Bound Kernel (2).md?url';
-import note9Url from '../notes/Mlsys/MLSYS9 Compute-bound kernel (3).md?url';
-import note10Url from '../notes/Mlsys/MLSYS10 parallelism.md?url';
-import note11Url from '../notes/Mlsys/MLSYS11 nano-vllm-1.md?url';
-import note12Url from '../notes/Mlsys/MLSYS12 nano-vllm-2.md?url';
-import note13Url from '../notes/Mlsys/MLSYS13 Quantization and precision.md?url';
 import 'katex/dist/katex.min.css';
 import './App.css';
 
-const notes = [
-  createNote('Mlsys/MLSYS1.md', note1Url),
-  createNote('Mlsys/MLSYS2.md', note2Url),
-  createNote('Mlsys/MLSYS3.md', note3Url),
-  createNote('Mlsys/MLSYS4.md', note4Url),
-  createNote('Mlsys/MLSYS5.md', note5Url),
-  createNote('Mlsys/MLSYS6.md', note6Url),
-  createNote('Mlsys/MLSYS7 Compute-Bound Kernel (1).md', note7Url),
-  createNote('Mlsys/MLSYS8 Compute-Bound Kernel (2).md', note8Url),
-  createNote('Mlsys/MLSYS9 Compute-bound kernel (3).md', note9Url),
-  createNote('Mlsys/MLSYS10 parallelism.md', note10Url),
-  createNote('Mlsys/MLSYS11 nano-vllm-1.md', note11Url),
-  createNote('Mlsys/MLSYS12 nano-vllm-2.md', note12Url),
-  createNote('Mlsys/MLSYS13 Quantization and precision.md', note13Url),
+import 'katex/dist/katex.min.css';
+import './App.css';
+
+const markdownModules = import.meta.glob('../notes/Mlsys/*.md', {
+  eager: true,
+  import: 'default',
+  query: '?url',
+});
+
+const tutorialDefinitions = [
+  createTutorialDefinition('MLSYS1', 'MLSYS1.md', 'MLSYS1.en.md'),
+  createTutorialDefinition('MLSYS2', 'MLSYS2.md', 'MLSYS2.en.md'),
+  createTutorialDefinition('MLSYS3', 'MLSYS3.md', 'MLSYS3.en.md'),
+  createTutorialDefinition('MLSYS4', 'MLSYS4.md', 'MLSYS4.en.md'),
+  createTutorialDefinition('MLSYS5', 'MLSYS5.md', 'MLSYS5.en.md'),
+  createTutorialDefinition('MLSYS6', 'MLSYS6.md', 'MLSYS6.en.md'),
+  createTutorialDefinition(
+    'MLSYS7 Compute-Bound Kernel (1)',
+    'MLSYS7 Compute-Bound Kernel (1).md',
+    'MLSYS7 Compute-Bound Kernel (1).en.md',
+  ),
+  createTutorialDefinition(
+    'MLSYS8 Compute-Bound Kernel (2)',
+    'MLSYS8 Compute-Bound Kernel (2).md',
+    'MLSYS8 Compute-Bound Kernel (2).en.md',
+  ),
+  createTutorialDefinition(
+    'MLSYS9 Compute-bound kernel (3)',
+    'MLSYS9 Compute-bound kernel (3).md',
+    'MLSYS9 Compute-bound kernel (3).en.md',
+  ),
+  createTutorialDefinition('MLSYS10 parallelism', 'MLSYS10 parallelism.md', 'MLSYS10 parallelism.en.md'),
+  createTutorialDefinition('MLSYS11 nano-vllm-1', 'MLSYS11 nano-vllm-1.md', 'MLSYS11 nano-vllm-1.en.md'),
+  createTutorialDefinition('MLSYS12 nano-vllm-2', 'MLSYS12 nano-vllm-2.md', 'MLSYS12 nano-vllm-2.en.md'),
+  createTutorialDefinition(
+    'MLSYS13 Quantization and precision',
+    'MLSYS13 Quantization and precision.md',
+    'MLSYS13 Quantization and precision.en.md',
+  ),
 ];
 
-const noteIdByAlias = buildNoteAliasMap(notes);
+const tutorials = tutorialDefinitions.map((definition) => ({
+  ...definition,
+  variants: {
+    zh: createVariant(definition.zhFileName),
+    en: createVariant(definition.enFileName),
+  },
+}));
+
+const noteIdByAlias = buildNoteAliasMap(tutorials);
 const mediaModules = import.meta.glob('../notes/Mlsys/assets/**/*.{png,jpg,jpeg,gif,webp,svg,avif,bmp}', {
   eager: true,
   import: 'default',
   query: '?url',
 });
 const mediaUrlByAlias = buildMediaAliasMap(mediaModules);
+const languageOptions = [
+  { id: 'zh', label: '中文' },
+  { id: 'en', label: 'English' },
+];
 
-function createNote(id, url) {
-  const fileName = id.split('/').at(-1) ?? id;
+function createTutorialDefinition(title, zhFileName, enFileName) {
   return {
-    id,
-    fileName,
-    title: fileName.replace(/\.md$/i, ''),
-    url,
+    id: zhFileName,
+    title,
+    fileName: zhFileName,
+    zhFileName,
+    enFileName,
   };
+}
+
+function createVariant(fileName) {
+  return {
+    fileName,
+    url: resolveMarkdownUrl(`../notes/Mlsys/${fileName}`),
+  };
+}
+
+function resolveMarkdownUrl(modulePath) {
+  const url = markdownModules[modulePath];
+  if (typeof url !== 'string') {
+    throw new Error(`Missing markdown module for ${modulePath}`);
+  }
+  return url;
 }
 
 function normalizePathToken(rawValue) {
@@ -73,7 +112,7 @@ function normalizePathToken(rawValue) {
   return value.toLowerCase();
 }
 
-function buildNoteAliasMap(noteList) {
+function buildNoteAliasMap(tutorialList) {
   const map = new Map();
 
   const addAlias = (alias, id) => {
@@ -83,13 +122,23 @@ function buildNoteAliasMap(noteList) {
     }
   };
 
-  noteList.forEach((note) => {
-    const base = note.fileName.replace(/\.md$/i, '');
-    addAlias(note.id, note.id);
-    addAlias(note.fileName, note.id);
-    addAlias(base, note.id);
-    addAlias(`Mlsys/${note.fileName}`, note.id);
-    addAlias(`notes/Mlsys/${note.fileName}`, note.id);
+  tutorialList.forEach((tutorial) => {
+    const fileNames = [tutorial.variants.zh.fileName, tutorial.variants.en.fileName];
+
+    addAlias(tutorial.id, tutorial.id);
+    addAlias(tutorial.fileName, tutorial.id);
+    addAlias(`Mlsys/${tutorial.fileName}`, tutorial.id);
+    addAlias(`notes/Mlsys/${tutorial.fileName}`, tutorial.id);
+
+    fileNames.forEach((fileName) => {
+      const withoutMd = fileName.replace(/\.md$/i, '');
+      const withoutLang = withoutMd.replace(/\.en$/i, '');
+      addAlias(fileName, tutorial.id);
+      addAlias(`Mlsys/${fileName}`, tutorial.id);
+      addAlias(`notes/Mlsys/${fileName}`, tutorial.id);
+      addAlias(withoutMd, tutorial.id);
+      addAlias(withoutLang, tutorial.id);
+    });
   });
 
   return map;
@@ -137,7 +186,7 @@ function splitObsidianTarget(rawContent) {
 function prettyLabel(rawTarget) {
   const [withoutAnchor] = rawTarget.split('#');
   const token = withoutAnchor.split('/').at(-1) ?? withoutAnchor;
-  return token.replace(/\.md$/i, '').trim() || rawTarget.trim();
+  return token.replace(/\.en\.md$/i, '').replace(/\.md$/i, '').trim() || rawTarget.trim();
 }
 
 function resolveNoteId(rawTarget) {
@@ -196,10 +245,8 @@ function normalizeObsidianMarkdown(markdownText) {
 
   let normalized = markdownText;
 
-  // Remove Obsidian comments.
   normalized = normalized.replace(/%%[\s\S]*?%%/g, '');
 
-  // Convert Obsidian callouts into standard Markdown blockquotes.
   normalized = normalized.replace(/^>\s*\[!([^\]\n+-]+)(?:[+-])?\](.*)$/gim, (_, type, rawTitle) => {
     const label = type.trim();
     const title = rawTitle.trim().replace(/^[-:\s]+/, '');
@@ -207,7 +254,6 @@ function normalizeObsidianMarkdown(markdownText) {
     return `> **${heading}:**`;
   });
 
-  // Convert embedded links and media: ![[...]].
   normalized = normalized.replace(/!\[\[([^\]\n]+)\]\]/g, (_, body) => {
     const { target, alias } = splitObsidianTarget(body);
     if (!target) {
@@ -227,7 +273,6 @@ function normalizeObsidianMarkdown(markdownText) {
     return `*Embedded asset not found: ${alias || prettyLabel(target)}*`;
   });
 
-  // Convert wiki-links: [[target|alias]].
   normalized = normalized.replace(/\[\[([^\]\n]+)\]\]/g, (_, body) => {
     const { target, alias } = splitObsidianTarget(body);
     if (!target) {
@@ -246,7 +291,6 @@ function normalizeObsidianMarkdown(markdownText) {
     return alias || prettyLabel(target);
   });
 
-  // Obsidian highlight syntax.
   normalized = normalized.replace(/==([^=\n][^=\n]*?)==/g, '<mark>$1</mark>');
 
   return normalized;
@@ -254,44 +298,49 @@ function normalizeObsidianMarkdown(markdownText) {
 
 function App() {
   const initialHash = decodeURIComponent(window.location.hash.replace(/^#/, ''));
-  const initialId = notes.find((note) => note.id === initialHash)?.id ?? notes[0]?.id ?? '';
+  const initialId = tutorials.find((tutorial) => tutorial.id === initialHash)?.id ?? tutorials[0]?.id ?? '';
 
-  const [selectedId, setSelectedId] = useState(initialId);
+  const [selectedTutorialId, setSelectedTutorialId] = useState(initialId);
+  const [language, setLanguage] = useState('zh');
   const [query, setQuery] = useState('');
-  const [contentById, setContentById] = useState({});
-  const [errorById, setErrorById] = useState({});
+  const [contentByKey, setContentByKey] = useState({});
+  const [errorByKey, setErrorByKey] = useState({});
   const inFlightRef = useRef(new Set());
 
-  const filteredNotes = useMemo(() => {
+  const filteredTutorials = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     if (!normalizedQuery) {
-      return notes;
+      return tutorials;
     }
 
-    return notes.filter((note) =>
-      [note.title, note.fileName].some((field) => field.toLowerCase().includes(normalizedQuery)),
+    return tutorials.filter((tutorial) =>
+      [tutorial.title, tutorial.fileName].some((field) => field.toLowerCase().includes(normalizedQuery)),
     );
   }, [query]);
 
-  const selectedNote =
-    notes.find((note) => note.id === selectedId) ?? filteredNotes[0] ?? notes[0] ?? null;
+  const selectedTutorial =
+    tutorials.find((tutorial) => tutorial.id === selectedTutorialId) ?? filteredTutorials[0] ?? tutorials[0] ?? null;
+
+  const activeLanguage = selectedTutorial?.variants[language] ? language : 'zh';
+  const selectedVariant = selectedTutorial?.variants[activeLanguage] ?? null;
+  const contentKey = selectedTutorial && selectedVariant ? `${selectedTutorial.id}:${activeLanguage}` : '';
 
   useEffect(() => {
-    if (!selectedNote) {
+    if (!selectedTutorial) {
       return;
     }
 
-    const encoded = `#${encodeURIComponent(selectedNote.id)}`;
+    const encoded = `#${encodeURIComponent(selectedTutorial.id)}`;
     if (window.location.hash !== encoded) {
       window.history.replaceState(null, '', encoded);
     }
-  }, [selectedNote]);
+  }, [selectedTutorial]);
 
   useEffect(() => {
     const handleHashChange = () => {
       const hashValue = decodeURIComponent(window.location.hash.replace(/^#/, ''));
-      if (notes.some((note) => note.id === hashValue)) {
-        setSelectedId(hashValue);
+      if (tutorials.some((tutorial) => tutorial.id === hashValue)) {
+        setSelectedTutorialId(hashValue);
       }
     };
 
@@ -300,18 +349,18 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedNote || !selectedNote.url) {
+    if (!selectedVariant || !contentKey) {
       return;
     }
 
-    const isLoaded = Object.prototype.hasOwnProperty.call(contentById, selectedNote.id);
-    if (isLoaded || errorById[selectedNote.id] || inFlightRef.current.has(selectedNote.id)) {
+    const isLoaded = Object.prototype.hasOwnProperty.call(contentByKey, contentKey);
+    if (isLoaded || errorByKey[contentKey] || inFlightRef.current.has(contentKey)) {
       return;
     }
 
-    inFlightRef.current.add(selectedNote.id);
+    inFlightRef.current.add(contentKey);
 
-    fetch(selectedNote.url)
+    fetch(selectedVariant.url)
       .then((response) => {
         if (!response.ok) {
           throw new Error(`Unable to load markdown (${response.status})`);
@@ -319,28 +368,28 @@ function App() {
         return response.text();
       })
       .then((content) => {
-        setContentById((prev) => ({
+        setContentByKey((prev) => ({
           ...prev,
-          [selectedNote.id]: content,
+          [contentKey]: content,
         }));
       })
       .catch((error) => {
-        setErrorById((prev) => ({
+        setErrorByKey((prev) => ({
           ...prev,
-          [selectedNote.id]: error.message,
+          [contentKey]: error.message,
         }));
       })
       .finally(() => {
-        inFlightRef.current.delete(selectedNote.id);
+        inFlightRef.current.delete(contentKey);
       });
-  }, [contentById, errorById, selectedNote]);
+  }, [contentByKey, contentKey, errorByKey, selectedVariant]);
 
-  const hasSelectedContent = selectedNote
-    ? Object.prototype.hasOwnProperty.call(contentById, selectedNote.id)
+  const hasSelectedContent = contentKey
+    ? Object.prototype.hasOwnProperty.call(contentByKey, contentKey)
     : false;
-  const selectedContent = selectedNote && hasSelectedContent ? contentById[selectedNote.id] : '';
-  const selectedError = selectedNote ? errorById[selectedNote.id] : '';
-  const selectedIsLoading = Boolean(selectedNote && !hasSelectedContent && !selectedError);
+  const selectedContent = hasSelectedContent ? contentByKey[contentKey] : '';
+  const selectedError = contentKey ? errorByKey[contentKey] : '';
+  const selectedIsLoading = Boolean(selectedTutorial && selectedVariant && !hasSelectedContent && !selectedError);
 
   const normalizedSelectedContent = useMemo(
     () => normalizeObsidianMarkdown(selectedContent),
@@ -353,44 +402,62 @@ function App() {
         <header className="panel-header">
           <p className="eyebrow">ML Systems Tutorial</p>
           <h1>Reading Room</h1>
-          <p className="panel-meta">{notes.length} published notes</p>
+          <p className="panel-meta">{tutorials.length} published tutorials</p>
         </header>
 
         <label className="search">
-          <span>Search Notes</span>
+          <span>Search Tutorials</span>
           <input
             type="search"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Type filename or keyword"
+            placeholder="Type tutorial name or filename"
           />
         </label>
 
         <div className="note-list">
-          {filteredNotes.map((note) => (
+          {filteredTutorials.map((tutorial) => (
             <button
-              key={note.id}
-              className={`note-button ${selectedNote?.id === note.id ? 'active' : ''}`}
-              onClick={() => setSelectedId(note.id)}
+              key={tutorial.id}
+              className={`note-button ${selectedTutorial?.id === tutorial.id ? 'active' : ''}`}
+              onClick={() => setSelectedTutorialId(tutorial.id)}
               type="button"
             >
-              <span className="note-title">{note.title}</span>
-              <span className="note-subtitle">{note.fileName}</span>
+              <span className="note-title">{tutorial.title}</span>
+              <span className="note-subtitle">{tutorial.fileName}</span>
             </button>
           ))}
-          {filteredNotes.length === 0 && (
-            <p className="list-empty">No notes matched your search.</p>
+          {filteredTutorials.length === 0 && (
+            <p className="list-empty">No tutorials matched your search.</p>
           )}
         </div>
       </aside>
 
       <main className="reader-panel">
-        {selectedNote ? (
+        {selectedTutorial ? (
           <>
             <header className="reader-header">
-              <p className="reader-label">Current Document</p>
-              <h2>{selectedNote.title}</h2>
-              <p>{selectedNote.fileName}</p>
+              <div className="reader-header-top">
+                <div>
+                  <p className="reader-label">Current Tutorial</p>
+                  <h2>{selectedTutorial.title}</h2>
+                  <p>{selectedVariant?.fileName ?? selectedTutorial.fileName}</p>
+                </div>
+
+                <div className="language-toggle" aria-label="Language selector" role="group">
+                  {languageOptions.map((option) => (
+                    <button
+                      key={option.id}
+                      className={`language-button ${activeLanguage === option.id ? 'active' : ''}`}
+                      onClick={() => setLanguage(option.id)}
+                      type="button"
+                      aria-pressed={activeLanguage === option.id}
+                    >
+                      {option.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
             </header>
 
             <article className="markdown-body">

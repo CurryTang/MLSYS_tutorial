@@ -1,0 +1,1049 @@
+#CUDA Parallel Primitives: Histogram & Scan
+
+This lecture follows the Reduce Kernel from the previous lecture and introduces two important parallel primitives: Histogram and Scan (Prefix Sum).
+
+## Part 1: Histogram Kernel
+
+https://leetgpu.com/challenges/histogramming
+
+### 1.1 From Reduce to Histogram
+
+In the previous lecture, we learned about Reduce: reducing N elements to 1 value. Histogram can be seen as **Multi-objective Reduce**:
+
+```
+Reduce:     N elements → 1 value      (所有元素归约到同一目标)
+Histogram:  N elements → K bins       (元素按条件归约到K个不同目标)
+```
+
+| Compare Dimensions | Reduce | Histogram |
+|---------|--------|-----------|
+| Output size | 1 | K (number of bins) |
+| Write Target | Fixed | Data Dependencies |
+| Parallel difficulties | Reduction tree design | **Atomic operation competition** |
+| Roofline | Memory-bound | Memory-bound + Atomic-bound |
+
+Core difference: The writing target of Reduce is deterministic, while the writing target of Histogram depends on the input data value, which results in multiple threads possibly updating the same bin at the same time.
+
+### 1.2 Histogram’s Core Challenge: Atomic Competition
+
+When the data distribution is concentrated (such as most elements falling into a few bins), atomic operations are severely serialized:
+
+```
+线程0 → bin[3] ─┐
+线程1 → bin[3] ─┼─→ 串行执行！
+线程2 → bin[3] ─┤
+线程3 → bin[5] ─┘
+```
+
+### 1.3 Solution: Hierarchical privatization
+
+Core idea: **Reduce the scope of competition**, from global competition→competition within the block→competition within the warp
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Version 1: Global Atomic                               │
+│  所有线程 → Global Memory (竞争最严重)                    │
+├─────────────────────────────────────────────────────────┤
+│  Version 2: Shared Memory Privatization                 │
+│  Block内线程 → Shared Memory → Global Memory            │
+│  竞争范围从全GPU缩小到单个Block (256线程)                  │
+├─────────────────────────────────────────────────────────┤
+│  Version 3: Warp-level + Local Accumulation             │
+│  进一步减少atomic次数                                    │
+└─────────────────────────────────────────────────────────┘
+```
+
+### 1.4 implementation version
+
+#### Version 1: Naive (Baseline)
+
+```cpp
+// __global__ 修饰符：声明这是一个 GPU kernel 函数
+//   - 由 CPU (host) 调用，在 GPU (device) 上执行
+//   - 返回类型必须是 void
+__global__ void histogram_v1_naive(
+    // __restrict__ 关键字：告诉编译器这个指针是访问该内存的唯一方式
+    //   - 保证 data 和 hist 指向的内存区域不重叠（no pointer aliasing）
+    //   - 允许编译器进行更激进的优化（如循环展开、指令重排）
+    //   - 类似于 C99 的 restrict，但在 CUDA 中使用双下划线
+    const int* __restrict__ data,  // 输入数据数组（只读）
+    int* __restrict__ hist,         // 输出直方图数组（读写）
+    int n,                          // 输入数据的元素个数
+    int num_bins                    // 直方图的 bin 数量
+) {
+    // 计算当前线程的全局索引
+    // blockIdx.x: 当前 block 在 grid 中的索引
+    // blockDim.x: 每个 block 中的线程数
+    // threadIdx.x: 当前线程在 block 中的索引
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // Grid-stride loop 模式的步长
+    // gridDim.x: grid 中 block 的总数
+    // stride = 所有线程的总数，用于处理数据量大于线程数的情况
+    int stride = blockDim.x * gridDim.x;
+
+    // Grid-stride loop：每个线程处理多个元素
+    // 这种模式的优点：
+    //   1. 可以处理任意大小的输入数据
+    //   2. 线程数可以独立于数据大小进行调优
+    //   3. 保持良好的内存访问模式（相邻线程访问相邻内存）
+    for (int i = idx; i < n; i += stride) {
+        int bin = data[i];
+        // 边界检查：确保 bin 值在有效范围内
+        if (bin >= 0 && bin < num_bins) {
+            // atomicAdd：原子加操作
+            //   - 保证多个线程同时更新同一位置时的正确性
+            //   - 缺点：当多个线程竞争同一个 bin 时会产生串行化
+            //   - 这是 naive 版本的主要性能瓶颈
+            atomicAdd(&hist[bin], 1);
+        }
+    }
+}
+```
+
+**Memory flow and latency analysis**
+
+Let us analyze the memory flow process of data in this kernel step by step:
+
+1. **Index calculation phase**: The calculation of the two variables `idx` and `stride` is completely completed in registers. `blockIdx.x`, `blockDim.x`, `threadIdx.x` and `gridDim.x` are all built-in variables provided by CUDA, which are stored in special registers and have extremely low access latency (about 1 clock cycle).
+
+2. **Data reading phase**: `int bin = data[i]` is the first memory bottleneck of the entire kernel. The `data` array is located in Global Memory, and the access latency is as high as 400-800 clock cycles. However, because we use a grid-stride loop, adjacent threads access adjacent memory addresses, which forms a coalesced access pattern. When a warp (32 threads) accesses 32 consecutive ints at the same time, these requests are combined into a 128-byte memory transaction, greatly improving bandwidth utilization. The read `bin` value will be stored in each thread's register.
+
+3. **Bounds checking phase**: The comparison operation of `if (bin >= 0 && bin < num_bins)` is completed in the register, and the delay is negligible. There may be branch divergence here, but ignore it for now
+
+4. **Atomic update phase**: `atomicAdd(&hist[bin], 1)` is the core bottleneck of performance. This operation involves:
+- First, calculate the address of the corresponding element in the `hist` array based on the value of `bin` (register operation)
+- Then, initiate an atomic read-modify-write operation of global memory
+- The latency of the atomic operations themselves is comparable to normal global memory accesses (400-800 cycles), but the problem is serialization: when multiple threads update the same bin at the same time, these operations must be queued for execution
+- If the data is unevenly distributed (some bins are particularly popular), contention will be more severe and delays may accumulate to thousands of cycles
+
+**Latency hiding and performance features**
+
+GPUs hide memory latency through large numbers of parallel threads. While a warp is waiting for a memory access to complete, the scheduler switches execution to other ready warps. However, the problem with this naive version is that:
+
+- Atomic operations on global memory cannot be effectively hidden because updates to the same bin must be serialized
+- All threads are competing for the same `hist` array, causing serious memory contention
+- When the number of bins is small or the data distribution is concentrated, performance will drop sharply
+
+This is why subsequent versions use Shared Memory for privatization: the access latency of Shared Memory is only about 20-30 clock cycles, which is an order of magnitude faster than global memory and can significantly reduce the overhead of atomic operations.
+
+#### Version 2: Shared Memory Privatization ⭐
+
+This is the most practical optimized version:
+
+```cpp
+__global__ void histogram_v2_shared(
+    const int* __restrict__ data,
+    int* __restrict__ hist,
+    int n, int num_bins
+) {
+    extern __shared__ int s_hist[];  // 每个block的私有histogram
+    
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    
+    // Step 1: 初始化shared memory
+    for (int i = tid; i < num_bins; i += blockDim.x) {
+        s_hist[i] = 0;
+    }
+    __syncthreads();
+    
+    // Step 2: 在shared memory中累积 (block内竞争，比global快~10x)
+    for (int i = idx; i < n; i += stride) {
+        int bin = data[i];
+        if (bin >= 0 && bin < num_bins) {
+            atomicAdd(&s_hist[bin], 1);
+        }
+    }
+    __syncthreads();
+    
+    // Step 3: 归约到global memory (每个bin只需1次global atomic)
+    for (int i = tid; i < num_bins; i += blockDim.x) {
+        atomicAdd(&hist[i], s_hist[i]);
+    }
+}
+```
+
+**Why it works**:
+- Shared memory atomic is about 10 times faster than global
+- Contention dropped from millions of threads to 256 threads/block
+- The final number of global atomic = num_bins × num_blocks (not n times)
+
+**Limitations**: The number of bins is limited by shared memory (48KB → ~12K int bins)
+
+#### Version 3: Local Accumulation (handling data locality)
+
+When the data has locality (consecutive elements tend to fall into the same bin):
+
+```cpp
+// 核心思想：利用数据的时间局部性，用寄存器累积连续相同的 bin
+// 适用场景：当输入数据具有局部性（如图像像素、排序后的数据），连续元素往往落入相同 bin
+// 优化原理：将多次原子操作合并为一次，减少原子操作的总次数
+__global__ void histogram_v3_local(
+    const int* __restrict__ data,
+    int* __restrict__ hist,
+    int n, int num_bins
+) {
+    extern __shared__ int s_hist[];
+
+    int tid = threadIdx.x;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+
+    for (int i = tid; i < num_bins; i += blockDim.x) s_hist[i] = 0;
+    __syncthreads();
+
+    // ========== 核心优化：本地累积器 ==========
+    // last_bin: 记录上一次处理的 bin 索引（存储在寄存器中）
+    // count: 累积计数器，记录连续相同 bin 的出现次数（存储在寄存器中）
+    // 关键洞察：寄存器访问是免费的（1 周期），而 atomicAdd 代价高昂
+    int last_bin = -1;
+    int count = 0;
+
+    for (int i = idx; i < n; i += stride) {
+        int bin = data[i];
+        if (bin == last_bin) {
+            // 连续遇到相同 bin：只增加寄存器中的计数器
+            // 这是纯寄存器操作，零内存访问开销
+            count++;
+        } else {
+            // 遇到不同 bin：需要"刷新"之前的累积值到 shared memory
+            // 只有在 bin 切换时才执行一次 atomicAdd，而不是每个元素都执行
+            if (count > 0) atomicAdd(&s_hist[last_bin], count);
+            last_bin = bin;  // 更新追踪的 bin
+            count = 1;       // 重置计数器
+        }
+    }
+    // 循环结束后，最后一批累积的计数还在寄存器中，需要最终刷新
+    if (count > 0) atomicAdd(&s_hist[last_bin], count);
+
+    __syncthreads();
+
+    for (int i = tid; i < num_bins; i += blockDim.x) {
+        atomicAdd(&hist[i], s_hist[i]);
+    }
+}
+// 性能分析：
+// - 最好情况：数据完全有序，每个线程只需 1 次 atomicAdd（所有元素都在同一 bin）
+// - 最坏情况：数据完全随机，退化为 Version 2 的性能（每个元素都触发 atomicAdd）
+// - 额外开销：每次循环多了一次比较和条件分支，但这比 atomicAdd 便宜得多
+```
+
+### 1.5 Performance Characteristics and Selection Guide
+
+| Scenario | Recommended version | Reason |
+|------|---------|------|
+| bins < 12K | V2 Shared | Universal Optimal |
+| Data is local | V3 Local | Reduce the number of atomic |
+| bins > 12K | Multi-pass or CUB | Shared memory exceeded |
+| Production environment | CUB library | Highly optimized |
+
+**Roofline theoretical analysis**
+
+Let us analyze the performance characteristics of the Histogram kernel using the Roofline model.
+
+**Symbol definition**:
+- $\pi$: GPU peak computing power (FLOP/s)
+- $\beta$: memory bandwidth (Byte/s)
+- $N$: the number of input data elements
+- $B$: number of bins
+- $s$: The number of bytes of a single data element (such as int32, then $s=4$)
+
+
+**Arithmetic intensity analysis of Histogram**:
+
+For the naive version, processing $N$ elements:
+
+- **Memory accesses**:
+- Read input data: $N \cdot s$ bytes
+- Atomic update histogram (read-modify-write): $N \cdot 2s$ bytes (worst case, different bins accessed each time)
+- Total: $M = 3Ns$ bytes
+
+- **Calculation amount**:
+- Per element: bounds check + addition ≈ $\alpha$ FLOPs ($\alpha \approx 2$)
+- Total: $F = \alpha N$ FLOPs
+
+- **Arithmetic Strength**:
+$$I_{hist} = \frac{F}{M} = \frac{\alpha N}{3Ns} = \frac{\alpha}{3s}$$
+
+For int32 ($s=4$), $I_{hist} = \frac{\alpha}{12} \ll 1$ FLOP/Byte
+
+**Roofline Conclusion**:
+
+Since modern GPUs have $I_{ridge} \gg 1$ (usually $I_{ridge} > 100$) and $I_{hist} < 1$, therefore:
+$$I_{hist} \ll I_{ridge}$$
+
+The Histogram is in severe **Memory-Bound** territory, with reachable performance of:
+$$P_{attainable} = I_{hist} \cdot \beta = \frac{\alpha \beta}{3s}$$
+
+Peak computing power utilization:
+$$\eta = \frac{P_{attainable}}{\pi} = \frac{\alpha \beta}{3s\pi} = \frac{\alpha}{3s \cdot I_{ridge}} \ll 1$$
+
+**Consider atomic operation competition**:
+
+Let $\gamma \in (0, 1]$ be the effective bandwidth coefficient of atomic operations (the more intense the competition, the smaller $\gamma$), the actual performance is:
+$$P_{real} = \gamma \cdot I_{hist} \cdot \beta = \frac{\gamma \alpha \beta}{3s}$$
+
+**Optimized version of Roofline perspective**:
+
+| Version | Optimization effect | Roofline impact |
+|------|---------|--------------|
+| V2 Shared | Use Shared Memory to replace Global Memory | Equivalently increase $\beta$ by $\kappa$ times ($\kappa \approx 10\text{-}20$) |
+| V3 Local | Register accumulation, reducing the number of atomic operations | Increase $\gamma$ to close to 1 |
+
+**Conclusion**: $I \ll I_{ridge}$ of Histogram is always memory-bound. Optimization strategy:
+1. **Improve effective bandwidth**: Use a faster storage level (Shared Memory), equivalently increasing $\beta$
+2. **Reduce competition**: Privatize histogram, improve $\gamma$
+3. **Reduce the number of memory accesses**: local accumulation, reduce $M$
+
+---
+
+## Part 2: Scan (Prefix Sum) Kernel
+
+https://leetgpu.com/challenges/prefix-sum
+
+### 2.1 What is Scan
+
+Scan (prefix sum) is another core parallel primitive that computes the cumulative operation of an array:
+
+```
+输入:  [3, 1, 7, 0, 4, 1, 6, 3]
+
+Exclusive Scan (不含当前元素):
+输出:  [0, 3, 4, 11, 11, 15, 16, 22]
+       ↑  ↑
+       0  0+3
+
+Inclusive Scan (含当前元素):  
+输出:  [3, 4, 11, 11, 15, 16, 22, 25]
+       ↑  ↑
+       3  3+1
+```
+
+### 2.2 Importance of Scan
+
+Scan is the basis on which other parallel algorithms are built:
+
+| Applications | How to use Scan |
+|------|-------------|
+| Stream Compaction | Mark→Scan→Scatter |
+| Radix Sort | Count→Scan→Assign position |
+| Sparse matrix | row_ptr in CSR format |
+| Parallel allocation | Calculate output offset for each thread |
+
+### 2.3 Problems with Naive Parallel Scan
+
+Intuitive idea: calculate the prefix sum independently for each element
+
+```cpp
+// 错误！O(n²)复杂度
+__global__ void scan_naive(int* data, int n) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int sum = 0;
+    for (int i = 0; i <= idx; i++) {  // 每个线程遍历[0, idx]
+        sum += data[i];
+    }
+    data[idx] = sum;
+}
+```
+
+Problem: The i-th thread performs i additions, the total workload is O(n²), and parallelism is not used at all.
+
+### 2.4 Efficient parallel Scan: Blelloch algorithm
+
+The Blelloch algorithm is divided into two stages, with a total workload of O(n) and a span of O(log n):
+
+```
+Phase 1: Up-sweep (Reduce)
+建立归约树，计算部分和
+
+Phase 2: Down-sweep
+从根向下传播，计算前缀和
+```
+
+#### pseudocode
+
+```python
+def blelloch_scan(x):
+    """
+    Blelloch 并行前缀和算法
+    输入: x[0..n-1]，长度 n 必须是 2 的幂
+    输出: exclusive prefix sum
+    """
+    n = len(x)
+
+    # ========== Phase 1: Up-sweep (Reduce) ==========
+    # 从叶子到根，构建归约树
+    # 每一步将相邻元素对的和存储到右边元素的位置
+    for d in range(log2(n)):           # d = 0, 1, ..., log2(n)-1
+        stride = 2^(d+1)               # stride = 2, 4, 8, ...
+        for i in parallel(0, n, stride):  # i = 0, stride, 2*stride, ...
+            x[i + stride - 1] += x[i + stride/2 - 1]
+
+    # 此时 x[n-1] 包含所有元素的总和
+
+    # ========== Phase 2: Down-sweep ==========
+    # 从根到叶子，利用归约树计算前缀和
+    x[n-1] = 0                         # 将根设为 0（identity element）
+
+    for d in range(log2(n)-1, -1, -1): # d = log2(n)-1, ..., 1, 0
+        stride = 2^(d+1)               # stride = n, n/2, ..., 4, 2
+        for i in parallel(0, n, stride):
+            left = i + stride/2 - 1
+            right = i + stride - 1
+
+            temp = x[left]             # 保存左子节点的值
+            x[left] = x[right]         # 左子节点 = 父节点的值（来自上方）
+            x[right] += temp           # 右子节点 = 父节点值 + 原左子节点值
+
+    return x  # 现在 x 包含 exclusive prefix sum
+```
+
+**Complexity Analysis**:
+- Time complexity: $O(\log N)$ steps (each step is internally parallel)
+- Work complexity: $O(N)$ addition operations
+- Space complexity: $O(1)$ extra space (in-place algorithm)
+
+#### Illustration (8 elements)
+
+```
+输入: [3, 1, 7, 0, 4, 1, 6, 3]
+
+=== Up-sweep (Reduce) ===
+Step 1 (stride=1): 
+[3, 4, 7, 7, 4, 5, 6, 9]
+     ↑     ↑     ↑     ↑
+    3+1   7+0   4+1   6+3
+
+Step 2 (stride=2):
+[3, 4, 7, 11, 4, 5, 6, 14]
+           ↑            ↑
+         4+7          5+9
+
+Step 3 (stride=4):
+[3, 4, 7, 11, 4, 5, 6, 25]
+                        ↑
+                     11+14
+
+=== Down-sweep ===
+设置根为0: [3, 4, 7, 11, 4, 5, 6, 0]
+                                  ↑
+
+Step 1 (stride=4):
+[3, 4, 7, 0, 4, 5, 6, 11]
+           ↑            ↑
+        交换并累加
+
+Step 2 (stride=2):
+[3, 4, 7, 0, 4, 5, 6, 11]
+     ↓     ↓     ↓      ↓
+[3, 0, 7, 4, 4, 11, 6, 16]
+
+Step 3 (stride=1):
+[0, 3, 4, 11, 11, 15, 16, 22]
+
+输出 (Exclusive): [0, 3, 4, 11, 11, 15, 16, 22] ✓
+```
+
+
+```
+new_left  = right           // 左子继承父节点传来的值
+new_right = left + right    // 右子 = 继承值 + 左兄弟的子树和
+树形视角
+
+Up-sweep 结果（子树和）：        Down-sweep 传递（左边的和）：
+        25                              0
+       /  \                           /    \
+     11    14                        0       11
+    / \   / \                       / \     /   \
+   4   7  5  9                     0   4   11    16
+  /\  /\ /\  /\                   /\  /\   /\    /\
+ 3 1 7 0 4 1 6 3                 0 3 4 11 11 15 16 22
+
+
+**规则**：
+- **左子节点**：继承父节点的值（我左边 = 父亲左边）
+- **右子节点**：父节点值 + 左兄弟的和（我左边 = 父亲左边 + 左兄弟）
+
+
+temp[n-1] = 0;  // 在down-sweep开始前
+因为是 **exclusive** scan——第一个元素的前缀和是 0（它左边没有任何元素）。这个 0 会在 down-sweep 过程中传播到位置 0。
+
+
+输入:     [3, 1, 7, 0, 4, 1, 6, 3]
+
+Up-sweep后: [3, 4, 7, 11, 4, 5, 6, 25]
+                                   ↓ 设为0
+           [3, 4, 7, 11, 4, 5, 6, 0]
+
+Down-sweep:
+  stride=4: [3, 4, 7, 0,  4, 5,  6, 11]   // 根层
+  stride=2: [3, 0, 7, 4,  4, 11, 6, 16]   // 第二层  
+  stride=1: [0, 3, 4, 11, 11, 15, 16, 22] // 叶子层 ✓
+```
+
+### 2.5 CUDA implementation
+
+#### Version 1: Single Block Scan (Blelloch)
+
+```cpp
+__global__ void scan_blelloch_single_block(int* data, int n) {
+    extern __shared__ int temp[];
+    int tid = threadIdx.x;
+    
+    // 加载到shared memory
+    temp[2*tid] = data[2*tid];
+    temp[2*tid+1] = data[2*tid+1];
+    
+    int offset = 1;
+    
+    // === Up-sweep (Reduce) ===
+    for (int d = n >> 1; d > 0; d >>= 1) {
+        __syncthreads();
+        if (tid < d) {
+            int ai = offset * (2*tid+1) - 1;
+            int bi = offset * (2*tid+2) - 1;
+            temp[bi] += temp[ai];
+        }
+        offset *= 2;
+    }
+    
+    // 清除最后一个元素（为down-sweep准备）
+    if (tid == 0) temp[n-1] = 0;
+    
+    // === Down-sweep ===
+    for (int d = 1; d < n; d *= 2) {
+        offset >>= 1;
+        __syncthreads();
+        if (tid < d) {
+            int ai = offset * (2*tid+1) - 1;
+            int bi = offset * (2*tid+2) - 1;
+            int t = temp[ai];
+            temp[ai] = temp[bi];
+            temp[bi] += t;
+        }
+    }
+    __syncthreads();
+    
+    // 写回
+    data[2*tid] = temp[2*tid];
+    data[2*tid+1] = temp[2*tid+1];
+}
+```
+
+**Limitations**: Can only process data of a single block size (usually ≤2048 elements)
+
+#### Version 2: Multi-Block Scan (three stages)
+
+Processing arrays of arbitrary size requires three stages:
+
+```
+阶段1: Block-level Scan
+每个block独立scan自己的部分，保存block总和
+
+阶段2: Scan Block Sums  
+对所有block的总和做scan
+
+阶段3: Add Block Offsets
+每个block加上前面所有block的总和
+```
+
+```cpp
+// 阶段1: 每个block scan并保存总和
+__global__ void scan_blocks(int* data, int* block_sums, int n) {
+    extern __shared__ int temp[];
+    int tid = threadIdx.x;
+    int bid = blockIdx.x;
+    int block_offset = bid * blockDim.x * 2;
+    
+    // 加载数据
+    int ai = tid;
+    int bi = tid + blockDim.x;
+    temp[ai] = (block_offset + ai < n) ? data[block_offset + ai] : 0;
+    temp[bi] = (block_offset + bi < n) ? data[block_offset + bi] : 0;
+    
+    // Blelloch scan (同上)
+    // ... up-sweep ...
+    // ... down-sweep ...
+    
+    __syncthreads();
+    
+    // 保存block总和
+    if (tid == 0) {
+        block_sums[bid] = temp[blockDim.x * 2 - 1];
+    }
+    
+    // 写回scan结果
+    if (block_offset + ai < n) data[block_offset + ai] = temp[ai];
+    if (block_offset + bi < n) data[block_offset + bi] = temp[bi];
+}
+
+// 阶段3: 加上block偏移
+__global__ void add_block_sums(int* data, int* block_sums, int n) {
+    int idx = blockIdx.x * blockDim.x * 2 + threadIdx.x;
+    if (blockIdx.x > 0 && idx < n) {
+        data[idx] += block_sums[blockIdx.x];
+    }
+    if (blockIdx.x > 0 && idx + blockDim.x < n) {
+        data[idx + blockDim.x] += block_sums[blockIdx.x];
+    }
+}
+```
+
+#### Version 3: Work-Efficient with Bank Conflict Avoidance
+
+Shared memory has bank conflict problems. Add padding to avoid:
+
+```cpp
+#define NUM_BANKS 32
+#define LOG_NUM_BANKS 5
+#define CONFLICT_FREE_OFFSET(n) ((n) >> LOG_NUM_BANKS)
+
+__global__ void scan_optimized(int* data, int n) {
+    extern __shared__ int temp[];
+    int tid = threadIdx.x;
+    
+    // 带padding的索引，避免bank conflict
+    int ai = tid;
+    int bi = tid + (n/2);
+    int bankOffsetA = CONFLICT_FREE_OFFSET(ai);
+    int bankOffsetB = CONFLICT_FREE_OFFSET(bi);
+    
+    temp[ai + bankOffsetA] = data[ai];
+    temp[bi + bankOffsetB] = data[bi];
+    
+    int offset = 1;
+    
+    // Up-sweep with conflict-free addressing
+    for (int d = n >> 1; d > 0; d >>= 1) {
+        __syncthreads();
+        if (tid < d) {
+            int ai = offset * (2*tid+1) - 1;
+            int bi = offset * (2*tid+2) - 1;
+            ai += CONFLICT_FREE_OFFSET(ai);
+            bi += CONFLICT_FREE_OFFSET(bi);
+            temp[bi] += temp[ai];
+        }
+        offset *= 2;
+    }
+    
+    // ... 类似处理down-sweep ...
+}
+```
+
+
+### 2.6 Roofline features of Scan
+
+```
+内存访问: 读n + 写n = 2n
+计算量: O(n) 加法
+Arithmetic Intensity: ~0.25 ops/byte (int32)
+
+结论: Memory-bound，但比histogram好（没有原子操作）
+```
+
+
+## Part 3: Application of Scan in Mamba 1.0
+
+### 3.1 Background: State Space Model (SSM)
+
+SSM is a sequence modeling method that can be viewed as a discretization of a continuous-time system:
+
+```
+连续形式:
+  h'(t) = A·h(t) + B·x(t)     (状态更新)
+  y(t)  = C·h(t) + D·x(t)     (输出)
+
+离散化后:
+  h_t = Ā·h_{t-1} + B̄·x_t    (线性递推！)
+  y_t = C·h_t + D·x_t
+```
+
+**This is a linear recursion, exactly the form in which Scan can be parallelized! **
+
+### 3.2 Two calculation modes of SSM
+
+**Mode 1: Recurrent (sequential calculation)**
+
+```python
+# O(L) 时间，O(1) 空间，但完全顺序
+h = zeros(N)  # hidden state
+for t in range(L):
+    h = A @ h + B @ x[t]   # 必须等上一步完成
+    y[t] = C @ h
+```
+
+- Very efficient during reasoning: O(1) per token
+- Very slow during training: unable to parallelize, low GPU utilization
+
+**Mode 2: Convolution (parallel computing)**
+
+For **time-invariant** SSM (A, B, C fixed), it can be expanded into a convolution:
+
+```
+y = x * K，其中 K = (CB̄, CĀB̄, CĀ²B̄, ...)
+```
+
+- Efficient during training: FFT convolution O(L log L)
+- But it is required that A, B, C are constants (time-invariant)
+
+### 3.3 Mamba’s Dilemma: Selective but cannot use convolution
+
+The core innovation of Mamba is **Selective SSM**: let B, C, Δ depend on the input
+
+```python
+# Selective SSM: 参数随输入变化
+Δ_t = Linear(x_t)  # 离散化步长
+B_t = Linear(x_t)  # 输入矩阵
+C_t = Linear(x_t)  # 输出矩阵
+
+h_t = exp(Δ_t·A)·h_{t-1} + Δ_t·B_t·x_t
+y_t = C_t·h_t
+```
+
+**Problem**: Parameters change with time → No longer a time-invariant system → Convolution mode fails!
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Mamba 的困境                                                               │
+│                                                                             │
+│  想要 Selective（性能好）→ B, C, Δ 必须依赖输入 → 时变系统                    │
+│  想要 Fast Training     → 需要并行化 → 卷积要求时不变                        │
+│                                                                             │
+│  矛盾！传统方法只能二选一                                                    │
+│                                                                             │
+│  解决方案: Parallel Associative Scan                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 3.4 Associative Scan: Parallelized linear recursion
+
+**Key Insight**: Although the parameters are time-varying, the recursion is still **associative**!
+
+SSM recursion can be written as:
+```
+h_t = A_t · h_{t-1} + b_t
+
+定义二元组: (A_t, b_t)
+定义结合运算 ⊗: (A₂, b₂) ⊗ (A₁, b₁) = (A₂·A₁, A₂·b₁ + b₂)
+```
+
+**Verify associativity**:
+
+```
+(A₃, b₃) ⊗ [(A₂, b₂) ⊗ (A₁, b₁)]
+= (A₃, b₃) ⊗ (A₂·A₁, A₂·b₁ + b₂)
+= (A₃·A₂·A₁, A₃·A₂·b₁ + A₃·b₂ + b₃)
+
+[(A₃, b₃) ⊗ (A₂, b₂)] ⊗ (A₁, b₁)
+= (A₃·A₂, A₃·b₂ + b₃) ⊗ (A₁, b₁)
+= (A₃·A₂·A₁, A₃·A₂·b₁ + A₃·b₂ + b₃)
+
+两者相等！满足结合律 ✓
+```
+
+### 3.5 Parallel Scan applied to SSM
+
+With the associative law, you can use Blelloch scan to calculate in parallel:
+
+```
+输入: [(A₁,b₁), (A₂,b₂), (A₃,b₃), (A₄,b₄), ...]
+
+目标: 计算所有前缀积
+  h₁ = (A₁,b₁)
+  h₂ = (A₂,b₂) ⊗ (A₁,b₁)
+  h₃ = (A₃,b₃) ⊗ (A₂,b₂) ⊗ (A₁,b₁)
+  ...
+
+使用 Blelloch Scan:
+  Step 1 (Up-sweep): 构建部分积
+  Step 2 (Down-sweep): 传播前缀积
+  
+  复杂度: O(L) work, O(log L) span
+  可以在 O(log L) 步内完成！
+```
+
+**Image**:
+
+```
+Sequential (O(L) steps):
+  h₁ → h₂ → h₃ → h₄ → h₅ → h₆ → h₇ → h₈
+  
+Parallel Scan (O(log L) steps):
+  Step 1:  [1-2]   [3-4]   [5-6]   [7-8]     (4 pairs)
+  Step 2:  [1-4]           [5-8]             (2 pairs)  
+  Step 3:  [1-8]                             (1 pair)
+  Down-sweep: 分发前缀积到每个位置
+  
+  总共 2·log₂(8) = 6 步，而非 8 步
+```
+
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Mamba 的三大优化策略                                                        │
+│                                                                             │
+│  1. Kernel Fusion（算子融合）                                                │
+│     ┌─────────────────────────────────────────────────────────────────┐    │
+│     │ 传统: HBM → 离散化 → HBM → Scan → HBM → 输出 → HBM               │    │
+│     │       (多次HBM读写，I/O瓶颈)                                      │    │
+│     │                                                                 │    │
+│     │ Fused: HBM → SRAM [离散化 + Scan + 输出] → HBM                   │    │
+│     │        (一次读入，一次写出)                                       │    │
+│     └─────────────────────────────────────────────────────────────────┘    │
+│                                                                             │
+│  2. Parallel Scan in SRAM                                                   │
+│     • 不materialize中间状态到HBM                                            │
+│     • 所有scan操作在SRAM中完成                                               │
+│     • 只写最终输出到HBM                                                      │
+│                                                                             │
+│  3. Recomputation（重计算）                                                  │
+│     • Forward: 不保存中间状态                                                │
+│     • Backward: 重新计算需要的状态                                           │
+│     • 用计算换内存                                                          │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 3.6 Mamba1 Kernel core code analysis
+
+> Source code from: https://github.com/state-spaces/mamba/tree/main/csrc/selective_scan/
+
+#### Core file structure
+
+```
+csrc/selective_scan/
+├── selective_scan_common.h      # Associative scan 算子定义
+├── selective_scan_fwd_kernel.cuh  # Forward pass kernel
+├── selective_scan_bwd_kernel.cuh  # Backward pass kernel
+└── reverse_scan.cuh             # 反向scan（用于梯度传播）
+```
+
+#### 1. Associative Scan operator (core!)
+
+SSM recursion formula: `h[t] = A * h[t-1] + B * x[t]`
+
+**Key Insight**: This recursion can be expressed as an associative operation on the tuples `(a, b)`:
+- The state is expressed as `(decay, value)` = `(A, B*x)`
+- Combine two states: `(a0, b0) ⊕ (a1, b1) = (a1*a0, a1*b0 + b1)`
+
+```cuda
+// selective_scan_common.h - 核心算子
+// 这是Mamba能够并行化的数学基础！
+
+template<>
+struct SSMScanOp<float> {
+    __device__ __forceinline__ float2 operator()(
+        const float2 &ab0,  // (a0, b0) = 前一个状态
+        const float2 &ab1   // (a1, b1) = 当前状态
+    ) const {
+        // 结合律: (a1*a0, a1*b0 + b1)
+        // ab.x = decay factor (累积衰减)
+        // ab.y = value contribution (累积输入)
+        return make_float2(
+            ab1.x * ab0.x,           // 累积decay: a1 * a0
+            ab1.x * ab0.y + ab1.y    // 累积value: a1 * b0 + b1
+        );
+    }
+};
+
+// 复数版本（用于某些SSM变体）
+template<>
+struct SSMScanOp<complex_t> {
+    __device__ __forceinline__ float4 operator()(
+        const float4 &ab0, const float4 &ab1
+    ) const {
+        complex_t a0(ab0.x, ab0.y), b0(ab0.z, ab0.w);
+        complex_t a1(ab1.x, ab1.y), b1(ab1.z, ab1.w);
+        complex_t out_a = a1 * a0;
+        complex_t out_b = a1 * b0 + b1;
+        return make_float4(out_a.real_, out_a.imag_,
+                          out_b.real_, out_b.imag_);
+    }
+};
+
+// 跨chunk边界的状态传递
+template <typename scalar_t>
+struct SSMScanPrefixCallbackOp {
+    using scan_t = std::conditional_t<
+        std::is_same_v<scalar_t, float>, float2, float4>;
+    scan_t running_prefix;  // 上一个chunk的最终状态
+
+    __device__ scan_t operator()(scan_t block_aggregate) {
+        scan_t old_prefix = running_prefix;
+        // 将当前block的聚合结果与running prefix组合
+        running_prefix = SSMScanOp<scalar_t>()(running_prefix, block_aggregate);
+        return old_prefix;  // 返回给当前block使用
+    }
+};
+```
+
+#### 2. Forward Kernel core logic
+
+```cuda
+// selective_scan_fwd_kernel.cuh (简化版)
+
+template<typename Ktraits>
+__global__ void selective_scan_fwd_kernel(SSMParamsBase params) {
+    // ========== 常量和配置 ==========
+    constexpr int kNThreads = Ktraits::kNThreads;     // 线程数
+    constexpr int kNItems = Ktraits::kNItems;         // 每线程处理的元素数
+    constexpr int kChunkSize = kNThreads * kNItems;   // 2048 (典型值)
+
+    const int batch_id = blockIdx.x;
+    const int dim_id = blockIdx.y;   // 每个block处理一个(batch, dim)
+
+    // ========== Step 1: 加载参数 ==========
+    // A: [D, N] - 状态转移矩阵（通常是负数，表示衰减）
+    // delta: [B, L, D] - 时间步长（input-dependent）
+    // B: [B, L, N] 或 [B, N] - 输入矩阵
+    // C: [B, L, N] 或 [B, N] - 输出矩阵
+    // u: [B, L, D] - 输入
+
+    float A_val = A[dim_id * N + state_idx];  // 对每个state维度
+    A_val *= LOG2E;  // 预乘log2(e)，使用exp2f更快
+
+    // ========== Step 2: 按chunk处理序列 ==========
+    for (int chunk = 0; chunk < n_chunks; ++chunk) {
+        int chunk_offset = chunk * kChunkSize;
+
+        // 2a. 加载这个chunk的数据到寄存器
+        float delta_vals[kNItems], u_vals[kNItems];
+        float B_vals[kNItems], C_vals[kNItems];
+
+        #pragma unroll
+        for (int i = 0; i < kNItems; ++i) {
+            int seq_idx = chunk_offset + threadIdx.x * kNItems + i;
+            delta_vals[i] = delta[batch_id][seq_idx][dim_id];
+            u_vals[i] = u[batch_id][seq_idx][dim_id];
+
+            // Delta softplus (可选): delta = log(1 + exp(delta))
+            if (kDeltaSoftplus) {
+                delta_vals[i] = delta_vals[i] <= 20.f
+                    ? log1pf(expf(delta_vals[i]))
+                    : delta_vals[i];
+            }
+        }
+
+        // 2b. 计算scan的输入: (decay, value) pairs
+        float2 thread_data[kNItems];
+
+        #pragma unroll
+        for (int i = 0; i < kNItems; ++i) {
+            // decay = exp(delta * A) = exp2(delta * A * log2(e))
+            float decay = exp2f(delta_vals[i] * A_val);
+
+            // value = delta * B * u
+            float delta_u = delta_vals[i] * u_vals[i];
+            float value = delta_u * B_vals[i];
+
+            thread_data[i] = make_float2(decay, value);
+        }
+
+        // ========== Step 3: Parallel Associative Scan ==========
+        // 使用CUB的BlockScan，配合自定义的SSMScanOp
+
+        using BlockScanT = cub::BlockScan<float2, kNThreads,
+                                          cub::BLOCK_SCAN_WARP_SCANS>;
+
+        SSMScanPrefixCallbackOp<float> prefix_op(running_prefix);
+
+        BlockScanT(smem_scan).InclusiveScan(
+            thread_data,        // 输入: (decay, value) pairs
+            thread_data,        // 输出: scan后的结果
+            SSMScanOp<float>(), // 结合运算符
+            prefix_op           // 处理跨chunk的状态传递
+        );
+
+        // 更新running_prefix用于下一个chunk
+        running_prefix = prefix_op.running_prefix;
+
+        // ========== Step 4: 计算输出 ==========
+        #pragma unroll
+        for (int i = 0; i < kNItems; ++i) {
+            // thread_data[i].y 现在是 h[t]（隐藏状态）
+            // output = C * h
+            out_vals[i] += thread_data[i].y * C_vals[i];
+        }
+
+        // 写回HBM（只在所有state维度累加完后写）
+    }
+}
+```
+
+#### 3. Illustration of mathematical principles
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Associative Scan 的数学基础                                                 │
+│                                                                             │
+│  递推公式: h[t] = a[t] * h[t-1] + b[t]                                      │
+│                                                                             │
+│  表示为二元组: (a, b) 其中 a=decay, b=input                                  │
+│                                                                             │
+│  组合运算 ⊕:                                                                │
+│    (a0, b0) ⊕ (a1, b1) = (a1*a0, a1*b0 + b1)                               │
+│                                                                             │
+│  验证结合律:                                                                │
+│    [(a0,b0) ⊕ (a1,b1)] ⊕ (a2,b2)                                           │
+│    = (a1*a0, a1*b0+b1) ⊕ (a2,b2)                                           │
+│    = (a2*a1*a0, a2*(a1*b0+b1)+b2)                                          │
+│    = (a2*a1*a0, a2*a1*b0 + a2*b1 + b2)                                     │
+│                                                                             │
+│    (a0,b0) ⊕ [(a1,b1) ⊕ (a2,b2)]                                           │
+│    = (a0,b0) ⊕ (a2*a1, a2*b1+b2)                                           │
+│    = (a2*a1*a0, a2*a1*b0 + a2*b1 + b2)   ✓ 相等！                           │
+│                                                                             │
+│  因此可以用parallel prefix sum!                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Parallel Scan 执行过程 (8个元素示例)                                        │
+│                                                                             │
+│  输入: (a0,b0) (a1,b1) (a2,b2) (a3,b3) (a4,b4) (a5,b5) (a6,b6) (a7,b7)     │
+│                                                                             │
+│  Up-sweep (reduce):                                                         │
+│  Level 0:  [0]    [1]    [2]    [3]    [4]    [5]    [6]    [7]            │
+│              \    /        \    /        \    /        \    /              │
+│  Level 1:   [0:1]         [2:3]         [4:5]         [6:7]               │
+│                 \          /                \          /                   │
+│  Level 2:       [0:3]                       [4:7]                          │
+│                      \                    /                                │
+│  Level 3:            [0:7] (全局聚合)                                       │
+│                                                                             │
+│  Down-sweep (distribute):                                                   │
+│  把部分和传播回去，得到每个位置的inclusive scan结果                            │
+│                                                                             │
+│  输出: h[0]  h[1]  h[2]  h[3]  h[4]  h[5]  h[6]  h[7]                      │
+│                                                                             │
+│  复杂度: O(log L) 深度，O(L) 总工作量                                        │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+
+### 3.7 Mamba-2: From Scan to Matrix Multiplication
+
+There is a problem with Mamba-1's parallel scan: **Unable to utilize Tensor Core**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  Mamba-1 vs Mamba-2                                                         │
+│                                                                             │
+│  Mamba-1:                                                                   │
+│  • 使用 parallel associative scan                                           │
+│  • Scan操作是element-wise，无法用Tensor Core                                 │
+│  • State dimension 限制为 N=16（更大会变慢）                                 │
+│  • A100: 只用到 19 TFLOPS (FP32 arithmetic)                                 │
+│                                                                             │
+│  Mamba-2:                                                                   │
+│  • 发现SSM可以写成structured matrix乘法                                      │
+│  • 用矩阵乘法替代scan（可以用Tensor Core！）                                  │
+│  • State dimension 可以扩展到 N=64, 128                                     │
+│  • A100: 可用 312 TFLOPS (BF16 matmul) - 16x 提升！                         │
+│                                                                             │
+│                                                │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+

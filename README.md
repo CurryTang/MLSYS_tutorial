@@ -1,33 +1,36 @@
-# MLSYS Tutorial Notes Site
+# MLSYS Tutorial
 
-React + Vite frontend for browsing Markdown notes copied into `notes/`.
+This repository hosts the MLSYS tutorial notes site.
 
-## Local development
+## Live Site
+
+**GitHub Pages:** [https://currytang.github.io/MLSYS_tutorial/](https://currytang.github.io/MLSYS_tutorial/)
+
+The site publishes the curated MLSYS tutorials from `notes/Mlsys/` and now supports both Chinese and English versions in the frontend reader.
+
+## Repository Layout
+
+- `notes/Mlsys/`: tutorial markdown files and local assets
+- `src/`: React frontend for browsing and rendering the tutorials
+- `docs/plans/`: design and implementation notes for repo changes
+
+## Local Development
 
 ```bash
 npm install
 npm run dev
 ```
 
-## Build
+## Verification
 
 ```bash
+npm test
+npm run lint
 npm run build
-npm run preview
 ```
 
-## GitHub Pages deployment
+## Deployment Notes
 
-This repo includes `.github/workflows/deploy-pages.yml`.
+GitHub Pages deployment is handled by `.github/workflows/deploy-pages.yml`.
 
-1. Push this project to GitHub.
-2. In GitHub repo settings, enable **Pages** and choose **GitHub Actions** as the source.
-3. Push to `main` to auto-deploy.
-
-Vite base path is inferred from `GITHUB_REPOSITORY` in CI.
-If you need a custom path, set `VITE_BASE_PATH` during build.
-
-## Notes content
-
-Published notes are loaded from `notes/Mlsys/` and controlled by an allowlist in `src/App.jsx` (`PUBLISHED_NOTE_PATHS`).
-Draft notes can remain in `notes/Mlsys/` but stay ignored by git until they are ready.
+Vite infers the production base path from `GITHUB_REPOSITORY` in CI. If needed, override it with `VITE_BASE_PATH` during the build.
