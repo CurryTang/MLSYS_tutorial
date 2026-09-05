@@ -15,32 +15,11 @@ Core Mental Models of the Financial System:
 
 ---
 
-```mermaid
-graph TD
-    A["Global Financial Architecture"] --> B["Market Structure & Participant Ecosystem<br>(Exchanges, Buy-Side, Sell-Side, Market Makers)"]
-    A --> C["Asset Classes Landscape<br>(Equities, Fixed Income, ETFs, FX, Commodities)"]
-    A --> D["Derivatives Ecosystem & Hedging<br>(Forwards, Futures, Swaps, Options, Greeks)"]
-    A --> E["Asset Allocation & Quant Philosophy<br>(60/40, Risk Parity, Alpha vs Beta)"]
-    
-    B --> B1["Primary Markets (Capital Formation) vs Secondary (Liquidity/Pricing)"]
-    B --> B2["Exchange-Traded (CME/NYSE) vs Over-the-Counter (OTC)"]
-    B --> B3["Buy-Side (Hedge Funds/Pensions) vs Sell-Side (Banks) vs MM (Jane Street/Citadel)"]
-    
-    C --> C1["Equities (Residual Claims & Short Selling Mechanics)"]
-    C --> C2["Fixed Income (Treasuries, Credit Spreads, Yield Curve Inversion)"]
-    C --> C3["ETFs (In-Kind Creation/Redemption & AP Arbitrage)"]
-    C --> C4["FX & Commodities (Global Liquidity & Backwardation/Contango)"]
-    
-    D --> D1["Forwards & Futures (Agricultural Origins, Clearinghouse, MTM)"]
-    D --> D2["Swaps ($500T Giant: IRS, CDS & The Big Short)"]
-    D --> D3["Options Foundations (Asymmetric Payoffs, Calls vs Puts, Parity)"]
-    D --> D4["The Greeks Trading Language (Delta, Gamma, Theta, Vega)"]
-    D --> D5["Volatility Surfaces (1987 Crash & Crashophobia Skew)"]
-    
-    E --> E1["Diversification: The Only Free Lunch"]
-    E --> E2["The 60/40 Trap: Equities Driving >90% Portfolio Volatility"]
-    E --> E3["Bridgewater All Weather & Risk Parity: Balancing Risk Budgets"]
-```
+> 🧭 **Core Knowledge Architecture Map**
+> - **Market Structure & Participant Ecosystem**: Primary Markets (Capital Formation) vs Secondary (Liquidity/Pricing) \| Exchange-Traded (CME/NYSE) vs OTC Customized \| Buy-Side (Hedge Funds/Pensions) vs Sell-Side (Banks) vs Market Makers (Jane Street/Citadel)
+> - **Asset Classes Landscape**: Equities (Residual Claims & Short Selling Mechanics) \| Fixed Income (Treasuries, Credit Spreads, Yield Curve Inversion) \| ETFs (In-Kind Creation/Redemption AP Arbitrage) \| FX & Commodities (Global Liquidity & Backwardation/Contango)
+> - **Derivatives Ecosystem & Hedging**: Forwards & Futures (Agricultural Origins, Clearinghouse Novation, MTM) \| Swaps (\$500T Giant: IRS, CDS & 2008 Subprime Crisis) \| Options Foundations (Asymmetric Payoffs, Calls vs Puts, Parity) \| The Greeks Trading Language ($\Delta, \Gamma, \Theta, \mathcal{V}$) \| Volatility Surfaces (1987 Crash & Crashophobia Skew)
+> - **Asset Allocation & Quant Philosophy**: Diversification (The Only Free Lunch in Finance) \| The 60/40 Trap (Equities Dominating >90% Portfolio Risk) \| Bridgewater All Weather & Risk Parity (Balancing Risk Budgets)
 
 ---
 
@@ -188,19 +167,12 @@ Global bond markets (over \$130 trillion) dwarf equity markets. The adage goes: 
 - **Why Do ETF Market Prices Never Severely Diverge from Net Asset Value (NAV)?**
   Through the **In-Kind Creation and Redemption Mechanism** conducted by **Authorized Participants (APs)**:
 
-```mermaid
-sequenceDiagram
-    participant Public as Secondary Market Traders
-    participant AP as Authorized Participant (AP / Market Maker)
-    participant Issuer as ETF Issuer (BlackRock / Vanguard)
-    
-    Note over Public,AP: Premium Scenario: ETF price $102 > underlying basket NAV $100
-    AP->>Public: Purchase underlying stock basket in cash market for $100
-    AP->>Issuer: Deliver physical stock basket to Issuer (Creation)
-    Issuer-->>AP: Mint and deliver 1 new ETF share
-    AP->>Public: Sell new ETF share in secondary market for $102
-    Note over AP: AP locks in $2 risk-free arbitrage profit; supply increases, premium collapses
-```
+| Stage | Participant | Action | Pricing Arbitrage Feedback |
+| :--- | :--- | :--- | :--- |
+| **1. Premium Emerges** | Secondary Market Traders | Robust demand pushes ETF price to \$102, above underlying basket NAV (\$100) | Opens a \$2 / share risk-free arbitrage opportunity |
+| **2. Buy Stock Basket** | Authorized Participant (AP / MM) | AP buys the underlying index basket in cash equities for \$100 | Cash equity demand sees minor buying flow |
+| **3. In-Kind Creation** | ETF Issuer (BlackRock / Vanguard) | AP deposits stock basket with issuer in exchange for 1 new ETF share | Fund AUM grows, ETF total share supply expands |
+| **4. Secondary Sell-Off** | Secondary Market | AP dumps new ETF share into the market at \$102, pocketing \$2 profit | Secondary market ETF supply swells, driving price back down to \$100 |
 
 This structural arbitrage guarantees that ETFs remain liquid and pegged to their fair asset value throughout intraday trading.
 
