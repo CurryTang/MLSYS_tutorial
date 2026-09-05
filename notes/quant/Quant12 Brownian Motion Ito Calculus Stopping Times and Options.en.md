@@ -751,7 +751,7 @@ $$
 
 ---
 
-### 6.2 Core Assumptions of the Black-Scholes-Merton World
+### 6.3 Core Assumptions of the Black-Scholes-Merton World
 
 1. **Asset Dynamics**: The underlying price follows a GBM with constant drift $\mu$ and constant volatility $\sigma$;
 2. **Frictionless Markets**: Zero transaction costs, zero taxes, and zero bid-ask spread with continuous trading of arbitrary fractional shares;
@@ -762,7 +762,54 @@ $$
 
 ---
 
-### 6.3 Dual Derivations of the Black-Scholes PDE
+### 6.4 Historical Background & The Paradigm Shift: From Bachelier's Conundrum to No-Arbitrage Replication
+
+#### (1) The 70-Year Impasse and the Subjective Discount Rate Trap
+
+Prior to the 1973 breakthrough by Fischer Black, Myron Scholes, and Robert C. Merton, quantitative economics was trapped in a conceptual dead-end regarding option valuation for over seven decades:
+
+* **Louis Bachelier (1900)**:
+  - In his Sorbonne doctoral thesis *Théorie de la spéculation*, Bachelier introduced **Arithmetic Brownian Motion (ABM)** to model stock prices and price options, preceding Einstein's physical Brownian motion work by 5 years;
+  - However, his model suffered from three fatal shortcomings:
+    1. **Negative Stock Prices**: Arithmetic Brownian motion allows asset prices to become negative, violating limited corporate liability;
+    2. **Subjective Drift Dependence**: His formula explicitly depended on traders' subjective forecasts of market direction;
+    3. **Absence of Time Value of Money**: It ignored discounting and the risk-free rate $r$.
+* **Paul Samuelson (1965) & James Boness (1964)**:
+  - Upgraded asset modeling to **Geometric Brownian Motion (GBM)**, enforcing strictly positive log-normal prices;
+  - However, they ran directly into the **discount rate trap**:
+    $$\text{"At what interest rate should an option's expected future terminal payoff be discounted back to present value?"}$$
+    - Discounting at the risk-free rate $r$ was rejected on economic grounds because options are highly levered, risky contingent claims;
+    - Discounting at the underlying stock's expected return $\mu$ was invalid because options carry far higher percentage volatility and asymmetric convexity than the underlying equity;
+    - Introducing an ad-hoc option discount rate $\beta$ meant fair value depended crucially on the **aggregate risk aversion** of all market investors.
+  - **The Conceptual Impasse**: Because the subjective psychological risk preferences of thousands of market participants cannot be measured or aggregated, economists believed that an objective, universal closed-form option pricing formula was mathematically impossible!
+
+#### (2) The 1973 Breakthrough: From Speculative Forecast to Synthetic Replication
+
+In 1973, Fischer Black and Myron Scholes published *The Pricing of Options and Corporate Liabilities* in the *Journal of Political Economy*, while Robert C. Merton published *Theory of Rational Option Pricing* in the *Bell Journal of Economics and Management Science*.
+
+Their groundbreaking realization can be summarized in a single governing principle:
+$$\mathbf{\text{"The fair price of an option is not determined by subjective expectations of future price growth, but by the marginal cost of synthetically replicating it in the spot market!"}}$$
+
+* **Dynamic Hedging & Replication**:
+  Both the option price $V(t, S_t)$ and the underlying stock $S_t$ are driven by the **exact same single source of continuous stochastic risk (Brownian motion $W_t$)**. By dynamically updating a hedge ratio:
+  $$\Delta_t = \frac{\partial V}{\partial S}$$
+  funded through risk-free borrowing, the random fluctuations $dW_t$ of the short option position and the long stock shares **cancel each other out 100% on an infinitesimal tick-by-tick basis**!
+* **The Law of One Price**:
+  The hedged portfolio $\Pi_t = V_t - \Delta_t S_t$ is **instantaneously riskless** over interval $dt$ (its variance is zero). Under no-arbitrage, any asset bearing zero variance **must earn strictly the risk-free rate $r$**!
+* **The Profound Consequence**:
+  - The subjective physical drift $\mu$ and all investor risk preferences **completely cancel out and evaporate** from the valuation equation!
+  - Option value depends exclusively on five objective, observable parameters: spot $S$, strike $K$, time to maturity $T-t$, risk-free rate $r$, and volatility $\sigma$;
+  - A seemingly intractable financial conundrum was mapped directly to a classical **parabolic partial differential equation (the heat diffusion equation)** from mathematical physics!
+
+#### (3) The Industrial Revolution of Derivatives Market Making (Wall Street & 1997 Nobel Prize)
+
+* **Arrival of the CBOE Era**: In April 1973, the Chicago Board Options Exchange (CBOE) launched listed options trading. BSM became the industrial production calculator for Wall Street option market makers;
+* **From Directional Bets to Algorithmic Market Making**: Traders loaded BSM code into handheld Texas Instruments (TI) calculators hung around their necks in the trading pits. Market makers no longer had to gamble on market direction; continuous dynamic hedging allowed them to harvest volatility spreads (Gamma scalping);
+* **The 1997 Nobel Memorial Prize in Economic Sciences**: Awarded to Myron Scholes and Robert C. Merton (Fischer Black passed away in 1995; the Nobel committee explicitly honored Black's seminal contribution).
+
+---
+
+### 6.5 Dual Derivations of the Black-Scholes PDE
 
 Let $V(t, S)$ denote the fair price of a European derivative with terminal payoff $\Phi(S_T)$ at maturity $T$.
 
@@ -826,7 +873,7 @@ By the **Feynman-Kac Theorem**, this conditional expectation solves the BSM PDE 
 
 ---
 
-### 6.4 Analytical Closed-Form Derivation of the Call and Put Formulas
+### 6.6 Analytical Closed-Form Derivation of the Call and Put Formulas
 
 Consider a European Call option with payoff $\Phi(S_T) = \max(S_T - K, 0)$ and time to maturity $\tau = T - t$.
 Under $\mathbb{Q}$, the terminal price is $S_T = S_t \exp\left( (r - \frac{1}{2}\sigma^2)\tau + \sigma\sqrt{\tau} Z \right)$ where $Z \sim \mathcal{N}(0, 1)$.
@@ -886,7 +933,7 @@ $$
 
 ---
 
-### 6.5 Financial and Probabilistic Interpretations of $d_1$ and $d_2$
+### 6.7 Financial and Probabilistic Interpretations of $d_1$ and $d_2$
 
 The pricing formula $C = S\Phi(d_1) - K e^{-r\tau}\Phi(d_2)$ represents an exact balance between two cash flow legs:
 * **Asset Inflow Leg**: $S \cdot \Phi(d_1)$ — Discounted expected stock value upon exercise (replicating hedge position value $\Delta \cdot S$);
@@ -904,7 +951,7 @@ This identity guarantees that cross terms vanish when calculating Greeks.
 
 ---
 
-### 6.6 Put-Call Parity
+### 6.8 Put-Call Parity
 
 For European options with identical strike $K$ and maturity $T$:
 
@@ -914,7 +961,7 @@ $$
 
 ---
 
-### 6.7 Black-Scholes Greeks: Multi-Dimensional Risk Decomposition for Market Makers
+### 6.9 Black-Scholes Greeks: Multi-Dimensional Risk Decomposition for Market Makers
 
 #### (1) Why do Quantitative Traders Define "The Greeks"?
 An option price is a highly non-linear multivariate surface: $V = V(S, t, \sigma, r, K)$.
@@ -954,7 +1001,7 @@ $$\boxed{\Theta + \frac{1}{2}\sigma^2 S^2 \Gamma = r(V - S\Delta)}$$
 
 ---
 
-### 6.8 Dynamic Delta Hedging & Volatility Arbitrage
+### 6.10 Dynamic Delta Hedging & Volatility Arbitrage
 
 In practical market making, options are priced with implied vol $\sigma_I$, while the underlying moves with realized vol $\sigma_R$:
 
