@@ -560,24 +560,16 @@ This collapses the continuous double covariance integral into a simple one-dimen
 
 ---
 
-## Module 5: Derivatives Landscape, Stopping Times & Extreme Values
+## Module 5: Financial Derivatives Landscape & Option Exercise Styles
 
 ### 1. Foundations: The Financial Derivatives Landscape (Forwards/Futures vs. Options)
 
 > 📘 **Comprehensive Primer**: For a complete overview of foundational asset classes (equities, bond duration/convexity, ETF arbitrage), DeFi AMMs, and modern portfolio theory (CAPM/Sharpe/Markowitz), see the primer: [[Quant14 Financial Markets Asset Classes and Portfolio Theory.md|Quant 14 · Financial Engineering & Quant Trading Primer: Asset Classes, Derivatives, AMM, Portfolio Theory & Arbitrage]].
 
-Before diving into stochastic stopping times and extreme value theory, we must establish the structural architecture of modern financial derivatives:
-
-```mermaid
-graph TD
-    A["Financial Derivatives Architecture"] --> B["Linear Derivatives<br/><b>【Forwards & Futures】</b><br/>Two-sided mandatory obligation<br/>Linear Payoff: S_T - K"]
-    A --> C["Non-Linear Derivatives<br/><b>【Options】</b><br/>Asymmetric Right vs. Obligation<br/>Convex Payoff: max(S_T - K, 0)"]
-    
-    C --> D["Classification by Exercise Mechanism"]
-    D --> E["European Options<br/>Exercisable ONLY on maturity T<br/><b>【Fixed-Endpoint Conditional Expectation】</b>"]
-    D --> F["American Options<br/>Exercisable at ANY stopping time τ ≤ T<br/><b>【Optimal Stopping & Free Boundary Problem】</b>"]
-    D --> G["Path-Dependent Exotic Options<br/>Barrier Options / Asian Options<br/><b>【First Hitting Times & Running Extrema】</b>"]
-```
+Before exploring stochastic calculus and options pricing, we establish the structural taxonomy of financial derivatives:
+* **Linear Derivatives**: Forwards and Futures — symmetric mandatory execution obligations with linear payoff: $\text{Payoff} = S_T - K$;
+* **Non-Linear Derivatives**: Options — asymmetric right versus obligation with convex payoff: $\text{Payoff} = \max(S_T - K, 0)$;
+* **Exercise Mechanisms**: European style (exercisable strictly on maturity $T$), American style (exercisable continuously at any stopping time $\tau \le T$), and Path-Dependent Exotics (barrier hitting times and lookback running extrema).
 
 #### (1) Linear Contracts: Forwards & Futures
 * **Core Mechanism**: Both parties enter a binding agreement to buy or sell the underlying asset at a predetermined delivery price $K$ on maturity date $T$;
@@ -696,60 +688,6 @@ Beyond European and American options, stopping times apply directly to exotic de
 * **Barrier Options**: Triggered (knock-in or knock-out) when price touches level $B$, governed by the **First Hitting Time** $\tau_B = \inf\{t \ge 0 : S_t = B\}$;
 * **Lookback Options**: Payoffs depend on historical extrema (e.g., $\max_{0 \le t \le T} S_t$), analytically priced via the **Reflection Principle and Running Maximum distribution** of Brownian motion.
 
----
-
-### 3. Exponential Martingales & Wald's Identity
-
-For any $\theta \in \mathbb{R}$, the Doléans-Dade exponential martingale:
-
-$$
-M_t^\theta = \exp\left( \theta W_t - \frac{1}{2} \theta^2 t \right)
-$$
-
-satisfies $dM_t^\theta = \theta M_t^\theta dW_t$. Under the Optional Stopping Theorem (OST):
-
-$$
-\mathbb{E}\left[ \exp\left( \theta W_\tau - \frac{1}{2}\theta^2 \tau \right) \right] = 1 \quad (\text{Wald's Martingale Identity})
-$$
-
----
-
-### 4. Two-Sided Absorbing Boundaries (Continuous Gambler's Ruin)
-
-For $\tau = \inf\{t \ge 0 : W_t \notin (-b, a)\}$ ($a, b > 0$):
-1. **Hitting Probability**: Applying OST to martingale $W_t$:
-   $$\mathbb{E}[W_\tau] = 0 \implies a P(W_\tau = a) - b (1 - P(W_\tau = a)) = 0 \implies \boxed{P(\text{hit } a \text{ first}) = \frac{b}{a+b}}$$
-2. **Expected Exit Time**: Applying OST to martingale $W_t^2 - t$:
-   $$\mathbb{E}[W_\tau^2 - \tau] = 0 \implies \boxed{\mathbb{E}[\tau] = \mathbb{E}[W_\tau^2] = a^2 \frac{b}{a+b} + b^2 \frac{a}{a+b} = ab}$$
-
----
-
-### 5. The Reflection Principle & Running Maximum Distribution
-
-Let $M_t = \max_{0 \le s \le t} W_s$ and $\tau_a = \inf\{s \ge 0 : W_s = a\}$ for $a > 0$.
-
-```reflection-principle-demo
-```
-
-**Geometric Reflection Argument**:
-The event $\{M_t \ge a\}$ is identical to $\{\tau_a \le t\}$.
-At hitting time $\tau_a$, the path reaches $a$. By the **Strong Markov Property**, the residual path $\widetilde{W}_s = W_{\tau_a + s} - a$ ($s \ge 0$) is an independent Brownian motion. By spatial mirror symmetry across level $a$:
-
-$$
-\mathbb{P}(W_t \ge a \mid \tau_a \le t) = \mathbb{P}(W_t \le a \mid \tau_a \le t) = \frac{1}{2}
-$$
-
-Yielding the **Reflection Principle Formula**:
-
-$$
-\mathbb{P}(M_t \ge a) = \mathbb{P}(\tau_a \le t) = 2 \mathbb{P}(W_t \ge a) = 2 \left( 1 - \Phi\left( \frac{a}{\sqrt{t}} \right) \right)
-$$
-
-Differentiating with respect to $t$ gives the **Lévy Distribution** density for hitting time $\tau_a$:
-
-$$
-f_{\tau_a}(t) = \frac{d}{dt} \mathbb{P}(\tau_a \le t) = \frac{a}{\sqrt{2\pi t^3}} \exp\left( -\frac{a^2}{2t} \right) \quad (t > 0)
-$$
 
 ---
 
@@ -950,19 +888,9 @@ $$
 
 ### 6.5 Financial and Probabilistic Interpretations of $d_1$ and $d_2$
 
-```mermaid
-flowchart TD
-  Formula["C = S·Φ(d_1) - K·e^(-rτ)·Φ(d_2)"]
-  Term1["S·Φ(d_1)<br/>Discounted expected stock value upon exercise<br/>(Hedge Position Value = Δ·S)"]
-  Term2["K·e^(-rτ)·Φ(d_2)<br/>Discounted expected cash payment reserve<br/>(Discounted Strike × Exercise Probability)"]
-  D2["Φ(d_2) = Q(S_T ≥ K)<br/>Risk-neutral probability of finishing in-the-money"]
-  D1["Φ(d_1) = Delta<br/>Share hedge ratio<br/>(Exercise probability under Share Measure Q^S)"]
-
-  Formula --> Term1
-  Formula --> Term2
-  Term2 --> D2
-  Term1 --> D1
-```
+The pricing formula $C = S\Phi(d_1) - K e^{-r\tau}\Phi(d_2)$ represents an exact balance between two cash flow legs:
+* **Asset Inflow Leg**: $S \cdot \Phi(d_1)$ — Discounted expected stock value upon exercise (replicating hedge position value $\Delta \cdot S$);
+* **Cash Outflow Leg**: $K e^{-r\tau} \cdot \Phi(d_2)$ — Discounted expected cash payment reserve (discounted strike $\times$ exercise probability).
 
 1. **$\Phi(d_2) = \mathbb{Q}(S_T \ge K)$**: The exact risk-neutral probability that the option finishes in-the-money (ITM). $K e^{-r\tau} \Phi(d_2)$ represents the discounted cash reserve needed to deliver the strike price upon exercise.
 2. **$\Phi(d_1) = \Delta = \frac{\partial C}{\partial S}$**: The replicating delta (number of underlying shares to hold). Under the Share Measure $\mathbb{Q}^S$ (taking $S_t$ as numeraire), $\Phi(d_1) = \mathbb{Q}^S(S_T \ge K)$ is the probability of exercise.
@@ -993,15 +921,6 @@ An option price is a highly non-linear multivariate surface: $V = V(S, t, \sigma
 A trading desk manages portfolios of thousands of option contracts across strikes and maturities. Traders cannot intuitively visualize five-dimensional surfaces; they use **Multivariate Taylor Expansions** to decompose aggregate portfolio risk into first- and second-order directional sensitivities known across Wall Street as **The Greeks**:
 
 $$dV \approx \underbrace{\frac{\partial V}{\partial S}}_{\Delta} dS + \underbrace{\frac{1}{2} \frac{\partial^2 V}{\partial S^2}}_{\Gamma} (dS)^2 + \underbrace{\frac{\partial V}{\partial t}}_{\Theta} dt + \underbrace{\frac{\partial V}{\partial \sigma}}_{\text{Vega}} d\sigma + \underbrace{\frac{\partial V}{\partial r}}_{ ho} dr$$
-
-```mermaid
-graph TD
-    V["Option Price Non-Linear Surface V(S, t, σ, r, K)"] --> D["Delta (Δ = ∂V/∂S)<br/><b>First-Order Directional Risk</b><br/>Hedge ratio · Underlying share exposure"]
-    V --> G["Gamma (Γ = ∂²V/∂S²)<br/><b>Second-Order Curvature Risk</b><br/>Rate of change of Delta · Volatility harvesting source"]
-    V --> T["Theta (Θ = ∂V/∂t)<br/><b>Time Value Decay Rate</b><br/>Daily rent paid/collected for optionality"]
-    V --> VE["Vega (𝒱 = ∂V/∂σ)<br/><b>Implied Volatility Sensitivity</b><br/>VIX / market panic index exposure"]
-    V --> R["Rho (ρ = ∂V/∂r)<br/><b>Interest Rate Sensitivity</b><br/>Central bank rate hike/cut exposure"]
-```
 
 ---
 

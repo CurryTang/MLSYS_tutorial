@@ -575,24 +575,16 @@ $$\mathbb{E}\left[ \left( \int_0^T H_t dW_t \right)^2 \right] = \int_0^T \int_0^
 
 ---
 
-## 模块五：金融衍生品架构、停时理论与极值分析（Derivatives Landscape, Stopping Times & Extreme Values）
+## 模块五：金融衍生品架构与期权行权机制（Financial Derivatives Landscape & Exercise Styles）
 
 ### 1. 前置通识：金融衍生品家族全景架构（期货/远期 vs. 期权）
 
 > 📘 **系统通识进阶**：关于基础金融标的（股票融券/债券久期/ETF折溢价套利）、加密原生 AMM 与现代资产组合理论（CAPM/Sharpe/Markowitz）的全景详尽推导，请参阅前置通识篇：[[Quant14 Financial Markets Asset Classes and Portfolio Theory.md|Quant 14 · 金融工程与量化投资通识：基础资产、衍生品、AMM、资产组合理论与套利定价]]。
 
-在深入停时与随机分析之前，必须首先建立现代金融衍生品（Financial Derivatives）的完整认知地图。
-
-```mermaid
-graph TD
-    A["金融衍生品体系 (Financial Derivatives)"] --> B["线性衍生品 (Linear Contracts)<br/><b>【远期 Forwards / 期货 Futures】</b><br/>双向强制履约义务 (Obligation)<br/>收益为直线：Payoff = S_T - K"]
-    A --> C["非线性衍生品 (Non-Linear Contracts)<br/><b>【期权 Options】</b><br/>权利与义务不对称 (Right vs. Obligation)<br/>收益为折线：Payoff = max(S_T - K, 0)"]
-    
-    C --> D["按行权时间机制划分 (Exercise Style)"]
-    D --> E["欧式期权 (European Options)<br/>仅在到期日 T 行权<br/><b>【固定端点条件期望定价】</b>"]
-    D --> F["美式期权 (American Options)<br/>到期前任意时刻 τ ≤ T 提前行权<br/><b>【最优停时与自由边界问题】</b>"]
-    D --> G["路径依赖奇异期权 (Path-Dependent Exotics)<br/>障碍期权 Barrier / 亚式期权 Asian<br/><b>【首达时间与运行极值分布】</b>"]
-```
+在深入期权定价与随机微积分之前，首先明确现代金融衍生品（Financial Derivatives）的核心分类与特征：
+* **线性衍生品（Linear Contracts）**：远期（Forwards）与期货（Futures）——双向强制履约义务，收益为直线：$\text{Payoff} = S_T - K$；
+* **非线性衍生品（Non-Linear Contracts）**：期权（Options）——权利与义务不对称，收益呈凸性折线：$\text{Payoff} = \max(S_T - K, 0)$；
+* **按行权机制划分（Exercise Styles）**：欧式期权（仅在到期日 $T$ 行权）、美式期权（可在到期前任意时刻 $\tau \le T$ 提前行权）、奇异期权（障碍期权与回望期权等）。
 
 #### （1）线性合约：远期（Forwards）与期货（Futures）
 * **核心特征**：交易双方在未来某一确定时刻 $T$，以预先约定的价格 $K$（交割价）强制买入或卖出标的资产；
@@ -713,72 +705,6 @@ $$V_{\text{Am}}(t, S_t) = \max\left( \Phi(S_t), \; C(t, S_t) \right)$$
 * **回望期权（Lookback Options）**：
   到期损益取决于存续期间资产运行的极值（如浮动行权价 $\max_{0 \le t \le T} S_t - S_T$），其定价核心直接由**布朗运动的运行极值分布与反射原理（Reflection Principle）**完全解析求解！
 
----
-
-### 3. 指数鞅与 Wald 恒等式
-
-在研究布朗运动穿透边界的停时问题时，指数鞅是最强有力的解析计算工具。
-
-对于任意实常数 $\theta \in \mathbb{R}$，定义 **Doléans-Dade 指数鞅**：
-
-$$
-M_t^\theta = \exp\left( \theta W_t - \frac{1}{2} \theta^2 t \right)
-$$
-
-应用伊藤引理：$dM_t^\theta = \theta M_t^\theta dW_t$，由于无 $dt$ 漂移项且满足 Novikov 条件，故 $M_t^\theta$ 是一个真正的鞅。
-
-**最优停时定理（OST）应用**：设 $\tau$ 为满足 OST 条件的停时，则：
-
-$$
-\mathbb{E}\left[ \exp\left( \theta W_\tau - \frac{1}{2} \theta^2 \tau \right) \right] = \mathbb{E}[M_0^\theta] = 1 \quad (\text{Wald 鞅恒等式})
-$$
-
----
-
-### 4. 首达时间（First Hitting Time）与双吸收边界（连续赌徒破产问题）
-
-考虑常数边界 $a > 0, b > 0$，定义停时 $\tau = \inf\{t \ge 0 : W_t = a \text{ 或 } W_t = -b\}$：
-1. **到达边界的概率**：对鞅 $W_t$ 用 OST 得 $\mathbb{E}[W_\tau] = 0 \implies a P(W_\tau = a) - b (1 - P(W_\tau = a)) = 0$，解得：
-
-$$
-P(\text{先到达 } a) = \frac{b}{a + b}
-$$
-
-2. **期望退出时间**：对鞅 $W_t^2 - t$ 用 OST 得 $\mathbb{E}[W_\tau^2 - \tau] = 0 \implies \mathbb{E}[\tau] = \mathbb{E}[W_\tau^2]$：
-
-$$
-\mathbb{E}[\tau] = a^2 \cdot \frac{b}{a+b} + (-b)^2 \cdot \frac{a}{a+b} = \frac{a^2 b + a b^2}{a+b} = a b
-$$
-
----
-
-### 5. 反射原理（The Reflection Principle）与运行极值分布
-
-设 $M_t = \max_{0 \le s \le t} W_s$ 为时间 $t$ 内的运行最大值（Running Maximum），$a > 0$ 为给定阈值，$\tau_a = \inf\{s \ge 0 : W_s = a\}$ 为首次触达时间。
-
-```reflection-principle-demo
-```
-
-**几何反射论证（Geometric Reflection Argument）**：
-事件 $\{M_t \ge a\}$ 等价于 $\{\tau_a \le t\}$。
-在时刻 $\tau_a$，轨道到达水平 $a$。根据布朗运动的**强马尔可夫性（Strong Markov Property）**，残余过程 $\widetilde{W}_s = W_{\tau_a + s} - a$（$s \ge 0$）是一条独立的标准布朗运动。
-由空间镜像对称性，在时刻 $t$，该残余路径位于水平 $a$ 之上或之下的概率严格对称相等：
-
-$$
-\mathbb{P}(W_t \ge a \mid \tau_a \le t) = \mathbb{P}(W_t \le a \mid \tau_a \le t) = \frac{1}{2}
-$$
-
-由此得到著名的 **反射原理公式**：
-
-$$
-\mathbb{P}(M_t \ge a) = \mathbb{P}(\tau_a \le t) = 2 \mathbb{P}(W_t \ge a) = 2 \left( 1 - \Phi\left( \frac{a}{\sqrt{t}} \right) \right)
-$$
-
-对 $t$ 求导，得到首次到达水平 $a$ 的时间密度函数（**Lévy 分布**）：
-
-$$
-f_{\tau_a}(t) = \frac{d}{dt} \mathbb{P}(\tau_a \le t) = \frac{a}{\sqrt{2\pi t^3}} \exp\left( -\frac{a^2}{2t} \right) \quad (t > 0)
-$$
 
 ---
 
@@ -1039,19 +965,9 @@ $$
 
 在量化交易面试中，面试官最喜欢追问："请用直觉解释 $d_1$ 与 $d_2$ 以及 $\Phi(d_1)$ 和 $\Phi(d_2)$ 的物理本质是什么？"
 
-```mermaid
-flowchart TD
-  Formula["C = S·Φ(d_1) - K·e^(-rτ)·Φ(d_2)"]
-  Term1["S·Φ(d_1)<br/>持有标的资产的折现期望现值<br/>(对冲持仓市值 = Δ·S)"]
-  Term2["K·e^(-rτ)·Φ(d_2)<br/>行权所需现金支出的折现期望储备<br/>(折现行权价 × 行权概率)"]
-  D2["Φ(d_2) = Q(S_T ≥ K)<br/>风险中性行权概率<br/>(Finish In-The-Money)"]
-  D1["Φ(d_1) = Delta<br/>复制期权所需的资产份数<br/>(股票测度 Q^S 下的行权概率)"]
-
-  Formula --> Term1
-  Formula --> Term2
-  Term2 --> D2
-  Term1 --> D1
-```
+期权定价公式 $C = S\Phi(d_1) - K e^{-r\tau}\Phi(d_2)$ 本质上是两个现金流腿的平衡：
+* **资产收取端**：$S \cdot \Phi(d_1)$ —— 持有标的资产的折现期望现值（对冲持仓市值 $\Delta \cdot S$）；
+* **现金支付端**：$K e^{-r\tau} \cdot \Phi(d_2)$ —— 行权所需现金支出的折现期望储备（折现行权价 $\times$ 行权概率）。
 
 1. **$\Phi(d_2) = \mathbb{Q}(S_T \ge K)$ —— 风险中性测度下的行权概率**：
    $\Phi(d_2)$ 是在风险中性世界中，标的资产价格在到期日 $T$ 落在行权价 $K$ 之上（期权处于实值 ITM 状态）的**精确概率**。因此，$K e^{-r\tau} \Phi(d_2)$ 代表期权空头在时刻 $t$ 为了在到期日履行交割义务所需准备的**纯现金折现储备**。
@@ -1106,15 +1022,6 @@ $$
 做市商的投资组合中往往同时包含成千上万个不同行权价、不同到期日的期权合约。交易员在多维非线性曲面上无法直观把控整体风险，因此必须借助**多元泰勒展开**，将总风险在各个维度上一阶和二阶偏导拆解，这些偏导数在华尔街被统称为 **希腊字母（The Greeks）**：
 
 $$dV \approx \underbrace{\frac{\partial V}{\partial S}}_{\Delta} dS + \underbrace{\frac{1}{2} \frac{\partial^2 V}{\partial S^2}}_{\Gamma} (dS)^2 + \underbrace{\frac{\partial V}{\partial t}}_{\Theta} dt + \underbrace{\frac{\partial V}{\partial \sigma}}_{\text{Vega}} d\sigma + \underbrace{\frac{\partial V}{\partial r}}_{ ho} dr$$
-
-```mermaid
-graph TD
-    V["期权价格非线性曲面 V(S, t, σ, r, K)"] --> D["Delta (Δ = ∂V/∂S)<br/><b>标的一阶方向性风险</b><br/>对冲比率 · 现货头寸敞口"]
-    V --> G["Gamma (Γ = ∂²V/∂S²)<br/><b>二阶非线性曲率风险</b><br/>Delta变动速度 · 高抛低吸套利源泉"]
-    V --> T["Theta (Θ = ∂V/∂t)<br/><b>时间价值衰减速度</b><br/>每天流逝的期权租金"]
-    V --> VE["Vega (𝒱 = ∂V/∂σ)<br/><b>隐含波动率变动风险</b><br/>市场恐慌指数敏感度"]
-    V --> R["Rho (ρ = ∂V/∂r)<br/><b>无风险利率变动风险</b><br/>央行加息/降息敏感度"]
-```
 
 ---
 
