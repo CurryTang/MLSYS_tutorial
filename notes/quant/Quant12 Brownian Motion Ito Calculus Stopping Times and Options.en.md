@@ -597,26 +597,104 @@ graph TD
 
 ### 2. Exercise Styles: European, American & the Natural Mapping to Stopping Times
 
-#### (1) European Options
-* **Definition**: Can **ONLY be exercised on maturity date $T$**;
-* **Pricing Formula**: Expressed as a terminal conditional expectation under risk-neutral measure $\mathbb{Q}$:
-  $$V_{\text{Eur}}(t, S_t) = e^{-r(T-t)} \mathbb{E}^\mathbb{Q}[\Phi(S_T) \mid \mathcal{F}_t]$$
+#### (1) Contractual Origins & Trader Dilemma (Why Exercise Styles?)
 
-#### (2) American Options & the Optimal Stopping Problem
-* **Definition**: Can be exercised at **any continuous stopping time $\tau \in [t, T]$** prior to maturity;
-* **Mathematical Pricing Formulation**: Because the rational option holder chooses an exercise stopping time that maximizes expected payoff, American option valuation is an **Optimal Stopping Problem**:
-  $$V_{\text{Am}}(t, S_t) = \sup_{\tau \in [t, T]} \mathbb{E}^\mathbb{Q} \left[ e^{-r(\tau - t)} \Phi(S_\tau) \;\middle|\; \mathcal{F}_t \right]$$
-* **Classic Quant Interview Question: Why is it NEVER optimal to early exercise an American Call on a non-dividend-paying stock?**
-  - **Rigorous Proof**: The European call price satisfies the lower bound inequality:
-    $$C_{\text{Eur}}(t, S_t) \ge S_t - K e^{-r(T-t)} > S_t - K \quad (\text{when } r > 0 \text{ and } T > t)$$
-  - If the holder early exercises at $t$, they receive only the intrinsic value $S_t - K$;
-  - If the holder sells the option in the secondary market, they receive the fair value $C(t, S_t) > S_t - K$;
-  - **Conclusion**: Early exercise throws away both **Time Value** and the **interest earned by delaying payment of strike $K$**. Thus, $C_{\text{Am}}(t, S) = C_{\text{Eur}}(t, S)$!
-  - **Counter-example (American Put)**: For an American Put on a crashing stock (Deep ITM, $S \to 0$), **early exercise IS optimal**! Exercising early allows the holder to collect cash $K$ immediately and earn risk-free bank interest, which outweighs the negligible remaining time value. There exists a time-dependent **Optimal Early Exercise Boundary $S^*(t)$**.
+In financial engineering and options trading, options are classified by their **exercise time window**:
+* **Clarifying the Terminology**: "European", "American", and "Bermudan" are **not geographic designations**; they are standard legal clauses established by exchanges like CBOE:
+  - **European Style**: The buyer can **ONLY exercise on the expiration date $T$** (common in index options like S&P 500 SPX, settled in cash);
+  - **American Style**: The buyer can exercise at **any continuous trading moment $\tau \in [t, T]$** prior to expiration (standard for equity options like AAPL, TSLA);
+  - **Bermudan Style**: The buyer can only exercise on a **specified discrete set of dates** prior to expiration (geographically, Bermuda lies between Europe and America).
 
-#### (3) Path-Dependent Exotic Options & Brownian Extremes
-* **Barrier Options**: Knock-in or knock-out events are triggered when the asset price breaches barrier level $B$, governed by the **First Hitting Time $\tau_B = \inf\{t \ge 0 : S_t = B\}$**;
-* **Lookback Options**: Payoffs depend on the historical extreme $\max_{0 \le t \le T} S_t$ or $\min S_t$, governed by the **Reflection Principle and Running Maximum distributions**.
+* **The Trader's Dynamic Micro-Dilemma**:
+  - In a European option, the holder is passive, waiting until terminal date $T$;
+  - In an American option, the holder faces an **irreversible real-time dilemma at every microsecond $t$**:
+    $$\text{"Should I stop now and pocket the immediate intrinsic cash payoff, or continue holding to capture potential future upside?"}$$
+  - This dynamic search for the optimal liquidation boundary is mapped directly and rigorously into **Optimal Stopping Theory** and **Free Boundary Partial Differential Equations (PDEs)**!
+
+---
+
+#### (2) Mathematical Formulation & Comprehensive Notation Breakdown
+
+The no-arbitrage pricing formulas under the risk-neutral measure display striking mathematical symmetry:
+
+$$\boxed{V_{\text{Eur}}(t, S_t) = e^{-r(T-t)} \mathbb{E}^\mathbb{Q} \left[ \Phi(S_T) \;\middle|\; \mathcal{F}_t \right]}$$
+
+$$\boxed{V_{\text{Am}}(t, S_t) = \sup_{\tau \in \mathcal{T}_{[t, T]}} \mathbb{E}^\mathbb{Q} \left[ e^{-r(\tau - t)} \Phi(S_\tau) \;\middle|\; \mathcal{F}_t \right]}$$
+
+A comprehensive breakdown of each mathematical notation and its financial trading meaning:
+
+| Notation | Mathematical Definition | Financial / Trading Meaning | Trader's Intuition |
+|---|---|---|---|
+| **$t$ & $T$** | Current time parameter and terminal horizon | $t$ is current valuation time; $T$ is contract maturity / expiration | $T - t$ is remaining time to maturity |
+| **$S_t$** | State of continuous stochastic process at $t$ | Spot market price of underlying asset at $t$ | Follows Geometric Brownian Motion (GBM): $dS_t = r S_t dt + \sigma S_t dW_t^\mathbb{Q}$ |
+| **$r$** | Continuous compounding drift parameter | Risk-free interest rate in the economy | Opportunity cost of capital / time value of money |
+| **$e^{-r(T-t)}$ / $e^{-r(\tau-t)}$** | Discount Factor | Present value multiplier | Future \$1 received at $\tau$ is worth only $e^{-r(\tau-t)}$ today |
+| **$\mathbb{Q}$** | Equivalent Martingale Measure | **Risk-Neutral Measure** | Under no-arbitrage, discounted asset prices are martingales under $\mathbb{Q}$, drifting at rate $r$ rather than real-world $\mu$ |
+| **$\mathcal{F}_t$** | Filtration (Information history) | **All publicly observable market history up to time $t$** | $\mathbb{E}^\mathbb{Q}[\cdot \mid \mathcal{F}_t]$ is conditional expectation given known historical information |
+| **$\Phi(S)$** | Payoff Function | Immediate **intrinsic value** realized upon exercise | Call: $\Phi(S) = (S - K)^+$; Put: $\Phi(S) = (K - S)^+$ ($K$ is strike price) |
+| **$\tau$** | Stopping Time Random Variable | **The random moment the holder chooses to early-exercise** | **Core constraint**: $\{\tau \le s\} \in \mathcal{F}_s$. **Trader rule**: decisions can only use past and present prices, **strictly no peeking into the future**! |
+| **$\mathcal{T}_{[t, T]}$** | Family of Stopping Times | The set of **all admissible adapted stopping times** in $[t, T]$ | The candidate set of all valid exercise strategies |
+| **$\sup_{\tau}$** | Supremum Operator | **Optimal Decision Search** | The rational option holder chooses an **optimal stopping time $\tau^* \in \mathcal{T}_{[t, T]}$** to maximize discounted expected payoff |
+
+---
+
+#### (3) Deep Mathematical Mapping: Stopping Times to Free Boundary Problems
+
+At each moment $t$, the American option holder evaluates:
+1. **Immediate Exercise Value (Intrinsic Value)**: $\Phi(S_t)$；
+2. **Continuation Value**:
+   $$C(t, S_t) = \mathbb{E}^\mathbb{Q} \left[ e^{-r(\tau^* - t)} \Phi(S_{\tau^*}) \;\middle|\; \mathcal{F}_t \right] \quad (\text{for } \tau^* > t)$$
+
+The fair market value of the American option is the upper envelope:
+$$V_{\text{Am}}(t, S_t) = \max\left( \Phi(S_t), \; C(t, S_t) \right)$$
+
+This partitions the price-time state space $(t, S)$ into two regions separated by an unknown time-varying curve $S^*(t)$:
+
+```text
+Underlying Stock Price S
+     ^
+     |     [Continuation Region C]
+     |     V_Am(t, S) > Φ(S)
+     |     Holding the option is superior to exercising; satisfies Black-Scholes PDE
+     |
+  S*(t) - - - - - - - - - - - - - - - - - - - - - Optimal Early Exercise Free Boundary
+     |     [Stopping Region S]
+     |     V_Am(t, S) = Φ(S)
+     |     Option price is pinned to intrinsic value; must exercise immediately!
+     +---------------------------------------------> Time t (Maturity T)
+```
+
+* **The Free Boundary $S^*(t)$**: Because the boundary $S^*(t)$ is unknown a priori and must be solved simultaneously with the PDE, **American options have no simple closed-form Black-Scholes analytical formula**. In practice, they are solved via numerical methods (Binomial Trees, Finite Difference Methods, or Longstaff-Schwartz Least Squares Monte Carlo LSM).
+
+---
+
+#### (4) Classic Quant Interview Twin Propositions
+
+##### Proposition 1: Why is it NEVER optimal to early-exercise an American Call on a non-dividend-paying stock?
+* **Rigorous Proof**:
+  Under no-arbitrage, the European call satisfies:
+  $$C_{\text{Eur}}(t, S_t) \ge S_t - K e^{-r(T-t)} > S_t - K \quad (\text{for } r > 0 \text{ and } T > t)$$
+  - Early exercising yields only $S_t - K$;
+  - Selling the option in the secondary market yields fair value $C(t, S_t) > S_t - K$;
+  - Exercising early forfeits time value and forfeits interest earned on strike cash $K$.
+* **Conclusion**: The optimal stopping time collapses to the terminal boundary $\tau^* = T$. Hence, **an American Call on a non-dividend stock is identically valued to a European Call ($C_{\text{Am}} = C_{\text{Eur}}$)**.
+
+---
+
+##### Proposition 2: Why MUST Deep In-The-Money American Puts be Early-Exercised?
+* **Counter-Proof via Extremes**:
+  Consider an underlying firm going bankrupt ($S_t \to 0$). Intrinsic payoff hits its theoretical maximum: $\Phi(S_t) = K - 0 = K$.
+  - **Strategy A (Hold to maturity $T$)**: Collect $K$ at maturity date $T$;
+  - **Strategy B (Exercise immediately at $t$)**: Collect $K$ in cash now and deposit it in the bank at risk-free rate $r$. Wealth at $T$ becomes $K e^{r(T-t)} > K$!
+* **Conclusion**: When a put is deep in-the-money, **earning risk-free bank interest on strike cash $K$ dominates the near-zero remaining time value**! There exists an optimal exercise boundary $S^*(t) < K$, below which exercising early is strictly optimal.
+
+---
+
+#### (5) Path-Dependent Exotic Options & Brownian Extremes
+
+Beyond European and American options, stopping times apply directly to exotic derivatives:
+* **Barrier Options**: Triggered (knock-in or knock-out) when price touches level $B$, governed by the **First Hitting Time** $\tau_B = \inf\{t \ge 0 : S_t = B\}$;
+* **Lookback Options**: Payoffs depend on historical extrema (e.g., $\max_{0 \le t \le T} S_t$), analytically priced via the **Reflection Principle and Running Maximum distribution** of Brownian motion.
 
 ---
 
