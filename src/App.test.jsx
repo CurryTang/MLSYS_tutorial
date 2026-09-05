@@ -1091,6 +1091,35 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: /Quant 14 · Financial Markets Microstructure/i })).toBeInTheDocument();
   });
 
+  it('opens Quant 15 Equivalent Martingale Measure note and verifies content and language toggle', async () => {
+    globalThis.fetch.mockImplementation(async (input) => {
+      const requestUrl = decodeURIComponent(String(input));
+      return {
+        ok: true,
+        text: async () => {
+          if (requestUrl.includes('Quant15') && requestUrl.endsWith('.en.md')) {
+            return '# Quant 15 · Equivalent Martingale Measure, FTAP & Girsanov Change of Measure\n\nEnglish content for Quant 15.';
+          }
+          if (requestUrl.includes('Quant15')) {
+            return '# Quant 15 · 等价鞅测度、资产定价基本定理（FTAP）与吉尔萨诺夫测度变换\n\n中文内容 for Quant 15.';
+          }
+          return '# Default note';
+        },
+      };
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Quant' }));
+    fireEvent.click(screen.getByRole('button', { name: /Quant 15 · 等价鞅测度/i }));
+
+    expect(await screen.findByRole('heading', { name: /Quant 15 · 等价鞅测度/i })).toBeInTheDocument();
+
+    // Toggle language to English
+    fireEvent.click(screen.getByRole('button', { name: 'English' }));
+    expect(await screen.findByRole('heading', { name: /Quant 15 · Equivalent Martingale Measure/i })).toBeInTheDocument();
+  });
+
   it('renders the Palindromic Substrings 2D DP matrix visual walkthrough and steps through states', async () => {
     globalThis.fetch.mockImplementation(async (input) => {
       const requestUrl = String(input);

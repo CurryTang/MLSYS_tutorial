@@ -1976,6 +1976,17 @@ const quantNoteDefinitions = [
     },
   ),
   createTutorialDefinition(
+    'Quant 15 · 等价鞅测度、资产定价基本定理（FTAP）与吉尔萨诺夫测度变换',
+    'Quant15 Equivalent Martingale Measure Girsanov and FTAP.md',
+    'Quant15 Equivalent Martingale Measure Girsanov and FTAP.en.md',
+    {
+      directory: 'quant',
+      titleEn: 'Quant 15 · Equivalent Martingale Measure, FTAP & Girsanov Change of Measure',
+      category: 'Asset Pricing & Stochastic Calculus',
+      difficulty: 'Hard',
+    },
+  ),
+  createTutorialDefinition(
     'C++ 面经 1 · 面向对象基础与类设计',
     'QuantDevCPP01 OOP Fundamentals Class Design.md',
     null,
@@ -18416,9 +18427,15 @@ function PalindromeDPVisual() {
   const steps = useMemo(() => generatePalindromeDPSteps(str, orderMode), [str, orderMode]);
   const currentStep = steps[stepIndex] ?? steps[0];
 
+  const prevPresetRef = useRef(selectedPreset);
+  const prevOrderRef = useRef(orderMode);
   useEffect(() => {
-    setStepIndex(0);
-    setIsPlaying(false);
+    if (prevPresetRef.current !== selectedPreset || prevOrderRef.current !== orderMode) {
+      prevPresetRef.current = selectedPreset;
+      prevOrderRef.current = orderMode;
+      setStepIndex(0);
+      setIsPlaying(false);
+    }
   }, [selectedPreset, orderMode]);
 
   useEffect(() => {
@@ -18925,9 +18942,13 @@ function CoinChangeVisual() {
   const currentStep = steps[stepIndex] ?? steps[0];
   const inf = amount + 1;
 
+  const prevPresetRef = useRef(selectedPreset);
   useEffect(() => {
-    setStepIndex(0);
-    setIsPlaying(false);
+    if (prevPresetRef.current !== selectedPreset) {
+      prevPresetRef.current = selectedPreset;
+      setStepIndex(0);
+      setIsPlaying(false);
+    }
   }, [selectedPreset]);
 
   useEffect(() => {
@@ -19509,9 +19530,13 @@ function PartitionSubsetSumVisual() {
   const target = currentStep.target;
   const isOdd = currentStep.isOdd;
 
+  const prevPresetRef = useRef(selectedPreset);
   useEffect(() => {
-    setStepIndex(0);
-    setIsPlaying(false);
+    if (prevPresetRef.current !== selectedPreset) {
+      prevPresetRef.current = selectedPreset;
+      setStepIndex(0);
+      setIsPlaying(false);
+    }
   }, [selectedPreset]);
 
   useEffect(() => {
