@@ -1965,14 +1965,14 @@ const quantNoteDefinitions = [
     },
   ),
   createTutorialDefinition(
-    'Quant 14 · 金融工程与量化投资通识：基础资产、衍生品、AMM、资产组合理论与套利定价',
+    'Quant 14 · 金融市场微观结构、多资产类别、衍生品全景与现代投资组合理论',
     'Quant14 Financial Markets Asset Classes and Portfolio Theory.md',
     'Quant14 Financial Markets Asset Classes and Portfolio Theory.en.md',
     {
       directory: 'quant',
-      titleEn: 'Quant 14 · Financial Engineering & Quant Trading Primer: Asset Classes, Derivatives, AMM, Portfolio Theory & Arbitrage',
-      category: 'Financial Markets & Portfolio Theory',
-      difficulty: 'Medium',
+      titleEn: 'Quant 14 · Financial Markets Microstructure, Asset Classes, Derivatives Masterclass & Modern Portfolio Theory',
+      category: 'Financial Markets & Derivatives',
+      difficulty: 'Hard',
     },
   ),
   createTutorialDefinition(

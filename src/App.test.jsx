@@ -1062,6 +1062,35 @@ describe('App', () => {
     expect(screen.getByText(/一阶密封出价 FPA/)).toBeInTheDocument();
   });
 
+  it('opens Quant 14 Financial Markets and Derivatives note and verifies content and language toggle', async () => {
+    globalThis.fetch.mockImplementation(async (input) => {
+      const requestUrl = decodeURIComponent(String(input));
+      return {
+        ok: true,
+        text: async () => {
+          if (requestUrl.includes('Quant14') && requestUrl.endsWith('.en.md')) {
+            return '# Quant 14 · Financial Markets Microstructure, Asset Classes, Derivatives Masterclass & Modern Portfolio Theory\n\nEnglish content for Quant 14.';
+          }
+          if (requestUrl.includes('Quant14')) {
+            return '# Quant 14 · 金融市场微观结构、多资产类别、衍生品全景与现代投资组合理论\n\n中文内容 for Quant 14.';
+          }
+          return '# Default note';
+        },
+      };
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Quant' }));
+    fireEvent.click(screen.getByRole('button', { name: /Quant 14 · 金融市场微观结构/i }));
+
+    expect(await screen.findByRole('heading', { name: /Quant 14 · 金融市场微观结构/i })).toBeInTheDocument();
+
+    // Toggle language to English
+    fireEvent.click(screen.getByRole('button', { name: 'English' }));
+    expect(await screen.findByRole('heading', { name: /Quant 14 · Financial Markets Microstructure/i })).toBeInTheDocument();
+  });
+
   it('renders the Palindromic Substrings 2D DP matrix visual walkthrough and steps through states', async () => {
     globalThis.fetch.mockImplementation(async (input) => {
       const requestUrl = String(input);
