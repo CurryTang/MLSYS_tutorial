@@ -244,7 +244,7 @@ A stochastic process $X = \{X_t : t \ge 0\}$ is rigorously defined as an **Itô 
 > - Day 1: Asset surges $+50\%$ ($100 \to 150$);
 > - Day 2: Asset crashes $-50\%$ ($150 \to 75$);
 > - **Arithmetic Average Return**: $\frac{+50\% - 50\%}{2} = 0\%$ (looks like break-even);
-> - **Actual Portfolio Value**: Drops from $\$100$ to $\$75$—a net **$-25\%$ loss**!
+> - **Actual Portfolio Value**: Drops from \$100 to \$75—a net **$-25\%$ loss**!
 > 
 > That phantom $-25\%$ loss is discrete **Volatility Drag**!
 > In continuous stochastic calculus, the logarithm $f(S) = \ln S$ is strictly concave ($f''(S) = -1/S^2 < 0$). Under continuous Brownian jitter, Itô's Lemma generates the exact geometric downward drag of **$-\frac{1}{2}\sigma^2 dt$**!
@@ -419,7 +419,7 @@ Having established the foundational theory of Itô stochastic calculus and Itô'
 #### (1) Financial Motivation: Why Arithmetic Brownian Motion Fails
 In 1900, Louis Bachelier modeled stock prices with Arithmetic Brownian Motion (ABM): $dS_t = \mu dt + \sigma dW_t$. However, ABM suffers from two major economic flaws:
 1. **Negative Asset Prices**: Normal distributions have unbounded support $(-\infty, +\infty)$, which violates the limited liability of equities;
-2. **Constant Absolute Dollar Volatility**: ABM assumes dollar fluctuations are identical whether a stock is trading at $\$10$ or $\$1000$. In reality, investors think in terms of **percentage returns**.
+2. **Constant Absolute Dollar Volatility**: ABM assumes dollar fluctuations are identical whether a stock is trading at \$10 or \$1000. In reality, investors think in terms of **percentage returns**.
 
 In 1965, Nobel laureate Paul Samuelson introduced **Geometric Brownian Motion (GBM)**, modeling relative instantaneous returns as normally distributed:
 
@@ -577,7 +577,7 @@ Before exploring stochastic calculus and options pricing, we establish the struc
 * **Terminal Payoff**:
   - **Long Position**: $\text{Payoff} = S_T - K$ (a straight line);
   - **Short Position**: $\text{Payoff} = K - S_T$;
-* **Initial Premium**: Under no-arbitrage equilibrium, entering a forward contract costs $\$0$ upfront.
+* **Initial Premium**: Under no-arbitrage equilibrium, entering a forward contract costs \$0 upfront.
 
 #### (2) Non-Linear Contracts: Options
 * **Core Mechanism**: The buyer pays an upfront **Premium** for the **Right (but NOT obligation)** to buy or sell the underlying asset at strike $K$; the seller collects the premium and assumes the **passive obligation** to fulfill the trade if exercised;
@@ -855,21 +855,98 @@ $$
 
 ---
 
-#### Method 2: Risk-Neutral Martingale Pricing & Feynman-Kac Theorem
+#### Method 2: Risk-Neutral Measure, Zero-Drift Martingale Property, and Feynman-Kac Theorem (Modern Martingale Approach)
 
-By Girsanov's Theorem, under the equivalent martingale measure $\mathbb{Q}$ (the risk-neutral measure):
+While Method 1 approaches the problem from the physical world $\mathbb{P}$ via dynamic Delta hedging, modern quantitative finance provides a more foundational, elegant **martingale perspective**:
 
+##### Step 1: Construct the Risk-Neutral Measure $\mathbb{Q}$
+By the First Fundamental Theorem of Asset Pricing (FTAP 1) and Girsanov's theorem, no arbitrage is equivalent to the existence of an equivalent martingale measure $\mathbb{Q}$. Defining the market price of risk $\theta = \frac{\mu - r}{\sigma}$, the physical drift $\mu$ is replaced by the risk-free rate $r$:
 $$
-dS_t = r S_t dt + \sigma S_t d\widetilde{W}_t \quad (\widetilde{W}_t \text{ is a } \mathbb{Q}\text{-Brownian motion})
+dS_t = r S_t dt + \sigma S_t d\widetilde{W}_t
+$$
+where $\widetilde{W}_t$ is a standard Brownian motion under $\mathbb{Q}$.
+
+##### Step 2: Martingale Property of the Discounted Derivative Process
+Under no-arbitrage pricing theory, the derivative value discounted by the money market account $B_t = e^{rt}$:
+$$
+Y_t \triangleq \frac{V(t, S_t)}{B_t} = e^{-rt} V(t, S_t)
+$$
+**must be a strict martingale under $\mathbb{Q}$**! That is:
+$$
+Y_t = \mathbb{E}^\mathbb{Q} \left[ Y_T \;\middle|\; \mathcal{F}_t \right] = \mathbb{E}^\mathbb{Q} \left[ e^{-rT} \Phi(S_T) \;\middle|\; \mathcal{F}_t \right]
+$$
+Multiplying both sides by $e^{rt}$ yields the fundamental risk-neutral pricing formula:
+$$
+V(t, S_t) = e^{-r(T-t)} \mathbb{E}^\mathbb{Q} \left[ \Phi(S_T) \;\middle|\; \mathcal{F}_t \right]
 $$
 
-The discounted asset $e^{-rt}S_t$ is a $\mathbb{Q}$-martingale. The no-arbitrage price is the discounted expected payoff:
-
+##### Step 3: Infinitesimal Expansion — The Essence of a Martingale is Zero Drift
+Because $Y_t = e^{-rt} V(t, S_t)$ is a continuous martingale, by stochastic calculus, **its drift term ($dt$ coefficient) in the Itô differential must be identically zero**:
 $$
-V(t, S_t) = e^{-r(T-t)} \mathbb{E}^\mathbb{Q}\left[ \Phi(S_T) \;\middle|\; \mathcal{F}_t \right]
+\text{Drift}(dY_t) \equiv 0
 $$
 
-By the **Feynman-Kac Theorem**, this conditional expectation solves the BSM PDE with terminal condition $V(T, S) = \Phi(S)$.
+Applying Itô's Lemma to the product $Y_t = e^{-rt} V(t, S_t)$:
+$$
+dY_t = d\left(e^{-rt}\right) V + e^{-rt} dV + d\left(e^{-rt}\right) dV
+$$
+Since $e^{-rt}$ has finite variation, $d(e^{-rt}) = -r e^{-rt} dt$ and $d(e^{-rt}) dV = 0$.
+
+Expanding $V(t, S_t)$ to order $dt$:
+$$
+dV = \frac{\partial V}{\partial t} dt + \frac{\partial V}{\partial S} dS_t + \frac{1}{2} \frac{\partial^2 V}{\partial S^2} (dS_t)^2
+$$
+Substituting $dS_t = r S_t dt + \sigma S_t d\widetilde{W}_t$ and $(dS_t)^2 = \sigma^2 S_t^2 dt$:
+$$
+dV = \left( \frac{\partial V}{\partial t} + r S_t \frac{\partial V}{\partial S} + \frac{1}{2}\sigma^2 S_t^2 \frac{\partial^2 V}{\partial S^2} \right) dt + \sigma S_t \frac{\partial V}{\partial S} d\widetilde{W}_t
+$$
+
+Combining terms into $dY_t$:
+$$
+\begin{aligned}
+dY_t &= -r e^{-rt} V dt + e^{-rt} \left[ \left( \frac{\partial V}{\partial t} + r S_t \frac{\partial V}{\partial S} + \frac{1}{2}\sigma^2 S_t^2 \frac{\partial^2 V}{\partial S^2} \right) dt + \sigma S_t \frac{\partial V}{\partial S} d\widetilde{W}_t \right] \\
+&= e^{-rt} \left( \frac{\partial V}{\partial t} + r S_t \frac{\partial V}{\partial S} + \frac{1}{2}\sigma^2 S_t^2 \frac{\partial^2 V}{\partial S^2} - r V \right) dt + e^{-rt} \sigma S_t \frac{\partial V}{\partial S} d\widetilde{W}_t
+\end{aligned}
+$$
+
+##### Step 4: Setting Drift to Zero Recovers the BSM PDE
+Since $Y_t$ is a $\mathbb{Q}$-martingale, the $dt$ drift term must vanish almost surely:
+$$
+\frac{\partial V}{\partial t} + r S \frac{\partial V}{\partial S} + \frac{1}{2}\sigma^2 S^2 \frac{\partial^2 V}{\partial S^2} - r V = 0
+$$
+Rearranging:
+$$
+\boxed{\frac{\partial V}{\partial t} + r S \frac{\partial V}{\partial S} + \frac{1}{2}\sigma^2 S^2 \frac{\partial^2 V}{\partial S^2} = r V}
+$$
+subject to terminal condition $V(T, S) = \Phi(S)$.
+**Without shorting stock or constructing a replication portfolio, the BSM PDE emerges purely from the first principle that discounted tradable asset prices are martingales!**
+
+---
+
+##### Step 5: The Full Bridge of the Feynman-Kac Theorem
+Why is this mathematically equivalent to the **Feynman-Kac Theorem**?
+Physicists Richard Feynman and Mark Kac established the following general equivalence:
+
+> **Feynman-Kac Theorem**:
+> Consider the Cauchy problem for the parabolic PDE:
+> $$
+> \frac{\partial u}{\partial t} + \mu(t, x) \frac{\partial u}{\partial x} + \frac{1}{2}\sigma^2(t, x) \frac{\partial^2 u}{\partial x^2} - r(t, x) u = 0, \quad u(T, x) = \psi(x)
+> $$
+> The unique solution admits the stochastic representation:
+> $$
+> u(t, x) = \mathbb{E}\left[ \exp\left(-\int_t^T r(s, X_s) ds\right) \psi(X_T) \;\middle|\; X_t = x \right]
+> $$
+> where $dX_s = \mu(s, X_s) ds + \sigma(s, X_s) dW_s$.
+
+In the Black-Scholes framework:
+- Drift $\mu(t, x) = r x$;
+- Diffusion $\sigma(t, x) = \sigma x$;
+- Discount rate $r(t, x) = r$;
+- Terminal condition $\psi(x) = \Phi(x)$.
+
+The Feynman-Kac theorem proves that **solving a parabolic PDE and taking a conditional expectation under a diffusion process are two mathematical formulations of the exact same object**:
+- PDE $\to$ Expectation: Solve differential equations numerically via Monte Carlo or analytical Gaussian integrals;
+- Expectation $\to$ PDE: Any discounted conditional expectation under a diffusion process automatically solves the corresponding parabolic PDE.
 
 ---
 

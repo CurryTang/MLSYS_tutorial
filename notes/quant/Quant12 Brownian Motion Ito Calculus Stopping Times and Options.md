@@ -433,7 +433,7 @@ $$X_t \circ dW_t = X_t dW_t + \frac{1}{2} \sigma_t dt$$
 #### （1）金融背景与建模动机
 1900 年路易·巴舍利耶（Louis Bachelier）首次提出用算术布朗运动（Arithmetic Brownian Motion）$dS_t = \mu dt + \sigma dW_t$ 来建模资产价格。然而，算术布朗运动存在两大致命的经济学缺陷：
 1. **允许资产价格跌为负数**：正态分布的支撑集为 $(-\infty, +\infty)$，对于有限责任的股票而言，负价格在现实中是不可能的；
-2. **波动绝对金额恒定**：无论股票价格是 $\$10$ 还是 $\$1000$，算术布朗运动假设其价格变动的绝对美元方差恒为 $\sigma^2 dt$。但在现实金融市场中，投资者关注的是**百分比相对收益率（Percentage Return）**。
+2. **波动绝对金额恒定**：无论股票价格是 10 美元还是 1000 美元，算术布朗运动假设其价格变动的绝对美元方差恒为 $\sigma^2 dt$。但在现实金融市场中，投资者关注的是**百分比相对收益率（Percentage Return）**。
 
 1965 年，诺贝尔经济学奖得主保罗·萨缪尔森（Paul Samuelson）提出了著名的**几何布朗运动（Geometric Brownian Motion, GBM）**模型，假设资产在瞬时时间微元内的相对收益率服从独立同分布的正态分布：
 
@@ -884,21 +884,97 @@ $$
 
 ---
 
-#### 推导方法二：风险中性测度与 Feynman-Kac 鞅定价法
+#### 推导方法二：风险中性测度、鞅的零漂移性质与 Feynman-Kac 定理（现代鞅论推导）
 
-根据 Girsanov 测度变换定理，定义市场风险溢价 $\theta = \frac{\mu - r}{\sigma}$。存在等价鞅测度 $\mathbb{Q}$（风险中性测度），在此测度下漂移项由 $\mu$ 转变为无风险利率 $r$：
+在推导方法一中，我们通过做市商在客观物理世界 $\mathbb{P}$ 下构造 Delta 对冲组合消除了随机波动。现代量化金融提供了更为本质而优雅的**鞅论视角（Martingale Approach）**：
 
+##### 步骤 1：构建风险中性测度 $\mathbb{Q}$
+根据资产定价第一基本定理（FTAP 1）与 Girsanov 定理，市场无套利等价于存在等价鞅测度 $\mathbb{Q}$。定义市场风险溢价 $\theta = \frac{\mu - r}{\sigma}$，通过 Doléans-Dade 指数鞅测度变换，消去真实漂移项 $\mu$ 并平移为无风险利率 $r$：
 $$
-dS_t = r S_t dt + \sigma S_t d\widetilde{W}_t \quad (\widetilde{W}_t \text{ 为 } \mathbb{Q} \text{ 下标准布朗运动})
+dS_t = r S_t dt + \sigma S_t d\widetilde{W}_t
 $$
+其中 $\widetilde{W}_t$ 为 $\mathbb{Q}$ 测度下的标准布朗运动。
 
-折现资产价格 $e^{-rt}S_t$ 是 $\mathbb{Q}$ 下的鞅。无套利衍生品定价理论断言：衍生品的公允价值等于其在风险中性测度下未来支付的**折现条件期望**：
-
+##### 步骤 2：贴现衍生品价值过程的鞅性质
+根据无套利定价理论，以无风险账户 $B_t = e^{rt}$ 贴现后的衍生品价值过程：
+$$
+Y_t \triangleq \frac{V(t, S_t)}{B_t} = e^{-rt} V(t, S_t)
+$$
+在风险中性测度 $\mathbb{Q}$ 下**必须是一个严格鞅（Martingale）**！即：
+$$
+Y_t = \mathbb{E}^\mathbb{Q} \left[ Y_T \;\middle|\; \mathcal{F}_t \right] = \mathbb{E}^\mathbb{Q} \left[ e^{-rT} \Phi(S_T) \;\middle|\; \mathcal{F}_t \right]
+$$
+两边同乘 $e^{rt}$ 即得风险中性定价公理：
 $$
 V(t, S_t) = e^{-r(T-t)} \mathbb{E}^\mathbb{Q} \left[ \Phi(S_T) \;\middle|\; \mathcal{F}_t \right]
 $$
 
-根据 **Feynman-Kac 定理**，上述条件期望正是 BSM 偏微分方程满足终端条件 $V(T, S) = \Phi(S)$ 时的唯一柯西解。
+##### 步骤 3：核心微元展开——鞅的本质是“漂移项恒等于 0”
+既然 $Y_t = e^{-rt} V(t, S_t)$ 是连续鞅，根据随机分析基本性质，**其伊藤微分中的漂移项（$dt$ 阶系数）必须处处恒为零**：
+$$
+\text{Drift}(dY_t) \equiv 0
+$$
+
+我们直接对 $Y_t = e^{-rt} V(t, S_t)$ 应用二维伊藤引理：
+$$
+dY_t = d\left(e^{-rt}\right) V + e^{-rt} dV + d\left(e^{-rt}\right) dV
+$$
+其中 $e^{-rt}$ 具有确定性有界变差，$d(e^{-rt}) = -r e^{-rt} dt$，因此二次变差项 $d(e^{-rt}) dV = 0$。
+
+对 $V(t, S_t)$ 展开至 $dt$ 阶：
+$$
+dV = \frac{\partial V}{\partial t} dt + \frac{\partial V}{\partial S} dS_t + \frac{1}{2} \frac{\partial^2 V}{\partial S^2} (dS_t)^2
+$$
+将 $dS_t = r S_t dt + \sigma S_t d\widetilde{W}_t$ 与 $(dS_t)^2 = \sigma^2 S_t^2 dt$ 代入：
+$$
+dV = \left( \frac{\partial V}{\partial t} + r S_t \frac{\partial V}{\partial S} + \frac{1}{2}\sigma^2 S_t^2 \frac{\partial^2 V}{\partial S^2} \right) dt + \sigma S_t \frac{\partial V}{\partial S} d\widetilde{W}_t
+$$
+
+合并得到 $dY_t$：
+$$
+\begin{aligned}
+dY_t &= -r e^{-rt} V dt + e^{-rt} \left[ \left( \frac{\partial V}{\partial t} + r S_t \frac{\partial V}{\partial S} + \frac{1}{2}\sigma^2 S_t^2 \frac{\partial^2 V}{\partial S^2} \right) dt + \sigma S_t \frac{\partial V}{\partial S} d\widetilde{W}_t \right] \\
+&= e^{-rt} \left( \frac{\partial V}{\partial t} + r S_t \frac{\partial V}{\partial S} + \frac{1}{2}\sigma^2 S_t^2 \frac{\partial^2 V}{\partial S^2} - r V \right) dt + e^{-rt} \sigma S_t \frac{\partial V}{\partial S} d\widetilde{W}_t
+\end{aligned}
+$$
+
+##### 步骤 4：强制漂移项归零，直接推得 BSM PDE
+因为 $Y_t$ 是 $\mathbb{Q}$ 测度下的纯鞅，其 $dt$ 漂移项必须几乎处处为零：
+$$
+\frac{\partial V}{\partial t} + r S \frac{\partial V}{\partial S} + \frac{1}{2}\sigma^2 S^2 \frac{\partial^2 V}{\partial S^2} - r V = 0
+$$
+移项后立即得到：
+$$
+\boxed{\frac{\partial V}{\partial t} + r S \frac{\partial V}{\partial S} + \frac{1}{2}\sigma^2 S^2 \frac{\partial^2 V}{\partial S^2} = r V}
+$$
+满足终端条件 $V(T, S) = \Phi(S)$。
+**无需做空现货，无需构造对冲组合，仅凭“贴现资产价格是鞅”这一个第一性原理，BSM PDE 瞬间浮出水面！**
+
+---
+
+##### 步骤 5：费曼-卡茨定理（Feynman-Kac Theorem）的数学全景桥梁
+为什么说这与 **Feynman-Kac 定理** 完全等价？
+数学物理学家 Richard Feynman 与 Mark Kac 证明了如下双向等价定理：
+
+> **Feynman-Kac 定理**：
+> 考虑二阶抛物型偏微分方程柯西问题：
+> $$
+> \frac{\partial u}{\partial t} + \mu(t, x) \frac{\partial u}{\partial x} + \frac{1}{2}\sigma^2(t, x) \frac{\partial^2 u}{\partial x^2} - r(t, x) u = 0, \quad u(T, x) = \psi(x)
+> $$
+> 该偏微分方程的唯一解，可以严格表示为受控扩散过程 $dX_s = \mu(s, X_s) ds + \sigma(s, X_s) dW_s$ 的条件期望：
+> $$
+> u(t, x) = \mathbb{E}\left[ \exp\left(-\int_t^T r(s, X_s) ds\right) \psi(X_T) \;\middle|\; X_t = x \right]
+> $$
+
+在 Black-Scholes 模型中，代入系数：
+- 漂移项 $\mu(t, x) = r x$；
+- 扩散系数 $\sigma(t, x) = \sigma x$；
+- 贴现率 $r(t, x) = r$；
+- 终端边界 $\psi(x) = \Phi(x)$。
+
+Feynman-Kac 定理说明了：**“解偏微分方程”与“求风险中性期望”在数学底层是完全等价的同一种几何变换**！
+- 从左向右（PDE $\to$ 期望）：偏微分方程可以通过蒙特卡洛模拟或积分期望来数值求解；
+- 从右向左（期望 $\to$ 偏微分方程）：鞅的期望值必然满足二阶椭圆/抛物型偏微分方程。
 
 ---
 
