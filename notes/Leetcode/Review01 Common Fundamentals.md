@@ -88,9 +88,9 @@ def merge_sort(nums: list[int]) -> list[int]:
 <div class="review-block-label">💡 大致思路与核心算法</div>
 
 核心在于**划分（Partitioning）先行**：
-1. **选主元 (Pivot)**：选定一个主元（工程上结合随机化或三数取中破坏对抗输入）。
-2. **双指针划分 (Partition)**：将所有 $\le pivot$ 的元素归到左侧，所有 $\ge pivot$ 的元素归到右侧，最后将 pivot 就地安置到最终确定位置 $i$。
-3. **递归处理 (Recurse)**：分别对左右子区间 $[l, i - 1]$ 与 $[i + 1, r]$ 递归排序。
+1. **随机选主元 (Randomized Pivot)**：通过 `random.randint(l, r)` 随机选择一个元素作为 pivot 并与末尾 $r$ 交换，彻底破坏对抗性输入（如升序/降序数组），避免退化为单链表最坏 $O(n^2)$。
+2. **独立划分 (Partition 函数)**：Lomuto 划分维护指针 $i$ 作为 $\le pivot$ 区域的右边界。遍历区间 $[l, r - 1]$，将所有 $\le pivot$ 的元素置换到左侧；最后将 pivot 与 $nums[i]$ 交换归位，返回最终切分下标 $p = i$。
+3. **分治递归 (Recurse)**：递归处理切分点左右两半：`[l, p - 1]` 与 `[p + 1, r]`。
 
 </div>
 
@@ -98,19 +98,28 @@ def merge_sort(nums: list[int]) -> list[int]:
 <div class="review-block-label">💻 核心代码 (最简 Python 实现)</div>
 
 ```python
-def quick_sort(nums: list[int], l: int, r: int) -> None:
-    if l >= r:
-        return
-    # 核心 Lomuto 划分：i 维护 <= pivot 的右边界
+import random
+
+def partition(nums: list[int], l: int, r: int) -> int:
+    # 1. 随机选主元并与末尾交换，避免最坏 O(n^2) 退化
+    rand_idx = random.randint(l, r)
+    nums[rand_idx], nums[r] = nums[r], nums[rand_idx]
+
+    # 2. 核心 Lomuto 划分：i 维护 <= pivot 的右边界
     pivot, i = nums[r], l
     for j in range(l, r):
         if nums[j] <= pivot:
             nums[i], nums[j] = nums[j], nums[i]
             i += 1
     nums[i], nums[r] = nums[r], nums[i]
+    return i
 
-    quick_sort(nums, l, i - 1)
-    quick_sort(nums, i + 1, r)
+def quick_sort(nums: list[int], l: int, r: int) -> None:
+    if l >= r:
+        return
+    p = partition(nums, l, r)
+    quick_sort(nums, l, p - 1)
+    quick_sort(nums, p + 1, r)
 ```
 
 </div>

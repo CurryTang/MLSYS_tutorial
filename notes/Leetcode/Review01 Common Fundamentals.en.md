@@ -88,9 +88,9 @@ Sort an unsorted array of $n$ integers in non-decreasing order in-place. Average
 <div class="review-block-label">💡 Core Approach &amp; Mental Model</div>
 
 Key mechanism: **Partitioning before Recursion**:
-1. **Pivot**: Choose a pivot element (randomized or median-of-three to break adversarial inputs).
-2. **Partition**: Rearrange array elements such that all elements $\le pivot$ move left and $\ge pivot$ move right, placing the pivot at final index $i$.
-3. **Recurse**: Recursively sort left subarray $[l, i - 1]$ and right subarray $[i + 1, r]$.
+1. **Randomized Pivot**: Use `random.randint(l, r)` to pick a random element and swap it with the end $r$. This completely breaks adversarial inputs (e.g., sorted or reverse-sorted arrays), eliminating the $O(n^2)$ worst-case skew.
+2. **Dedicated Partition Function**: Lomuto partitioning maintains pointer $i$ as the right boundary of elements $\le pivot$. Iterate across $[l, r - 1]$, swapping elements $\le pivot$ into place; finally swap pivot with $nums[i]$ and return split index $p = i$.
+3. **Divide & Conquer Recursion**: Recursively sort subarrays around the pivot: `[l, p - 1]` and `[p + 1, r]`.
 
 </div>
 
@@ -98,19 +98,28 @@ Key mechanism: **Partitioning before Recursion**:
 <div class="review-block-label">💻 Core Python Implementation (Minimal)</div>
 
 ```python
-def quick_sort(nums: list[int], l: int, r: int) -> None:
-    if l >= r:
-        return
-    # Core Lomuto partition: i maintains boundary of elements <= pivot
+import random
+
+def partition(nums: list[int], l: int, r: int) -> int:
+    # 1. Random pivot selection to prevent worst-case O(n^2) degeneration
+    rand_idx = random.randint(l, r)
+    nums[rand_idx], nums[r] = nums[r], nums[rand_idx]
+
+    # 2. Core Lomuto partition: i maintains boundary of elements <= pivot
     pivot, i = nums[r], l
     for j in range(l, r):
         if nums[j] <= pivot:
             nums[i], nums[j] = nums[j], nums[i]
             i += 1
     nums[i], nums[r] = nums[r], nums[i]
+    return i
 
-    quick_sort(nums, l, i - 1)
-    quick_sort(nums, i + 1, r)
+def quick_sort(nums: list[int], l: int, r: int) -> None:
+    if l >= r:
+        return
+    p = partition(nums, l, r)
+    quick_sort(nums, l, p - 1)
+    quick_sort(nums, p + 1, r)
 ```
 
 </div>
