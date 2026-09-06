@@ -269,3 +269,66 @@ def search_lower_bound(nums: list[int], target: int) -> int:
 
 </div>
 </details>
+
+---
+
+### 5. 拒绝采样：用 Rand7 实现 Rand10 (Rejection Sampling)
+
+<details class="review-card">
+<summary class="review-card-summary">
+  <span class="review-card-badge">基础 05</span>
+  <span class="review-card-title">拒绝采样：用 Rand7 实现 Rand10 (Rejection Sampling)</span>
+  <span class="review-card-tag">二维展平 · 能除尽的最大前缀 · 期望调用 2.45 次</span>
+</summary>
+<div class="review-card-content">
+
+<div class="review-block">
+<div class="review-block-label">📌 题目定义与要求</div>
+
+已知 API `rand7()` 可以等概率返回 $1 \dots 7$ 的随机整数。请设计并实现 `rand10()`，使其等概率生成 $1 \dots 10$ 的随机整数。不得使用任何外部随机库，且必须严格保证生成每个数字的概率均为 $1/10$。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💡 大致思路与核心算法</div>
+
+核心在于**多维均匀网格展平（2D Grid Flattening）+ 拒绝采样（Rejection Sampling）**：
+1. **空间构造（进制/网格展平）**：单次 `rand7()` 仅有 7 种等可能状态，无法直接覆盖 10。调用两次 `rand7()`，构造成 $7 \times 7 = 49$ 种独立且等概率的二元网格状态：
+   $$x = (rand7() - 1) \times 7 + rand7() \in [1, 49]$$
+   每个离散点发生的概率严格等于 $\frac{1}{7} \times \frac{1}{7} = \frac{1}{49}$。
+2. **为什么不能直接取模**：$49$ 不能被 $10$ 整除。若直接取模，前 9 个数字会出现 5 次（概率 $5/49$），而最后一个数字只出现 4 次（概率 $4/49$），破坏等概率性。
+3. **截取能被整除的最大前缀（拒绝采样）**：
+   - 只保留前缀 $1 \dots 40$（$40$ 是小于 49 且能被 10 整除的最大倍数），每个数字恰好对应 4 种状态，接受概率为 $\frac{40}{49}$，通过 `(x - 1) % 10 + 1` 严格等概率映射到 $1 \dots 10$；
+   - 若命中 $41 \dots 49$（共 9 种状态），果断丢弃（Reject），进入下一轮循环重试。
+4. **通用套路 ($randM \to randN$)**：选最小 $k$ 使 $M^k \ge N$，展开生成 $1 \dots M^k$，保留 $limit = \lfloor M^k / N \rfloor \times N$，落在 $[1, limit]$ 内即返回，超过则重试。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💻 核心代码 (最简 Python 实现)</div>
+
+```python
+def rand10() -> int:
+    while True:
+        # 1. 两次 rand7() 构造 [1, 49] 均匀独立离散空间
+        x = (rand7() - 1) * 7 + rand7()
+        # 2. 保留能被 10 整除的最大前缀 [1, 40]（每数 4 次，绝对等概）
+        if x <= 40:
+            return (x - 1) % 10 + 1
+        # 41..49 拒绝丢弃，继续下一轮重采
+```
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">⚡ 复杂度与特性速记</div>
+
+- **时间复杂度（期望）**：$O(1)$，平均调用 $rand7()$ 次数为 $2 \times \frac{49}{40} = 2.45$ 次（几何分布期望 $1/p$）
+- **时间复杂度（最坏）**：$O(\infty)$（理论上存在无限连续拒绝的极端情况，发生概率为 0）
+- **辅助空间**：$O(1)$（就地变量计算，无额外开销）
+- **核心心智模型**：多次采样拼网格，除不尽的前缀丢弃重来
+
+</div>
+
+</div>
+</details>

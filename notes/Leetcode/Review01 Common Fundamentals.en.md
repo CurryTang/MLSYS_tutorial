@@ -269,3 +269,66 @@ def search_lower_bound(nums: list[int], target: int) -> int:
 
 </div>
 </details>
+
+---
+
+### 5. Rejection Sampling: Implement Rand10 Using Rand7
+
+<details class="review-card">
+<summary class="review-card-summary">
+  <span class="review-card-badge">Core 05</span>
+  <span class="review-card-title">Rejection Sampling (Rand7 to Rand10)</span>
+  <span class="review-card-tag">Grid Flattening · Divisible Prefix · Expected 2.45 Calls</span>
+</summary>
+<div class="review-card-content">
+
+<div class="review-block">
+<div class="review-block-label">📌 Problem Definition &amp; Invariants</div>
+
+Given an API `rand7()` that returns a uniform random integer in $1 \dots 7$, implement `rand10()` to return a uniform random integer in $1 \dots 10$. Using external random libraries is strictly forbidden, and every integer from 1 to 10 must be generated with exact probability $1/10$.
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💡 Core Approach &amp; Mental Model</div>
+
+Key mechanism: **Multidimensional Grid Flattening + Rejection Sampling**:
+1. **Space Construction (Grid Flattening)**: A single `rand7()` call produces only 7 outcomes, insufficient for 10. Invoking `rand7()` twice constructs a $7 \times 7 = 49$ independent, uniformly distributed 2D grid:
+   $$x = (rand7() - 1) \times 7 + rand7() \in [1, 49]$$
+   Each cell occurs with exact probability $\frac{1}{7} \times \frac{1}{7} = \frac{1}{49}$.
+2. **Why Direct Modulo Fails**: 49 is not divisible by 10. Direct modulo would map outcomes $1 \dots 9$ five times ($5/49$), but outcome 10 only four times ($4/49$), violating equiprobability.
+3. **Accept Largest Divisible Prefix (Rejection Sampling)**:
+   - Accept only the prefix $1 \dots 40$ ($40$ is the largest multiple of 10 $\le 49$). Each outcome from 1 to 10 is mapped to exactly 4 cells, giving acceptance probability $\frac{40}{49}$, mapped uniformly via `(x - 1) % 10 + 1`.
+   - If $x \in [41, 49]$ (9 states), discard (reject) and retry in the next loop iteration.
+4. **General Template ($randM \to randN$)**: Pick the smallest $k$ such that $M^k \ge N$, generate $1 \dots M^k$, set $limit = \lfloor M^k / N \rfloor \times N$, accept if $\le limit$, otherwise reject.
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💻 Core Python Implementation (Minimal)</div>
+
+```python
+def rand10() -> int:
+    while True:
+        # 1. Two rand7() calls construct uniform discrete space [1, 49]
+        x = (rand7() - 1) * 7 + rand7()
+        # 2. Accept largest prefix divisible by 10: [1, 40] (4 cells each, strictly uniform)
+        if x <= 40:
+            return (x - 1) % 10 + 1
+        # 41..49 rejected, retry
+```
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">⚡ Complexity &amp; Key Properties</div>
+
+- **Expected Time**: $O(1)$, average calls to `rand7()` = $2 \times \frac{49}{40} = 2.45$ (Geometric distribution expectation $1/p$)
+- **Worst-Case Time**: $O(\infty)$ (theoretically infinite rejection path with probability 0)
+- **Auxiliary Space**: $O(1)$ (in-place scalar computation, no extra memory)
+- **Core Mental Model**: Flatten into a grid; discard the non-divisible remainder
+
+</div>
+
+</div>
+</details>
