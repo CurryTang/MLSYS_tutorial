@@ -23136,6 +23136,17 @@ function normalizeObsidianMarkdown(markdownText) {
   return normalized;
 }
 
+function safeScrollTo(y) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.scrollTo({ top: y, behavior: 'instant' });
+  } catch {
+    try {
+      window.scrollTo(0, y);
+    } catch {}
+  }
+}
+
 function App() {
   const initialRoute = parseHashRoute(window.location.hash) ?? { view: 'home', noteId: null, sectionId: null };
   const initialId = initialRoute.noteId ?? tutorials[0]?.id ?? '';
@@ -23148,6 +23159,14 @@ function App() {
   const [contentByKey, setContentByKey] = useState({});
   const [errorByKey, setErrorByKey] = useState({});
   const inFlightRef = useRef(new Set());
+  const restoredNoteRef = useRef(null);
+  const isRestoringScrollRef = useRef(false);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'scrollRestoration' in window.history) {
+      window.history.scrollRestoration = 'manual';
+    }
+  }, []);
   const selectedSection = noteSections.find((section) =>
     section.notes.some((note) => note.id === selectedTutorialId),
   ) ?? noteSections[0];
@@ -23251,27 +23270,41 @@ function App() {
   };
 
   const navigateHome = () => {
+    try {
+      sessionStorage.removeItem('home_scroll');
+    } catch {}
     setCurrentView('home');
     setQuery('');
     setPendingHeadingId(null);
     if (window.location.hash) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search);
     }
+    safeScrollTo(0);
   };
 
   const navigateToSection = (sectionId) => {
     const section = noteSections.find((candidate) => candidate.id === sectionId);
     const nextId = section?.notes[0]?.id ?? tutorials[0]?.id ?? '';
+    try {
+      sessionStorage.removeItem(`note_scroll_${nextId}`);
+    } catch {}
+    restoredNoteRef.current = null;
     setCurrentView('reader');
     setQuery('');
     setPendingHeadingId(null);
     setSelectedTutorialId(nextId);
+    safeScrollTo(0);
   };
 
   const navigateToTutorial = (tutorialId) => {
+    try {
+      sessionStorage.removeItem(`note_scroll_${tutorialId}`);
+    } catch {}
+    restoredNoteRef.current = null;
     setCurrentView('reader');
     setPendingHeadingId(null);
     setSelectedTutorialId(tutorialId);
+    safeScrollTo(0);
   };
 
   const navigateToAbout = () => {
@@ -23290,9 +23323,12 @@ function App() {
       return;
     }
 
-    const encoded = `#${encodeURIComponent(selectedTutorial.id)}`;
-    if (window.location.hash !== encoded) {
-      window.history.replaceState(null, '', encoded);
+    const currentRoute = parseHashRoute(window.location.hash);
+    const headingSuffix = currentRoute?.headingId ? `::${currentRoute.headingId}` : '';
+    const canonicalHash = `#${encodeURIComponent(selectedTutorial.id)}${headingSuffix}`;
+
+    if (window.location.hash !== canonicalHash) {
+      window.history.replaceState(null, '', canonicalHash);
     }
   }, [currentView, selectedTutorial]);
 
@@ -23313,6 +23349,101 @@ function App() {
     window.addEventListener('hashchange', handleHashChange);
     return () => window.removeEventListener('hashchange', handleHashChange);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    let timeoutId = null;
+
+    const saveScroll = () => {
+      if (isRestoringScrollRef.current || selectedIsLoading) {
+        return;
+      }
+      const y = window.scrollY;
+      try {
+        if (currentView === 'reader' && selectedTutorial?.id) {
+          sessionStorage.setItem(`note_scroll_${selectedTutorial.id}`, String(y));
+        } else if (currentView === 'home') {
+          sessionStorage.setItem('home_scroll', String(y));
+        }
+      } catch {}
+    };
+
+    const handleScroll = () => {
+      if (isRestoringScrollRef.current || selectedIsLoading) {
+        return;
+      }
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      timeoutId = setTimeout(saveScroll, 100);
+    };
+
+    const handleBeforeUnload = () => {
+      saveScroll();
+    };
+
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
+    return () => {
+      if (timeoutId) clearTimeout(timeoutId);
+      window.removeEventListener('scroll', handleScroll);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+    };
+  }, [currentView, selectedIsLoading, selectedTutorial?.id]);
+
+  useEffect(() => {
+    if (currentView !== 'reader' || selectedIsLoading || selectedError || !normalizedSelectedContent.trim()) {
+      return undefined;
+    }
+
+    const noteKey = `${selectedTutorial?.id}:${activeLanguage}`;
+    if (restoredNoteRef.current === noteKey) {
+      return undefined;
+    }
+    restoredNoteRef.current = noteKey;
+
+    if (pendingHeadingId) {
+      return undefined;
+    }
+
+    try {
+      const saved = sessionStorage.getItem(`note_scroll_${selectedTutorial?.id}`);
+      const targetY = saved ? parseFloat(saved) : 0;
+      if (targetY > 0) {
+        isRestoringScrollRef.current = true;
+        safeScrollTo(targetY);
+
+        const frame1 = window.requestAnimationFrame(() => {
+          safeScrollTo(targetY);
+          const frame2 = window.requestAnimationFrame(() => {
+            safeScrollTo(targetY);
+            setTimeout(() => {
+              isRestoringScrollRef.current = false;
+            }, 150);
+          });
+        });
+
+        return () => {
+          window.cancelAnimationFrame(frame1);
+        };
+      }
+    } catch {}
+  }, [activeLanguage, currentView, normalizedSelectedContent, pendingHeadingId, selectedError, selectedIsLoading, selectedTutorial?.id]);
+
+  useEffect(() => {
+    if (currentView !== 'home') return;
+    try {
+      const saved = sessionStorage.getItem('home_scroll');
+      const targetY = saved ? parseFloat(saved) : 0;
+      if (targetY > 0) {
+        window.requestAnimationFrame(() => {
+          safeScrollTo(targetY);
+        });
+      }
+    } catch {}
+  }, [currentView]);
 
   useEffect(() => {
     if (!pendingHeadingId || selectedIsLoading || selectedError || !normalizedSelectedContent.trim()) {
@@ -23642,6 +23773,10 @@ function App() {
                           onClick={(event) => {
                             event.preventDefault();
                             scrollToHeading(heading.id);
+                            if (selectedTutorial?.id) {
+                              const targetHash = `#${encodeURIComponent(selectedTutorial.id)}::${heading.id}`;
+                              window.history.replaceState(null, '', targetHash);
+                            }
                           }}
                         >
                           {heading.text}

@@ -1448,6 +1448,21 @@ describe('App', () => {
     fireEvent.click(mergeSortHeader);
     expect(await screen.findByText(/分治排序：切分、递归、双指针合并/i)).toBeInTheDocument();
   });
+
+  it('restores scroll position from sessionStorage when loading a note', async () => {
+    const scrollToSpy = vi.fn();
+    window.scrollTo = scrollToSpy;
+    sessionStorage.setItem('note_scroll_Quant15 Equivalent Martingale Measure Girsanov and FTAP.md', '1250');
+
+    window.location.hash = '#Quant15%20Equivalent%20Martingale%20Measure%20Girsanov%20and%20FTAP.md';
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /Quant 15/i })).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(scrollToSpy).toHaveBeenCalledWith({ top: 1250, behavior: 'instant' });
+    });
+  });
 });
 
 
