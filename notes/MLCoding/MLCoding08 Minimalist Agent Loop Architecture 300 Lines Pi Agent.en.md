@@ -237,29 +237,3 @@ if __name__ == "__main__":
 ```
 
 ---
-
-## Module 4: High-Yield Agent Architecture Quizzes
-
-<details class="exercise">
-<summary><span class="q-label">Q1 · Agent Tooling Minimalism</span> <span class="q-text">Why does the Pi Agent architecture strictly advocate for a minimal 4-tool primitive set (read/write/edit/bash) over registering dozens of granular domain-specific tools?</span></summary>
-
-- [ ] **A.** LLMs have a hard constraint limiting tool definitions to at most 4.
-- [ ] **B.** Specialized tools execute slower than system shell calls.
-- [x] **C.** Excessive tool schemas inflate the system prompt token budget and increase model selection hallucinations; a compact tool set with universal shell execution covers complex workflows with minimal overhead.
-- [ ] **D.** The 4-tool model is restricted to CLI terminals and cannot be applied elsewhere.
-
-> 💡 **Explanation**:
-> - **Correct Answer: C**. Each registered tool requires a detailed JSON Schema definition. Having too many tools consumes valuable prompt context and dilutes attention, leading to tool-selection errors.
-</details>
-
-<details class="exercise">
-<summary><span class="q-label">Q2 · Context Protection in Long Executions</span> <span class="q-text">When a tool execution generates a 5MB stderr log trace, what is the best context management strategy to preserve diagnostic power without crashing the context window?</span></summary>
-
-- [ ] **A.** Pass all 5MB into the `tool` message directly.
-- [ ] **B.** Discard all output and return only the integer returncode.
-- [x] **C.** Apply Head/Tail Truncation: preserve the first 20KB (command start/args) and last 20KB (final traceback/summary) with a clear truncation note in between.
-- [ ] **D.** Abort the entire session.
-
-> 💡 **Explanation**:
-> - **Correct Answer: C**. High-volume logs place their most informative content at the initial invocation setup and the trailing traceback summary. Head/tail truncation maintains key error signals within a strict 50KB boundary.
-</details>

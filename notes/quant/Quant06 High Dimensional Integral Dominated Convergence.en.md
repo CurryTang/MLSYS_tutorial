@@ -363,14 +363,3 @@ $$
 | Applying DCT directly on $[0,1]^n$ | The domain changes with $n$ | Use the common probability space $[0,1]^{\mathbb N}$ |
 | Ignoring a zero denominator | The function is undefined at the origin | Define it arbitrarily on the measure-zero set, for example as 0 |
 | Using $g_n=R_n$ as the dominating function | The dominating function cannot vary with $n$ | Use the fixed function $g\equiv1$ here |
-
-```quiz
-title: Dominated Convergence Check
-question: In this problem, which fact provides the "uniform domination" required by the dominated convergence theorem?
-answer: C
-A. Dividing both the numerator and denominator by n
-B. The sample mean converges almost surely
-C. For every n, 0 ≤ R_n ≤ 1, so we may choose g ≡ 1
-D. The integration region has volume 1
-explanation: The law of large numbers provides pointwise (almost-sure) convergence; 0 ≤ R_n ≤ 1 provides an integrable dominating function independent of n. The probability space having total mass 1 ensures that g ≡ 1 is integrable.
-```

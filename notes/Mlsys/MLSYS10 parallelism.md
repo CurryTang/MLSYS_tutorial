@@ -68,17 +68,6 @@
 > [!note] 注意
 > 对于大模型，Attention 只占约 1/3 的 FLOPs，MLP 占 2/3。因此这种简化是合理的近似。
 
-```quiz
-title: Section Check · 引言与背景
-question: 为什么 70B 参数模型不能只靠单张 80GB H100 做完整 Adam 训练？
-answer: B
-A. 因为 Attention FLOPs 一定超过 MLP FLOPs
-B. 因为参数、梯度和 Adam 状态合计远超单卡显存
-C. 因为 BF16 参数本身只有 14GB
-D. 因为数据并行会减少单卡模型参数
-explanation: 70B BF16 参数约 140GB，Adam 状态和梯度还会继续放大显存需求，所以必须引入状态分片、层内分片或流水线等并行策略。
-```
-
 ---
 
 ## 二、GPU 硬件基础与通信原语
@@ -150,7 +139,6 @@ explanation: 70B BF16 参数约 140GB，Adam 状态和梯度还会继续放大�
 **符号表示**：$\text{AllGather}_X([A_X, B])  ightarrow [A, B]$
 
 **耗时**：$T = \frac{V}{W_{双向}}$，其中 $V$ 是总数据量
-
 
 > **AllGather 环形算法**：$N$ 个设备排成环，每个设备持有 $V/N$ 字节的数据。每一步向右发送当前块、接收左边的块。双向环可同时向左右传输：
 > $$T_\text{hop} = \frac{2V}{N \cdot W_\text{ici}}, \quad T_\text{total} = \frac{N}{2} \cdot T_\text{hop} = \frac{V}{W_\text{ici}}$$
@@ -252,17 +240,6 @@ $$T_\text{total} = \max\!\left[ \frac{T_\text{min} \cdot \sum |X_i|}{2},\ \frac{
 | AllToAll | 转置分片 | $[A, B_X] → [A_X, B]$ | $V / (4W)$ |
 
 ![四种集合通信原语对比示意](https://jax-ml.github.io/scaling-book/assets/img/all-collectives.png)
-
-```quiz
-title: Section Check · 通信原语
-question: 为什么 AllReduce 常被拆成 ReduceScatter + AllGather 来理解？
-answer: C
-A. 因为 AllReduce 只适用于单机，不适用于多机
-B. 因为 AllGather 会自动完成求和
-C. 因为 AllReduce 的语义就是先把各 rank 的值规约，再把规约结果复制给所有 rank
-D. 因为 ReduceScatter 不需要网络通信
-explanation: ReduceScatter 负责规约并把结果切片留在各 rank，AllGather 再把切片收集成完整结果，因此 AllReduce 的通信量通常可看成两者之和。
-```
 
 ---
 
@@ -502,17 +479,6 @@ for i, chunk in enumerate(chunks):
     gathered_chunks[i] = gathered_chunk
 ```
 
-```quiz
-title: Section Check · 分片矩阵乘法
-question: 对矩阵乘法 A[I, J_X] · B[J_X, K]，本地 matmul 后得到的是什么？
-answer: B
-A. 完整的 C[I, K]，无需通信
-B. C[I, K] 的 partial sum，需要 AllReduce 或 ReduceScatter
-C. C[I_X, K_X]，这是合法输出分片
-D. 只需要 AllGather B，不需要规约
-explanation: 收缩维度 J 沿同一设备轴切分时，每个 rank 只计算一部分 J 的贡献，本地结果是 partial sum，必须跨 rank 求和。
-```
-
 ---
 
 ## 四、数据并行（Data Parallelism）
@@ -633,17 +599,6 @@ for batch in dataloader:
     loss = model(batch).loss
     loss.backward()  # DDP 在这里自动 AllReduce 梯度
     optimizer.step()
-```
-
-```quiz
-title: Section Check · Data Parallelism
-question: 纯数据并行的主要通信发生在哪里？
-answer: C
-A. 每个 forward matmul 前 AllGather 权重
-B. 每个 attention head 后 AllToAll token
-C. backward 中对参数梯度做 AllReduce
-D. pipeline stage 之间发送 activation
-explanation: DDP 中每张 GPU 持有完整模型并处理不同 batch shard，前向基本无模型通信；反向产生的梯度需要 AllReduce 同步。
 ```
 
 ---
@@ -838,17 +793,6 @@ ZeRO++ 优化 3：量化 ReduceScatter（qRS）
 > - 计算瓶颈条件与数据并行相同
 > - 对于 H100：每 GPU batch size > 1100 tokens
 > - 如需更小的 batch size，需要结合张量并行
-
-```quiz
-title: Section Check · FSDP / ZeRO
-question: ZeRO-3 / FSDP 相比 ZeRO-2 额外分片了什么？
-answer: A
-A. 参数
-B. 激活值
-C. attention KV cache
-D. pipeline stage
-explanation: ZeRO-1 分 optimizer state，ZeRO-2 再分 gradient，ZeRO-3 / FSDP 进一步把 parameter 也分片；激活值通常还需要 checkpointing 单独处理。
-```
 
 ---
 
@@ -1150,17 +1094,6 @@ FSDP 看到的"权重"是 TP 已经分片后的 1/t，再在 d 个设备上分�
 
 </details>
 
-```quiz
-title: Section Check · Tensor Parallelism
-question: 为什么 TP 通常优先放在节点内 NVLink / NVSwitch 上？
-answer: D
-A. 因为 TP 只在 optimizer step 时通信一次
-B. 因为 TP 不需要 collective communication
-C. 因为 TP 只能用于 embedding 层
-D. 因为 TP 每层都有高频通信，延迟和带宽都很敏感
-explanation: TP 把单层矩阵乘切到多卡上，Attention 和 MLP 中都会出现 AllGather、AllReduce 或 ReduceScatter，因此更适合节点内高速互联。
-```
-
 ---
 
 ## 七、流水线并行（Pipeline Parallelism）
@@ -1386,17 +1319,6 @@ optimizer.step()
 # 其余阶段只做 recv/send，对数据来源无感知（模块化设计）
 ```
 
-```quiz
-title: Section Check · Pipeline Parallelism
-question: 1F1B 相比 GPipe 最核心的工程收益是什么？
-answer: B
-A. 完全消除 pipeline bubble
-B. 降低同时保存的 activation 数量
-C. 不再需要 microbatch
-D. 不再需要 stage 间通信
-explanation: 1F1B 在稳态中 forward/backward 交错，activation 峰值从 GPipe 的 O(M) 更接近 O(P)，但 bubble 和 stage 通信仍然存在。
-```
-
 ---
 
 ## 八、混合并行策略
@@ -1477,17 +1399,6 @@ $$X_\text{opt} = \sqrt{\frac{B}{F} \cdot \frac{M_X}{M_Y} \cdot N}$$
 ### 8.4 Picotron 中的进程组管理
 
 Picotron 使用 `ProcessGroupManager` 统一管理 4D 并行的进程组分配。设备排列顺序为 `DP → CP → TP → PP`，每个 rank 的坐标可由整除取模直接算出；各维度的通信组通过枚举其他维度的所有组合来创建。具体设计细节见 [[#九、Picotron 实战：从零构建分布式训练框架]] §9.2。
-
-```quiz
-title: Section Check · 混合并行
-question: 在常见 3D 并行布局里，哪个放置原则最稳妥？
-answer: A
-A. TP 放节点内，PP 可跨节点，DP/FSDP 放更外层
-B. TP 放跨节点，因为 TP 通信最少
-C. PP 必须放节点内，因为 PP 每层都 AllReduce
-D. DP 不能和 TP 同时使用
-explanation: TP 通信最频繁，最好走 NVLink/NVSwitch；PP 只在 stage 边界传 activation/gradient，更适合跨节点；DP/FSDP 通常作为外层复制或状态分片维度。
-```
 
 ---
 
@@ -1621,17 +1532,6 @@ local logits: [B, S, V/vp]
 完整 Transformer 并行全景图可以把 DP/TP/SP/CP/EP/VP 的通信模式放到同一张图里：
 
 ![完整 Transformer 并行全景：DP/TP/SP/CP/EP/VP 交织](https://ailzhang.github.io/posts/distributed-compute-in-transformer/overview.svg)
-
-```quiz
-title: Section Check · N-D 并行
-question: Sequence Parallel 和 Context Parallel 的关键区别是什么？
-answer: C
-A. SP 切参数，CP 切 optimizer state
-B. SP 只用于 MoE expert，CP 只用于 embedding
-C. SP 主要服务 element-wise 操作，CP 让 attention 在切分序列后仍能访问跨 rank KV
-D. SP 和 CP 完全等价，只是名字不同
-explanation: SP 利用 LayerNorm、Dropout、残差等逐元素操作不依赖跨位置信息；CP 则用于 attention，需要通过 ring 或 KV exchange 处理跨 rank 的上下文依赖。
-```
 
 ## 九、Picotron 设计解析
 
@@ -1822,17 +1722,6 @@ Stage 3 (GPU3): Layer 24-31  (计算 loss)
   CP → 节点内优先（Ring Attention 延迟敏感）
 ```
 
-```quiz
-title: Section Check · Picotron
-question: Picotron 的 ProcessGroupManager 主要解决什么问题？
-answer: B
-A. 自动选择最优学习率
-B. 根据 global rank 建立 DP/TP/PP/CP 等通信子组
-C. 把 checkpoint 自动转换成 HuggingFace 格式
-D. 替代 NCCL 完成矩阵乘
-explanation: 4D 并行需要每个 rank 知道自己属于哪些通信组；ProcessGroupManager 把 rank 坐标和子组创建集中封装，训练代码只需使用对应 group。
-```
-
 ---
 
 ## 十、总结与最佳实践
@@ -1904,17 +1793,6 @@ reference
 - [How To Scale Your Model (JAX Scaling Book)](https://jax-ml.github.io/scaling-book/) — 本教程主要参考
 - [Visualizing Parallelism in Transformer](https://ailzhang.github.io/posts/distributed-compute-in-transformer/) — Ailing Zhang (Meta PyTorch)，第八½章主要参考，包含 overview / embedding / attention / mlp / moe / loss 六张 SVG 全景图
 - [Picotron Tutorial Playlist](https://www.youtube.com/playlist?list=PL-_armZiJvAnhcRr6yTJ0__f3Oi-LLi9S) — 配套视频教程
-
-```quiz
-title: Section Check · 总结
-question: 看到一个新的并行训练方案，最先应该问哪一类问题？
-answer: D
-A. 它用了几个英文缩写
-B. 它是不是一定比 FSDP 快
-C. 它是否完全不需要通信
-D. 它切了什么维度、通信在哪里发生、走什么拓扑、省哪类显存
-explanation: 并行策略的本质是分片对象、通信位置、硬件拓扑和显存账本的组合；只背 DP/TP/PP/FSDP 缩写无法判断方案是否合理。
-```
 
 ---
 
@@ -2229,14 +2107,3 @@ DP = 2    复制两份 pipeline 做数据并行
 如果一个方案只说“用了 3D parallel”，但不说明这四点，基本还没讲清楚。工程上真正的设计不是把缩写堆起来，而是把最频繁的通信放到最快的互联，把最占显存的状态切到合适维度，并让 compute 和 communication 尽量 overlap。
 
 </details>
-
-```quiz
-title: Section Check · 练习题回顾
-question: 如果一个模型单层 GEMM 太大、单卡算不动，优先考虑哪种并行来切开层内计算？
-answer: B
-A. 只加 Data Parallel
-B. Tensor Parallel
-C. 只加 activation checkpointing
-D. 只增加 dataloader worker
-explanation: Data Parallel 和 checkpointing 不能把单层矩阵乘本身切开；Tensor Parallel 通过 column/row parallel linear 把层内 GEMM 分到多张 GPU 上。
-```

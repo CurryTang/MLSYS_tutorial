@@ -263,17 +263,6 @@ $$
 
 ---
 
-```quiz
-title: Recurrence Quick Check
-question: If passenger 1 initially sits in seat k, where 2 ≤ k ≤ n-1, what is the size of the isomorphic problem that follows?
-answer: C
-A. k-1
-B. n-k
-C. n-k+1
-D. n-1
-explanation: The relevant passengers are k,k+1,...,n, for a total of n-k+1 passengers; passenger k becomes the new random seat chooser.
-```
-
 ## One-sentence summary
 
 An intermediate seat merely passes the role of the "absent-minded passenger" farther back. The conflict chain is equally likely to reach seat 1 or seat $n$ first, so the final passenger sits in their own seat with probability $1/2$.

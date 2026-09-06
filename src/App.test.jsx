@@ -1422,13 +1422,13 @@ describe('App', () => {
     expect(within(visual).getByText(/外星文字典偏序抽取两步核心法/i)).toBeInTheDocument();
   });
 
-  it('routes to Review 01 Core Fundamentals flashcards and verifies interactive quiz without upfront answer', async () => {
+  it('routes to Review 01 Core Fundamentals flashcards and expands a card', async () => {
     globalThis.fetch.mockImplementation(async (input) => {
       const requestUrl = String(input);
       return {
         ok: true,
         text: async () => requestUrl.includes('Review01')
-          ? `# 复习卡片：常考基础题\n\n<details class="review-card">\n<summary class="review-card-summary">\n  <span class="review-card-title">归并排序 (Merge Sort)</span>\n</summary>\n<div class="review-card-content">\n\n\`\`\`quiz\ntitle: 自测题\nquestion: 链表归并空间复杂度？\nA. 链表 O(1)，数组 O(n)\nB. 链表 O(n)，数组 O(1)\n答案: A\n解析: 链表调整指针只需 O(1)\n\`\`\`\n\n</div>\n</details>\n\n<details class="review-card">\n<summary class="review-card-summary">\n  <span class="review-card-title">快速排序 (Quick Sort)</span>\n</summary>\n</details>\n\n<details class="review-card">\n<summary class="review-card-summary">\n  <span class="review-card-title">动态数组实现 (Dynamic Array)</span>\n</summary>\n</details>`
+          ? `# 复习卡片：常考基础题\n\n<details class="review-card">\n<summary class="review-card-summary">\n  <span class="review-card-title">归并排序 (Merge Sort)</span>\n</summary>\n<div class="review-card-content">\n\n分治排序：切分、递归、双指针合并。\n\n</div>\n</details>\n\n<details class="review-card">\n<summary class="review-card-summary">\n  <span class="review-card-title">快速排序 (Quick Sort)</span>\n</summary>\n</details>\n\n<details class="review-card">\n<summary class="review-card-summary">\n  <span class="review-card-title">动态数组实现 (Dynamic Array)</span>\n</summary>\n</details>`
           : '# Default Tutorial',
       };
     });
@@ -1442,21 +1442,11 @@ describe('App', () => {
     expect(screen.getByText('快速排序 (Quick Sort)')).toBeInTheDocument();
     expect(screen.getByText('动态数组实现 (Dynamic Array)')).toBeInTheDocument();
 
-    // Verify card is collapsed by default and option is not yet shown
     const detailsElem = mergeSortHeader.closest('details');
     expect(detailsElem).not.toHaveAttribute('open');
 
-    // Click summary to expand
     fireEvent.click(mergeSortHeader);
-
-    // Verify QuizBlock options exist and feedback is hidden initially
-    const optionA = screen.getByRole('button', { name: /链表 O\(1\)，数组 O\(n\)/i });
-    expect(optionA).toBeInTheDocument();
-    expect(screen.queryByText(/回答正确/i)).not.toBeInTheDocument();
-
-    // Click option A to trigger answer check
-    fireEvent.click(optionA);
-    expect(await screen.findByText(/回答正确。/i)).toBeInTheDocument();
+    expect(await screen.findByText(/分治排序：切分、递归、双指针合并/i)).toBeInTheDocument();
   });
 });
 

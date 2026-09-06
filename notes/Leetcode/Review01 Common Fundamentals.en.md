@@ -1,6 +1,6 @@
 # Review Flashcards: Core Fundamentals (Review 1)
 
-This module provides high-yield algorithm interview review flashcards: distilled **Problem Definitions**, **Core Mental Models**, **Minimal Core Implementations**, **Complexity Invariants**, and **Interactive Self-Check MCQs**. Click any card title to expand.
+This module provides high-yield algorithm interview review flashcards: distilled **Problem Definitions**, **Core Mental Models**, **Minimal Core Implementations**, **Complexity Invariants**. Click any card title to expand.
 
 ---
 
@@ -59,22 +59,6 @@ def merge_sort(nums: list[int]) -> list[int]:
 - **Time Complexity**: Best $O(n \log n)$ / Worst $O(n \log n)$ / Average $O(n \log n)$ (Tree height $\log n$, level merge work fixed at $O(n)$)
 - **Auxiliary Space**: $O(n)$ (merge buffer) + $O(\log n)$ (call stack frames)
 - **Stability**: **Stable** (left-half precedence on ties)
-
-</div>
-
-<div class="review-block">
-<div class="review-block-label">🎯 Interactive Self-Check MCQ (Click to reveal explanation)</div>
-
-```quiz
-title: Self Check · Merge Sort Space Complexity
-question: When performing merge sort on a singly linked list of n nodes using a bottom-up iterative approach, what is the optimal auxiliary space complexity?
-A. O(1)
-B. O(log n)
-C. O(n)
-D. O(n log n)
-Answer: A
-Explanation: Array merge sort requires an O(n) temporary buffer to avoid expensive element shifting; however, a linked list can be merged entirely in-place by rewiring the 'next' pointers. Using iterative bottom-up step sizes (1, 2, 4, 8...), it avoids recursion stack frames entirely, achieving strict O(1) auxiliary space.
-```
 
 </div>
 
@@ -137,22 +121,6 @@ def quick_sort(nums: list[int], l: int, r: int) -> None:
 - **Time Complexity**: Best $O(n \log n)$ / Worst $O(n^2)$ (skewed partitions) / Average $O(n \log n)$
 - **Auxiliary Space**: $O(\log n)$ (stack frames, degrades to $O(n)$ in worst case)
 - **Stability**: **Unstable** (long-distance swaps disrupt relative order)
-
-</div>
-
-<div class="review-block">
-<div class="review-block-label">🎯 Interactive Self-Check MCQ (Click to reveal explanation)</div>
-
-```quiz
-title: Self Check · Quick Sort Duplicate Degradation
-question: When sorting an array where all elements are identical (e.g. 10000 copies of value 7), what happens to standard Lomuto partition quick sort?
-A. Degenerates severely to O(n^2) runtime
-B. Runs in optimal O(n log n) time
-C. Runs in linear O(n) time
-D. Triggers an index out of bounds error
-Answer: A
-Explanation: In standard Lomuto partition, condition nums[j] <= pivot evaluates to true for every single element. Every element is repeatedly swapped into the left partition, advancing the pivot by only 1 index per round and yielding recursion depth n with total time O(n^2). The canonical fix is three-way partitioning (Dutch National Flag), which collects equal elements in the center and removes them from subsequent recursive subproblems in linear O(n) total time.
-```
 
 </div>
 
@@ -228,22 +196,6 @@ class DynamicArray:
 
 </div>
 
-<div class="review-block">
-<div class="review-block-label">🎯 Interactive Self-Check MCQ (Click to reveal explanation)</div>
-
-```quiz
-title: Self Check · Dynamic Array Growth Strategy
-question: If a dynamic array resizes by adding a constant increment (e.g. capacity += 1000 whenever full), what is the total copy time and amortized complexity per push_back across N sequential appends?
-A. Total time O(N^2), amortized O(N)
-B. Total time O(N log N), amortized O(log N)
-C. Total time O(N), amortized O(1)
-D. Total time O(N), amortized O(N)
-Answer: A
-Explanation: With constant step C = 1000, appending N items triggers N/C expansions. The copy counts across resizes are C, 2C, 3C, ..., N, giving total copies C * (1 + 2 + ... + N/C) ≈ O(N^2). Amortized across N insertions, each append degrades to O(N) average time. This quadratic blowout explains why production runtimes must employ geometric doubling (multiplicative scaling) rather than linear growth.
-```
-
-</div>
-
 </div>
 </details>
 
@@ -303,22 +255,6 @@ def search_lower_bound(nums: list[int], target: int) -> int:
 - **Time Complexity**: $O(\log n)$ (halves search space every iteration)
 - **Auxiliary Space**: $O(1)$ (iterative without stack frames)
 - **Termination Invariant**: Loop always terminates with $l = r + 1$
-
-</div>
-
-<div class="review-block">
-<div class="review-block-label">🎯 Interactive Self-Check MCQ (Click to reveal explanation)</div>
-
-```quiz
-title: Self Check · Binary Search Infinite Loop Trap
-question: When using a closed-range binary search template, if the update logic has a branch l = mid alongside default floor mid = l + (r - l) // 2, what happens when the search space narrows to exactly 2 elements (r = l + 1)?
-A. Enters an infinite loop
-B. Converges normally
-C. Triggers out of bounds error
-D. Incorrectly reports target absent
-Answer: A
-Explanation: When r = l + 1, integer division floors mid = l + (1) // 2 = l. If the l = mid branch is chosen, l is assigned its existing value, leaving the interval [l, r] completely unreduced. The loop runs forever. The fundamental rule to prevent this: whenever an l = mid branch exists, the midpoint must round up using mid = l + (r - l + 1) // 2.
-```
 
 </div>
 
