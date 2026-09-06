@@ -112,10 +112,26 @@ Pioneered by Harrison, Kreps (1979) and Harrison, Pliska (1981), and formalized 
 
 Raw currency quotes have no invariant physical meaning due to the time value of money and inflation.
 - A **numeraire** $N_t$ is any strictly positive tradeable asset without intermediate dividend leakage ($N_t > 0$ a.s.) chosen as the standard of reference for relative valuation;
-- The standard baseline is the **money market bank account**:
-  $$B_t = \exp\left( \int_0^t r_s ds \right), \quad B_0 = 1$$
-- The **discounted asset price process**:
-  $$\widetilde{S}_t = \frac{S_t}{B_t} = e^{-\int_0^t r_s ds} S_t$$
+- **Standard Benchmark Numeraire: Money Market Bank Account ($B_t$)**:
+  $$
+  B_t = \exp\left( \int_0^t r_s ds \right), \quad B_0 = 1
+  $$
+  - **Financial Intuition**: Imagine depositing \$1 into a risk-free bank account at time $0$ ($B_0 = 1$), continuously reinvesting all earned interest at the prevailing instantaneous risk-free short rate $r_s$;
+  - **Differential Derivation**: Over an infinitesimal time interval $[s, s+ds]$, risk-free interest accrues according to $dB_s = r_s B_s ds$. Integrating both sides:
+    $$
+    \int_0^t \frac{dB_s}{B_s} = \int_0^t r_s ds \implies \ln B_t - \ln B_0 = \int_0^t r_s ds \implies B_t = \exp\left( \int_0^t r_s ds \right)
+    $$
+  - **Constant Interest Rate Special Case**: If the risk-free rate is constant $r$, this simplifies immediately to the familiar continuous compounding factor $B_t = e^{rt}$, capturing the pure time value of money.
+- **The Core Analytical Object: Discounted Asset Price Process ($\widetilde{S}_t$)**:
+  $$
+  \widetilde{S}_t = \frac{S_t}{B_t} = e^{-\int_0^t r_s ds} S_t
+  $$
+  - **Why Divide by $B_t$? (Stripping the Baseline Time Value of Money)**:
+    Nominal currency is not an invariant physical unit of measurement. \$100 today cannot be directly compared to \$100 ten years from now. Undiscounted asset prices $S_t$ naturally contain an embedded upward drift merely due to compounding interest;
+    Dividing by $B_t$ transforms $\widetilde{S}_t$ into a relative purchasing power measure: **"the value of the asset expressed in units of time-0 baseline dollars / money market fund shares"**, leveling all assets onto a synchronized temporal baseline;
+  - **Foundational Role in Martingale Theory**:
+    The undiscounted money account $B_t$ has drift $dB_t = r_t B_t dt > 0$, so it can never be a martingale. However, once discounted, its relative price is $\widetilde{B}_t = B_t / B_t \equiv 1$ (trivially a martingale).
+    The foundational insight of no-arbitrage pricing is that once deterministic compounding interest is normalized out, the discounted price $\widetilde{S}_t$ of every tradeable asset must become a **fair game (pure martingale)** under the risk-neutral measure $\mathbb{Q}$, exhibiting zero risk-adjusted excess drift.
 
 ---
 

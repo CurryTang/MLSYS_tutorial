@@ -111,10 +111,26 @@ $$Z_t = \left. \frac{d\mathbb{Q}}{d\mathbb{P}} \right|_{\mathcal{F}_t} = \mathbb
 
 金融资产的纯数字（例如股票价值 100 美元）本身没有绝对意义，货币会通胀，资金有利息。
 - **计价基准（Numeraire）$N_t$**：任何价格几乎处处严格为正（$N_t > 0$ a.s.）且不派发中间现金流的交易资产，都可以被选为测量其他所有资产价值的“标尺”；
-- 最常用的标准计价物是**无风险货币市场账户（Money Market Account）**：
-  $$B_t = \exp\left( \int_0^t r_s ds \right), \quad B_0 = 1$$
-- **贴现资产价格（Discounted Asset Price）**：
-  $$\widetilde{S}_t = \frac{S_t}{B_t} = e^{-\int_0^t r_s ds} S_t$$
+- **最常用的标准计价物：无风险货币市场账户（Money Market Account, $B_t$）**：
+  $$
+  B_t = \exp\left( \int_0^t r_s ds \right), \quad B_0 = 1
+  $$
+  - **金融直觉**：想象你在时刻 $0$ 存入银行 $1$ 美元（$B_0 = 1$），在每一个微元瞬间以全市场瞬时无风险利率（Short Rate）$r_s$ 享受连续复利累积；
+  - **微元推导**：在瞬时微元 $[s, s+ds]$ 内，无风险存款的利息增量为 $dB_s = r_s B_s ds$。两边除以 $B_s$ 积分：
+    $$
+    \int_0^t \frac{dB_s}{B_s} = \int_0^t r_s ds \implies \ln B_t - \ln B_0 = \int_0^t r_s ds \implies B_t = \exp\left( \int_0^t r_s ds \right)
+    $$
+  - **常数利率特例**：若市场无风险利率为常数 $r$，积分直接化简为家喻户晓的连续复利终值公式 $B_t = e^{rt}$。它代表了纯粹时间价值的无风险增长轨迹。
+- **核心观察视角：贴现资产价格过程（Discounted Asset Price Process, $\widetilde{S}_t$）**：
+  $$
+  \widetilde{S}_t = \frac{S_t}{B_t} = e^{-\int_0^t r_s ds} S_t
+  $$
+  - **为什么必须除以 $B_t$？（剥离货币时间价值的天然通胀）**：
+    货币本身不是不变的物理度量衡。今天的 100 美元和 10 年后的 100 美元不可直接比对。如果不做贴现，资产价格 $S_t$ 的漂移项中必然夹杂着随时间自然累积的“无风险利息底色”；
+    通过除以 $B_t$，$\widetilde{S}_t$ 的物理含义变为：**“以时刻 0 的基准美元为度量，时刻 $t$ 该资产相当于多少份无风险基金份额”**，从而将所有资产拉回同一时间基准维度；
+  - **鞅论建模的基石**：
+    无风险账户自身若不贴现，$dB_t = r_t B_t dt$ 带有正漂移，绝对不可能是鞅；但一经贴现，$\widetilde{B}_t = B_t / B_t \equiv 1$ 恒为常数（天然纯鞅）。
+    无套利定价的核心思想，正是要求市场上所有风险资产剔除无风险利息后（即贴现相对价格 $\widetilde{S}_t$），在等价鞅测度 $\mathbb{Q}$ 下**不再具有任何确定性的超额收益漂移，变成一场纯粹的公平博弈（Fair Game，即纯鞅）**！
 
 ---
 
