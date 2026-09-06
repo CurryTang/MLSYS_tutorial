@@ -1987,6 +1987,17 @@ const quantNoteDefinitions = [
     },
   ),
   createTutorialDefinition(
+    'Quant 16 · 线性回归、核平滑与面试经典题：OLS、Gauss–Markov、Ridge/Lasso',
+    'Quant16 Linear Regression Kernel Smoothing and Interview Classics.md',
+    'Quant16 Linear Regression Kernel Smoothing and Interview Classics.en.md',
+    {
+      directory: 'quant',
+      titleEn: 'Quant 16 · Linear Regression, Kernel Smoothing & Interview Classics: OLS, Gauss–Markov, Ridge/Lasso',
+      category: 'Statistics & ML',
+      difficulty: 'Hard',
+    },
+  ),
+  createTutorialDefinition(
     'C++ 面经 1 · 面向对象基础与类设计',
     'QuantDevCPP01 OOP Fundamentals Class Design.md',
     null,
