@@ -230,11 +230,13 @@ $$\boxed{\mathbb{E}^\mathbb{P}\left[ \exp\left( \frac{1}{2} \int_0^T \theta_t^2 
 2. 取市场风险溢价 $\theta = \frac{\mu - r}{\sigma}$。由 Girsanov 定理，在测度 $\mathbb{Q}$ 下：
    $$dW_t^\mathbb{Q} = dW_t^\mathbb{P} + \theta dt \iff dW_t^\mathbb{P} = dW_t^\mathbb{Q} - \theta dt = dW_t^\mathbb{Q} - \frac{\mu - r}{\sigma} dt$$
 3. 将 $dW_t^\mathbb{P}$ 代入原 SDE：
-   $$\begin{aligned}
+   $$
+   \begin{aligned}
    dS_t &= \mu S_t dt + \sigma S_t \left( dW_t^\mathbb{Q} - \frac{\mu - r}{\sigma} dt \right) \\
    &= \mu S_t dt + \sigma S_t dW_t^\mathbb{Q} - (\mu - r) S_t dt \\
    &= \mathbf{r S_t dt + \sigma S_t dW_t^\mathbb{Q}}
-   \end{aligned}$$
+   \end{aligned}
+   $$
 4. 验证贴现过程 $\widetilde{S}_t = e^{-rt} S_t$：
    根据伊藤乘积法则：
    $$d(e^{-rt} S_t) = -r e^{-rt} S_t dt + e^{-rt} dS_t = -r e^{-rt} S_t dt + e^{-rt} (r S_t dt + \sigma S_t dW_t^\mathbb{Q}) = \sigma (e^{-rt} S_t) dW_t^\mathbb{Q}$$
@@ -287,12 +289,14 @@ $$\mathbf{\mathbb{Q}(S_T > K \mid \mathcal{F}_t) = N(d_2)}$$
 根据计价物变换法则：
 $$\frac{d\mathbb{Q}^S}{d\mathbb{Q}} = \frac{S_T / S_t}{B_T / B_t} = \frac{e^{-r(T-t)} S_T}{S_t}$$
 将第一项重写为：
-$$\begin{aligned}
+$$
+\begin{aligned}
 e^{-r(T-t)} \mathbb{E}^\mathbb{Q} \left[ S_T \cdot \mathbb{I}_{\{S_T > K\}} \;\middle|\; \mathcal{F}_t \right] 
 &= S_t \cdot \mathbb{E}^\mathbb{Q} \left[ \frac{e^{-r(T-t)} S_T}{S_t} \cdot \mathbb{I}_{\{S_T > K\}} \;\middle|\; \mathcal{F}_t \right] \\
 &= S_t \cdot \mathbb{E}^\mathbb{Q} \left[ \frac{d\mathbb{Q}^S}{d\mathbb{Q}} \cdot \mathbb{I}_{\{S_T > K\}} \;\middle|\; \mathcal{F}_t \right] \\
 &= \mathbf{S_t \cdot \mathbb{Q}^S(S_T > K \mid \mathcal{F}_t)}
-\end{aligned}$$
+\end{aligned}
+$$
 
 直接计算即可证明：在股票测度 $\mathbb{Q}^S$ 下，事件 $S_T > K$ 的概率恰好是：
 $$\mathbf{\mathbb{Q}^S(S_T > K \mid \mathcal{F}_t) = N(d_1)}$$

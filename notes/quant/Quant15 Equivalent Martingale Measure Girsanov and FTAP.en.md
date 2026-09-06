@@ -225,11 +225,13 @@ Whenever this expectation is finite, $Z_t$ is guaranteed to be a true martingale
 2. Set market price of risk $\theta = \frac{\mu - r}{\sigma}$. By Girsanov's theorem:
    $$dW_t^\mathbb{P} = dW_t^\mathbb{Q} - \theta dt = dW_t^\mathbb{Q} - \frac{\mu - r}{\sigma} dt$$
 3. Substitute into the SDE:
-   $$\begin{aligned}
+   $$
+   \begin{aligned}
    dS_t &= \mu S_t dt + \sigma S_t \left( dW_t^\mathbb{Q} - \frac{\mu - r}{\sigma} dt \right) \\
    &= \mu S_t dt + \sigma S_t dW_t^\mathbb{Q} - (\mu - r) S_t dt \\
    &= \mathbf{r S_t dt + \sigma S_t dW_t^\mathbb{Q}}
-   \end{aligned}$$
+   \end{aligned}
+   $$
 4. Verify discounted price process $\widetilde{S}_t = e^{-rt} S_t$:
    $$d(e^{-rt} S_t) = -r e^{-rt} S_t dt + e^{-rt} dS_t = \sigma (e^{-rt} S_t) dW_t^\mathbb{Q}$$
    **The $dt$ drift is eliminated entirely; only the diffusion term remains!**
@@ -272,11 +274,13 @@ This is the **probability that the call expires in-the-money under the money/cas
 Choose the underlying stock itself as the numeraire ($U_t = S_t$). The change of measure density is:
 $$\frac{d\mathbb{Q}^S}{d\mathbb{Q}} = \frac{S_T / S_t}{B_T / B_t} = \frac{e^{-r(T-t)} S_T}{S_t}$$
 Rewriting the first term:
-$$\begin{aligned}
+$$
+\begin{aligned}
 e^{-r(T-t)} \mathbb{E}^\mathbb{Q} \left[ S_T \cdot \mathbb{I}_{\{S_T > K\}} \;\middle|\; \mathcal{F}_t \right] 
 &= S_t \cdot \mathbb{E}^\mathbb{Q} \left[ \frac{d\mathbb{Q}^S}{d\mathbb{Q}} \cdot \mathbb{I}_{\{S_T > K\}} \;\middle|\; \mathcal{F}_t \right] \\
 &= \mathbf{S_t \cdot \mathbb{Q}^S(S_T > K \mid \mathcal{F}_t)}
-\end{aligned}$$
+\end{aligned}
+$$
 
 Under the share measure $\mathbb{Q}^S$, the probability of ending in-the-money is precisely:
 $$\mathbf{\mathbb{Q}^S(S_T > K \mid \mathcal{F}_t) = N(d_1)}$$
