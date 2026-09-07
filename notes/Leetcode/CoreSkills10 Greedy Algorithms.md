@@ -1,4 +1,4 @@
-# Core Skills 12 · 贪心算法：从 Kadane 原理、强制选择到最远包络
+# Core Skills 10 · 贪心算法：从 Kadane 原理、强制选择到最远包络
 
 ## 1. 贪心算法的核心心智模型
 

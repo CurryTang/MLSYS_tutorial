@@ -56,6 +56,17 @@
 .brand-lockup strong {
   font-family: "Space Grotesk", "Avenir Next", sans-serif;
   font-size: 1rem;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.brand-url {
+  font-size: 0.78rem;
+  font-weight: 500;
+  color: #58707b;
+  word-break: break-all;
 }
 
 .brand-lockup small {

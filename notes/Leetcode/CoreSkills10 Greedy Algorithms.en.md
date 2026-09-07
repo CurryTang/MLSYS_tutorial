@@ -1,4 +1,4 @@
-# Core Skills 12 · Greedy Algorithms: From Kadane's Principle and Forced Moves to Reachable Envelopes
+# Core Skills 10 · Greedy Algorithms: From Kadane's Principle and Forced Moves to Reachable Envelopes
 
 ## 1. The Core Mental Model of Greedy Algorithms
 
