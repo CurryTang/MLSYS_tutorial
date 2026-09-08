@@ -1,13 +1,4 @@
-# ML Coding 00B · LLM 基础：Decoder-Only 架构胜出原理解析、文本向量表征与混合精度训练体系
-
-在大语言模型（LLM）与生成式 AI 系统工程中，理解模型架构底层的选型逻辑、文本向量表征的演进瓶颈、以及数值精度在硬件层面的流动方式，是贯穿模型预训练、微调与大规模部署的核心必修课。
-
-本篇系统梳理大模型基础三大技术支柱：
-1. **Decoder-Only 架构深度剖析与文本向量表征：为什么 Decoder-Only 成为绝对主流？现代 Decoder 如何攻克各向异性（Anisotropy）与表征退化？**
-2. **硬件底层数值精度格式（FP32 / FP16 / BF16 / FP8 / NVFP4）与混合精度训练体系（Master Weights、Loss Scaling 与随机舍入）**
-3. **自回归语言模型初始 Loss 数学推导与第 0 步健全性检查（ln(V) 严密推导、温度系数、Label Smoothing、Tokenizer 词表效应与千卡预训练防翻车排查规范）**
-
----
+# ML Coding 00B · Transformer 与 LLM 基础
 
 ## 模块一：为什么 Decoder-Only 成为当今大模型的绝对主流？
 
@@ -27,14 +18,14 @@
 │ • 无法自然连续自回归生成│ • 任务定义割裂 / 显存开销双份│ • Zero-shot / Few-shot  │
 └───────────────────────┘     └───────────────────────┘     └───────────────────────┘
                                                                         │
-                                                    🌟 现代 LLM 范式大一统
+                                                    现代 LLM 因果生成范式收敛
 ```
 
 ### 四大决定性技术与系统工程动因
 
-#### 1. 统一自回归范式与零任务摩擦（Unified Next-Token Prediction & In-Context Learning）
+#### 1. 统一自回归范式与上下文学习（Unified Next-Token Prediction & In-Context Learning）
 
-- **任务表达大一统**：在 Decoder-Only 架构下，**预训练（Pre-training）、指令微调（SFT）、少样本上下文学习（Few-shot ICL）、Prompting、思维链推理（Chain-of-Thought）** 全部统一为同一个数学形式——**基于上文预测下一个 Token 的条件概率**：
+- **统一的任务表达**：在 Decoder-Only 架构下，**预训练（Pre-training）、指令微调（SFT）、少样本上下文学习（Few-shot ICL）、Prompting、思维链推理（Chain-of-Thought）** 全部统一为同一个数学形式——**基于上文预测下一个 Token 的条件概率**：
 
 $$P(X) = \prod_{i=1}^S P(x_i \mid x_1, x_2, \dots, x_{i-1})$$
 
@@ -60,9 +51,15 @@ $$P(X) = \prod_{i=1}^S P(x_i \mid x_1, x_2, \dots, x_{i-1})$$
 - 因果下三角注意力天然具备时间单向因果性，与**旋转位置编码（RoPE）**、**Chunked Prefill** 以及注意力窗口滑动机制（Sliding Window）天然契合，能够非常平滑地通过位置内插/外推（如 YaRN、Dynamic NTK）从 4K 上下文无缝拓展到 128K 乃至 1M。
 - 双向 Encoder 在极长上下文下容易发生**注意力弥散（Attention Dilution）**，且无法直接使用单向因果推理优化。
 
+#### 长序列 Attention 效率演进脉络
+
+标准 Scaled Dot-Product Attention 在 $n \gg d$ 时，时间复杂度 $\mathcal{O}(n^2 d)$、空间 $\mathcal{O}(n^2)$（FlashAttention 可将激活显存降到 $\mathcal{O}(nd)$，但 FLOPs 仍是二次方）。长上下文同时撞上算力墙、训练激活显存与推理 KV Cache 带宽墙。下图概括从系统补丁（FlashAttention）到 Sparse / Linear / Chunking 三条算法路线，以及 Hybrid 收敛形态：
+
+![长序列 Attention 效率演进脉络](./assets/attention-efficiency-landscape.png)
+
 ---
 
-### 5. 文本向量表征（Embedding）专题：为什么早期 Encoder 独领风骚？最新研究如何攻克 Decoder 的 Embedding 缺陷？
+### 5. 文本向量表征（Embedding）专题：双向架构优势与现代 Decoder-Only 表征演进
 
 在大模型生态中，除了自回归生成，**文本向量表征（Dense Text Embedding）** 是 RAG 检索、语义搜索、向量数据库匹配的核心基石。
 
@@ -81,12 +78,12 @@ Embedding 演进路线与表征范式突破：
                                           │ 1. 解禁因果掩码: 微调时开启全双向注意力 (Bidirectional)│
                                           │ 2. 指令感知对比学习 (InfoNCE + Task Prompts) 消除各向异性│
                                           │ 3. 架构池化升级: 潜注意力池化 (Latent Attention Pooling)│
-                                          │ 4. 大一统多任务: 单模型兼具生成与检索 (GritLM)          │
+                                          │ 4. 统一生成与检索: 单模型兼具生成与向量编码 (GritLM)  │
                                           │ 5. 套娃嵌套表征 (Matryoshka Representation Learning, MRL)│
                                           └────────────────────────────────────────────────────────┘
 ```
 
-#### 为什么早期向量提取（Embedding / 稠密检索）绝对偏爱 Encoder / Encoder-Decoder？
+#### 早期向量提取（Embedding / 稠密检索）偏向 Encoder / Encoder-Decoder 的机理分析
 
 1. **全双向注意力的全局上下文压缩能力（Bidirectional Contextual Aggregation）**：
    - BERT、RoBERTa 和 T5 采用全双向注意力矩阵（$M_{ij} = 0$）。每个 Token 都能在任意层同时与全文所有前向与后向 Token 进行无障碍特征交互；
@@ -158,9 +155,9 @@ $$\mathcal{L}_{\text{InfoNCE}} \iff \underbrace{\mathbb{E}_{(\mathbf{x}, \mathbf
 
 ---
 
-#### 近年来最新 Research 如何彻底突破 Decoder-Only 的 Embedding 瓶颈？
+#### 现代研究对 Decoder-Only 文本向量表征的架构与训练演进
 
-近年来，学界与工业界发现 7B~70B 的大模型学习了海量的世界知识、多语言与代码逻辑，具有小模型无法比拟的语义理解深度。通过以下五大最新研究突破，Decoder-Only 在 MTEB 榜单上全面碾压了传统小 Encoder：
+随着 7B~70B 基础模型在世界知识、跨语言和代码逻辑上的深入学习，Decoder-Only 架构展现出深厚的语义表征潜力。通过以下五项核心技术演进，现代 Decoder-Only 模型在 MTEB 等综合基准上显著超越了传统的双向小型 Encoder：
 
 ##### 1. 解禁因果掩码：开启双向注意力微调（Bidirectional Fine-Tuning）
 - **代表工作**：`E5-Mistral-7B`, `SFR-Embedding`, `BGE-en-ICL`
@@ -183,7 +180,7 @@ $$\mathcal{L}_{\text{InfoNCE}} \iff \underbrace{\mathbb{E}_{(\mathbf{x}, \mathbf
   - 让 $\mathbf{Q}_{\text{latent}}$ 对 Decoder 输出的所有 Token 隐藏序列执行 Cross-Attention 跨注意力聚合；
   - 动态自适应地捕捉长文本中不同位置的关键语义，生成极具信息密度的固定维度句向量。
 
-##### 4. 检索与生成大一统：GritLM（Generative Representational Instruction-Tuning）
+##### 4. 检索与生成统一表征：GritLM（Generative Representational Instruction-Tuning）
 - **代表工作**：`GritLM-7B / 8B`
 - **核心机制**：同一个模型同时兼具**文本向量编码（Embedding）**与**自回归文本生成（Generation）**双重能力。
 - **实现方式**：在微调期间采用混合掩码调度——当任务是 Embedding 时开启双向注意力并计算对比表征损失；当任务是生成时切回因果掩码并计算生成损失。单个模型即可无缝胜任 RAG 链路中的“检索召回”与“答案生成”，显存占用减半。
@@ -212,7 +209,7 @@ BF16 (16-bit): [1 Sign] [ 8 Exponent Bits ] [ 7 Mantissa ]
 |---|---|---|---|---|---|---|
 | **FP32** | 32 bits | 8 bits | 23 bits | $10^{-38} \sim 10^{38}$ | 高（约 7 位有效十进制数字） | 优化器状态、主权重累加基石 |
 | **FP16** | 16 bits | 5 bits | 10 bits | $10^{-5} \sim 6.5 \times 10^4$ | 中（约 3 位有效十进制数字） | 传统 GPU 推理，训练易发生**下溢/溢出** |
-| **BF16** | 16 bits | 8 bits | 7 bits | $10^{-38} \sim 10^{38}$（与 FP32 完全相同） | 较低（约 2 位有效十进制数字） | **现代大模型预训练/微调绝对主流标准** |
+| **BF16** | 16 bits | 8 bits | 7 bits | $10^{-38} \sim 10^{38}$（与 FP32 完全相同） | 较低（约 2 位有效十进制数字） | **现代大模型预训练与微调工业基准** |
 
 ---
 
@@ -253,7 +250,7 @@ FP16 动态损失缩放 (Dynamic Loss Scaling) 闭环流程：
 
 ---
 
-### 3. BF16 为什么能彻底取代 FP16 成为大模型训练标配？
+### 3. BF16 取代 FP16 的数值原理与系统工程考量
 
 1. **相同的动态范围**：BF16 拥有与 FP32 完全一致的 8 位指数位，其动态范围达到 $10^{\pm 38}$，彻底消除了深度神经网络训练中的梯度下溢风险；
 2. **免去 Loss Scaling 调参负担**：不再需要复杂的动态缩放控制器，大幅提升了分布式大规模训练（Megatron-LM, DeepSpeed）的数值稳定性；
@@ -314,9 +311,9 @@ FP16 动态损失缩放 (Dynamic Loss Scaling) 闭环流程：
 └───────────────────────┴───────────────────────┴───────────────────────┴───────────────────────┘
 ```
 
-##### 1. 随机舍入（Stochastic Rounding, SR）：彻底消除 FP32 主权重
-- **核心数学定理**：放弃确定性舍入，采用概率舍入：
-  $$\text{SR}(x) = \begin{cases} \lfloor x  floor & \text{以概率 } 1 - \frac{x - \lfloor x  floor}{\delta} \\ \lceil x  ceil & \text{以概率 } \frac{x - \lfloor x  floor}{\delta} \end{cases}$$
+##### 1. 随机舍入（Stochastic Rounding, SR）：低精度更新与无偏估计
+- **核心数学定理**：放弃确定性舍入，采用概率舍入。设 $\lfloor x \rfloor$ 与 $\lceil x \rceil$ 为相邻量化离散水平，$\delta = \lceil x \rceil - \lfloor x \rfloor$：
+  $$\text{SR}(x) = \begin{cases} \lfloor x \rfloor & \text{以概率 } 1 - \frac{x - \lfloor x \rfloor}{\delta} \\ \lceil x \rceil & \text{以概率 } \frac{x - \lfloor x \rfloor}{\delta} \end{cases}$$
 - **无偏估计**：$\mathbb{E}[\text{SR}(x)] = x$。即使单步更新量 $\Delta W = 10^{-6}$ 远小于 BF16 尾数位，它依然有 $10^{-4}$ 的概率使低位比特翻转。在数万步训练中，**期望累加值与全精度完全一致**，允许直接在纯 16 位张量上完成更新，省去 50% 主权重显存。
 
 ##### 2. 8-bit 优化器（bitsandbytes / Block-wise Dynamic Quantization）
@@ -340,7 +337,7 @@ FP16 动态损失缩放 (Dynamic Loss Scaling) 闭环流程：
 
 ## 模块三：自回归语言模型初始 Loss 数学推导与第 0 步健全性检查（Initial Loss, ln(V) Derivation & Step-0 Sanity Check）
 
-在启动百亿/千亿参数大模型的千卡分布式预训练（耗费数十万 GPU 时）之前，**第一步迭代（Step 0 / First-Step Loss）的数值表现是排查模型代码实现、因果掩码、数据加载与数值溢出最关键的试金石（Sanity Check）**。
+在启动百亿/千亿参数大模型的千卡分布式预训练（耗费数十万 GPU 时）之前，**第一步迭代（Step 0 / First-Step Loss）的数值表现是排查模型代码实现、因果掩码、数据加载与数值溢出关键的数值健全性验证（Sanity Check）**。
 
 ```text
 第 0 步初始 Loss 诊断决策树:
@@ -456,7 +453,7 @@ $$\mathcal{L}_{\text{smooth}} = -(1-\epsilon)\ln \left( \frac{1}{V} \right) - \f
 
 ---
 
-### 6. 高频大模型面试自测单选题（Multiple-Choice Question）
+### 6. 核心工程概念自测题（Multiple-Choice Question）
 
 <details class="exercise">
 <summary><span class="q-label">Q1 · 单选题</span> <span class="q-text">使用 LLaMA-3（词表大小 $V = 128,256$）在千卡集群启动千亿 Token 预训练，在 Step 0 随机初始化未经过任何梯度更新时，下列关于训练损失（Training Loss）与排查诊断的说法中，<strong>哪一项是完全正确的</strong>？</span></summary>
@@ -469,6 +466,6 @@ $$\mathcal{L}_{\text{smooth}} = -(1-\epsilon)\ln \left( \frac{1}{V} \right) - \f
 > 💡 **答案解析**：
 > - **正确选项：C**。
 >   1. **理论初值**：在随机均匀初始化下，每个 Token 的预测概率 $P(y=v) \approx \frac{1}{V}$，标准交叉熵损失 $\mathcal{L}_{\text{init}} = -\ln(1/V) = \ln V$。对于 LLaMA-3，$V=128,256$，$\ln(128256) \approx 11.762$；
->   2. **$L_0 \ll \ln V$ 的严重缺陷**：如果第 0 步 Loss 远低于 11.76（例如 3.2 甚至接近 0），绝非模型天生收敛快，而是模型发生**向未来偷看（Information Leakage）**：Causal Mask 失效变成了双向注意力（直接抄写后一个 Token 的 Embedding），或者 Padding 填充位置参与了 Loss 计算；
+>   2. **$L_0 \ll \ln V$ 的严重缺陷**：如果第 0 步 Loss 远低于 11.76（例如 3.2 甚至接近 0），表明模型发生了**向未来偷看（Information Leakage）**：Causal Mask 失效变成了双向注意力（直接抄写后一个 Token 的 Embedding），或者 Padding 填充位置参与了 Loss 计算；
 >   3. **D 选项错误**：数学上已严密证明，无论标签平滑系数 $\epsilon$ 设为多少，在均匀随机初始化下 $\mathcal{L}_{\text{smooth}} = -(1-\epsilon)\ln(1/V) - \frac{\epsilon}{V} \cdot V \ln(1/V) = \ln V$，保持完全恒定！
 </details>

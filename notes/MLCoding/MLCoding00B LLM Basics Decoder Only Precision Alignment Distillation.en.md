@@ -1,13 +1,4 @@
-# ML Coding 00B · LLM Basics: Why Decoder-Only Won, Dense Text Embeddings & Mixed-Precision Training Systems
-
-In large language model (LLM) system design and generative AI engineering, mastering the architectural selection rationale, dense text embedding bottlenecks, and hardware-level numerical precision dynamics is essential for pre-training, fine-tuning, and production serving.
-
-This note systematically covers 3 foundational pillars of modern LLM systems:
-1. **Why Decoder-Only Won & Dense Text Embeddings: Architectural convergence analysis and how modern research overcame Anisotropy and representation collapse**
-2. **Hardware Numerical Precision Formats (FP32 / FP16 / BF16 / FP8 / NVFP4) & Mixed-Precision Training (Master Weights, Loss Scaling, and Stochastic Rounding)**
-3. **Mathematical Derivation of Initial Loss & Step-0 Sanity Check (ln(V) Proof, Temperature Scaling, Label Smoothing, Tokenizer Effects & Pre-training Diagnostics)**
-
----
+# ML Coding 00B · Transformer & LLM Basics
 
 ## Module 1: Why Has Decoder-Only Become the Dominant LLM Architecture?
 
@@ -29,12 +20,12 @@ Transformer Architectural Evolution & Convergence:
 │   generate sequences  │     │   memory overhead     │     │ • Zero-shot / Few-shot│
 └───────────────────────┘     └───────────────────────┘     └───────────────────────┘
                                                                         │
-                                                    🌟 Modern LLM Convergence
+                                                    Modern Causal LLM Convergence
 ```
 
 ### The 4 Decisive Technical and Systems Drivers
 
-#### 1. Unified Next-Token Prediction & Zero Task-Friction (In-Context Learning)
+#### 1. Unified Next-Token Prediction & In-Context Learning
 
 - **Unification of Learning Paradigms**: Under the Decoder-Only framework, **Pre-training, Supervised Fine-Tuning (SFT), In-Context Learning (Few-shot ICL), Prompting, and Chain-of-Thought (CoT) reasoning** are all mathematically unified into the exact same objective—**conditional autoregressive next-token prediction**:
 
@@ -42,29 +33,35 @@ $$P(X) = \prod_{i=1}^S P(x_i \mid x_1, x_2, \dots, x_{i-1})$$
 
 - **Zero Structural Friction**: Any arbitrary input (system prompt, few-shot demonstrations, user query, dialogue history, intermediate reasoning tokens, and final response) exists as a flat sequence of tokens in a single causal stream. There is no artificial architectural boundary dictating what constitutes "source" vs. "target".
 
-#### 2. Simplified KV Cache & Zero Cross-Attention Memory Bloat
+#### 2. Simplified KV Cache & Zero Cross-Attention Overhead
 
-- **Single Contiguous KV Cache**: A Decoder-Only model maintains a single Self-Attention Key-Value cache. The Prefill (prompt processing) and Decode (token generation) phases seamlessly share the exact same memory buffers. Each new token simply appends its Key and Value vectors to the end of the existing cache.
+- **Single Linear KV Cache**: Decoder-Only models maintain only one contiguous Key/Value cache. Prefill and Decode seamlessly share this buffer, appending new tokens directly to the end of the tensor.
 - **Encoder-Decoder Serving Bottlenecks**:
-  - Encoder-Decoder architectures require maintaining two separate cache systems: a static bidirectional KV cache for the full input sequence in the encoder, plus an autoregressive KV cache for the decoder;
-  - Every decoder layer contains an extra **Cross-Attention layer**, forcing the memory bus to fetch the entire encoder KV cache on every single generated token, severely exacerbating memory bandwidth saturation;
-  - In modern serving engines (e.g., vLLM, PagedAttention), managing non-contiguous virtual memory pages for a single causal KV cache is drastically simpler than scheduling dual-cache allocations under continuous batching.
+  - Requires two disjoint caches: static bidirectional Encoder KV cache + autoregressive Decoder KV cache;
+  - Every Decoder layer introduces **Cross-Attention**, reading the full Encoder KV cache across memory channels at every decoding step, intensifying memory bandwidth bottlenecks;
+  - Modern engines (vLLM PagedAttention, Continuous Batching) suffer severe memory fragmentation and complex paging when handling two distinct cache topologies.
 
-#### 3. Parameter Compute Budget Efficiency & Scaling Laws
+#### 3. Compute Budget Efficiency & Empirical Scaling Laws
 
-- **Dense Autoregressive Supervision**:
-  - In Decoder-Only pre-training, **every single token position from $1$ to $S$ calculates cross-entropy loss against the next token**. All model parameters receive dense gradients and participate actively in sequence generation.
-  - In Encoder-Decoder pre-training (e.g., span corruption in T5), only masked spans in the decoder produce training loss. The encoder parameters do not receive direct generative supervision, and during autoregressive decoding, the encoder parameters remain dormant after prompt encoding (capacity underutilization).
-- **Empirical Scaling Law Superiority**: Given a fixed compute budget (FLOPs) and parameter count, Decoder-Only models exhibit the steepest, most predictable power-law scaling trajectories in open-ended text comprehension and generation.
+- **Dense Loss Supervision**:
+  - Every token position $1 \dots S$ computes cross-entropy loss predicting the subsequent token. All model parameters participate actively in learning representations across all sequence tokens.
+  - Encoder-Decoder architectures (e.g., T5 span corruption) train Encoder weights with masked inputs while only Decoder tokens yield loss gradients. Encoder capacity is underutilized during autoregressive generation.
+- **Empirical Scaling Laws**: Under fixed training FLOP budgets, Decoder-Only architectures achieve the steepest and most predictable power-law loss scaling.
 
-#### 4. Long Context Scaling & Modern Position Embeddings (RoPE Synergy)
+#### 4. Natural Synergy with RoPE and Long-Context Extensions
 
-- Causal attention naturally respects the temporal arrow of causality, pairing seamlessly with **Rotary Position Embedding (RoPE)**, **Chunked Prefill**, and sliding-window KV eviction policies. This allows models to interpolate and extrapolate context lengths from 4K to 128K and 1M tokens smoothly.
-- Bidirectional encoders suffer from **attention dilution** across extreme context lengths and incur strict $O(S^2)$ memory bottlenecks.
+- Unidirectional causal attention pairs seamlessly with **Rotary Position Embeddings (RoPE)**, **Chunked Prefill**, and Sliding Window Attention. Dynamic interpolation methods (YaRN, Dynamic NTK) scale context smoothly from 4K to 128K+.
+- Bidirectional encoders suffer from **attention dilution** across extreme context lengths and cannot leverage causal inference speedups.
+
+#### Long-Context Attention Efficiency Landscape
+
+Standard Scaled Dot-Product Attention scales with time complexity $\mathcal{O}(n^2 d)$ and memory $\mathcal{O}(n^2)$ ($n \gg d$). While FlashAttention cuts memory footprint to $\mathcal{O}(nd)$, compute remains quadratic. Long contexts encounter compute walls, activation memory bounds, and KV cache bandwidth bottlenecks simultaneously:
+
+![Long-context attention efficiency landscape](./assets/attention-efficiency-landscape.png)
 
 ---
 
-### 5. Text Representation & Embeddings: Why Were Encoders Dominant, and How Did Modern Research Solve Decoder Embedding Bottlenecks?
+### 5. Text Representation & Embeddings: Bidirectional Foundations & Modern Decoder-Only Evolution
 
 Beyond autoregressive text generation, **Dense Text Embeddings** serve as the backbone for Retrieval-Augmented Generation (RAG), semantic vector search, clustering, and recommendation systems.
 
@@ -88,7 +85,7 @@ The Classical Era (2018-2022)             Bottlenecks (Why Vanilla Decoders Fail
                                           └────────────────────────────────────────────────────────┘
 ```
 
-#### Why Did Dense Retrieval Historically Prefer Encoders & Encoder-Decoders?
+#### Architectural Mechanics Favoring Encoders & Encoder-Decoders in Dense Retrieval
 
 1. **Global Context Compression via Bidirectional Attention**:
    - BERT, RoBERTa, and T5 utilize a fully bidirectional attention matrix ($M_{ij} = 0$). Every token interacts with both preceding and following tokens across all layers without restriction.
@@ -314,9 +311,9 @@ Precision Hierarchy & Optimizer Evolution:
 └───────────────────────┴───────────────────────┴───────────────────────┴───────────────────────┘
 ```
 
-##### 1. Stochastic Rounding (SR): Eliminating FP32 Master Weights
-- **Unbiased Expectation**: Replaces deterministic rounding with probabilistic rounding:
-  $$\text{SR}(x) = \begin{cases} \lfloor x  floor & \text{with prob } 1 - \frac{x - \lfloor x  floor}{\delta} \\ \lceil x  ceil & \text{with prob } \frac{x - \lfloor x  floor}{\delta} \end{cases}$$
+##### 1. Stochastic Rounding (SR): Low-Precision Updates with Unbiased Expectation
+- **Unbiased Expectation**: Replaces deterministic rounding with probabilistic rounding. Let $\lfloor x \rfloor$ and $\lceil x \rceil$ be adjacent discrete quantization levels, and $\delta = \lceil x \rceil - \lfloor x \rfloor$:
+  $$\text{SR}(x) = \begin{cases} \lfloor x \rfloor & \text{with prob } 1 - \frac{x - \lfloor x \rfloor}{\delta} \\ \lceil x \rceil & \text{with prob } \frac{x - \lfloor x \rfloor}{\delta} \end{cases}$$
 - **Mathematical Theorem**: $\mathbb{E}[\text{SR}(x)] = x$. Even if $\Delta W = 10^{-6}$ is far below the machine epsilon of BF16, it maintains a non-zero probability ($10^{-4}$) of flipping the least significant bit. Over millions of iterations, **the expected accumulation matches full precision**, enabling pure 16-bit weight updates without allocating extra FP32 master weight memory.
 
 ##### 2. 8-Bit Optimizers (bitsandbytes / Block-wise Dynamic Quantization)
@@ -408,7 +405,7 @@ With $\sigma_z \approx 0.02 \sim 0.1$, $\frac{\sigma_z^2}{2} < 0.005$, proving *
 
 ---
 
-### 4. High-Yield Interview Multiple-Choice Question
+### 4. Core Engineering Concept Check (Multiple Choice)
 
 <details class="exercise">
 <summary><span class="q-label">Q1 · Multiple Choice</span> <span class="q-text">When starting pre-training for LLaMA-3 ($V = 128,256$) on a 1000-GPU cluster at Step 0 before any optimizer steps, which of the following statements is <strong>strictly correct</strong>?</span></summary>

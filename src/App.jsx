@@ -24416,7 +24416,7 @@ function App() {
     }
 
     const currentRoute = parseHashRoute(window.location.hash);
-    const headingSuffix = currentRoute?.headingId ? `::${currentRoute.headingId}` : '';
+    const headingSuffix = currentRoute?.noteId === selectedTutorial.id && currentRoute?.headingId ? `::${currentRoute.headingId}` : '';
     const canonicalHash = `#${encodeURIComponent(selectedTutorial.id)}${headingSuffix}`;
 
     if (window.location.hash !== canonicalHash) {
