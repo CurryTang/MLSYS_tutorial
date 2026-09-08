@@ -1212,6 +1212,126 @@ $\operatorname{Var}(X + Y) = \operatorname{Var}(T W_T) = T^2 \operatorname{Var}(
 > 2. Derive the full probability density function $f_{Y_\tau}(u)$ of the stopping ordinate $Y_\tau$;
 > 3. Verify the special case where the starting position is $(1, 1)$.
 
+<details class="solution">
+<summary>Background Deep Dive: Brownian Motion and the Gaussian–Lévy–Cauchy Distribution Chain (Click to expand)</summary>
+
+The structural relationship among these three core concepts forms a precise theoretical chain:
+
+$$
+\boxed{
+\text{Brownian Motion}
+\rightarrow
+\text{Fixed-time position is Gaussian}
+\rightarrow
+\text{First hitting time is Lévy}
+}
+$$
+
+Crucially, note that **"Lévy" has two distinct meanings** (Lévy Process vs. Lévy Distribution).
+
+#### 1. Brownian Motion and Gaussian Distribution
+
+Standard Brownian motion $\{W_t\}_{t\ge0}$ satisfies:
+
+$$W_t-W_s\sim \mathcal{N}(0,t-s)$$
+
+Specifically:
+
+$$W_t\sim \mathcal{N}(0,t)$$
+
+This means:
+
+- $W_t$ is the evaluation of a stochastic process at time $t$;
+- Fixing $t$, $W_t$ is a Gaussian random variable;
+- The increment $W_t-W_s$ is also a Gaussian random variable.
+
+**Why Gaussian?** Brownian motion is the continuous scaling limit of microscopic independent random walks; the Central Limit Theorem (CLT) causes the limiting distribution to become Gaussian.
+
+#### 2. Lévy Processes and Brownian Motion
+
+A “Lévy process” represents a broad family of stochastic processes characterized by:
+
+- Independent increments;
+- Stationary increments;
+- Stochastic jumps or continuous diffusion.
+
+Brownian motion is in fact the most classic and canonical Lévy process:
+
+$$\boxed{\text{Brownian Motion} \subset \text{Lévy Processes}}$$
+
+Its unique distinction is that its sample paths are almost surely continuous, with zero jumps.
+
+#### 3. Lévy Distribution and Brownian First Hitting Time
+
+The Lévy distribution discussed in this problem refers to a **specific heavy-tailed probability distribution**, not the general class of Lévy processes.
+
+Define the first hitting time of level $a>0$ for 1D Brownian motion:
+
+$$\tau_a=\inf\{t>0:W_t=a\}$$
+
+Although the position $W_t$ at any fixed deterministic time $t$ is Gaussian, the stopping time $\tau_a$ **is not Gaussian at all, but follows the Lévy distribution**:
+
+$$f_{\tau_a}(t) = \frac{a}{\sqrt{2\pi t^3}} \exp\left(-\frac{a^2}{2t}\right), \qquad t>0$$
+
+**Why are the distributions completely different?**
+
+- $W_t$: asks "Where has the particle reached at fixed time $t$?";
+- $\tau_a$: asks "At what time does the particle first reach $a$?".
+
+The latter depends on the entire continuous random path and is a nonlinear functional of the path supremum, leading to a completely different distribution (with $\mathbb{E}[\tau_a] = \infty$).
+
+#### 4. Connecting Back to the 2D Problem
+
+The 2D Brownian motion can be written as:
+
+$$X_t=x_0+B_t^{(1)},\qquad Y_t=y_0+B_t^{(2)}$$
+
+where the two orthogonal components are independent.
+
+The stopping time:
+
+$$\tau=\inf\{t>0:X_t=0\}$$
+
+is determined solely by $X_t$, so $\tau$ follows the Lévy distribution.
+
+Meanwhile, at any fixed deterministic time $t$:
+
+$$Y_t\sim \mathcal{N}(y_0,t)$$
+
+is Gaussian.
+
+Given $\tau=t$:
+
+$$Y_\tau\mid \tau=t\sim \mathcal{N}(y_0,t)$$
+
+However, $\tau$ itself is random. The marginal distribution is obtained by mixing Gaussian distributions over the Lévy stopping time weights:
+
+$$
+\boxed{\text{Lévy Random Time}}
++
+\boxed{\text{Gaussian Spatial Position}}
+\longrightarrow
+\boxed{\text{Cauchy Distribution}}
+$$
+
+Ultimately:
+
+$$Y_\tau\sim \operatorname{Cauchy}(y_0,x_0)$$
+
+Therefore, the core relationships governing this problem are:
+
+$$
+\boxed{
+\begin{aligned}
+&\text{Brownian motion position at fixed time: Gaussian distribution};\\
+&\text{Brownian motion first hitting time of a boundary: Lévy distribution};\\
+&\text{Observing an independent Brownian component at a Lévy stopping time: Cauchy distribution}.
+\end{aligned}
+}
+$$
+
+</details>
+
 **Step-by-Step Derivation & Dual Perspectives**:
 
 **Perspective 1: Independent Component Convolution & Lévy-Cauchy Mixture**
