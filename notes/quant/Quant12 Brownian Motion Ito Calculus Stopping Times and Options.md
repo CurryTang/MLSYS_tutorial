@@ -1336,8 +1336,7 @@ $$
 > 在二维平面上，标准二维布朗运动 $(X_t, Y_t)$ 从右半平面的任意点 $(x_0, y_0)$ 出发（其中 $x_0 > 0, y_0 \in \mathbb{R}$）。
 > 当过程**首次触碰纵轴（$y$ 轴）**时停止，停时定义为 $\tau = \inf\{t > 0 : X_t = 0\}$。
 > 1. 求停止位置 $(0, Y_\tau)$ 落在 **$y$ 轴正半轴（$Y_\tau > 0$）** 的概率 $\mathbb{P}(Y_\tau > 0)$；
-> 2. 求停止点纵坐标 $Y_\tau$ 的完整概率密度函数 $f_{Y_\tau}(u)$；
-> 3. 特殊情形验证：求起点为 $(1, 1)$ 时的具体数值。
+> 2. 求停止点纵坐标 $Y_\tau$ 的完整概率密度函数 $f_{Y_\tau}(u)$。
 
 <details class="solution">
 <summary>背景延伸：布朗运动与高斯、Lévy、Cauchy 分布的核心演变链条（点击展开）</summary>
@@ -1482,10 +1481,8 @@ $$
   $$u(x, y) = \frac{1}{\pi}\left( \theta + \frac{\pi}{2} \right) = \frac{1}{2} + \frac{1}{\pi} \arctan\left( \frac{y}{x} \right)$$
   代入边界验证：当 $x \to 0^+$ 且 $y > 0$ 时 $\theta \to \pi/2 \implies u = 1$；当 $y < 0$ 时 $\theta \to -\pi/2 \implies u = 0$。唯一性定理保证这就是解析解！
 
-**特殊情形代入**：
-- **起点为 $(1, 1)$**（原图特例）：
-  $$\mathbb{P}(Y_\tau > 0) = \frac{1}{2} + \frac{1}{\pi} \arctan\left( \frac{1}{1} \right) = \frac{1}{2} + \frac{1}{\pi} \cdot \frac{\pi}{4} = \frac{1}{2} + \frac{1}{4} = \boxed{\frac{3}{4} = 75\%}$$
-- **起点在 $x$ 轴上（$y_0 = 0$）**：$\mathbb{P} = \frac{1}{2} + 0 = 50\%$（对称性成立）。
+**对称性与渐近极限自洽检验**：
+- **起点在 $x$ 轴上（$y_0 = 0$）**：$\mathbb{P} = \frac{1}{2} + 0 = 50\%$（上下对称性成立）。
 - **$y_0 \to +\infty$**：$\mathbb{P} \to 1$；$y_0 \to -\infty$：$\mathbb{P} \to 0$。
 
 ---
@@ -1498,8 +1495,7 @@ $$
 > 对于任意给定的中间时刻 $t \in (0, T)$：
 > 1. 求条件期望 $\mathbb{E}[W_t \mid W_T = x]$；
 > 2. 求条件方差 $\operatorname{Var}(W_t \mid W_T = x)$，并写出 $W_t \mid (W_T = x)$ 的完整条件分布；
-> 3. 定义无约束布朗桥过程 $B_t = W_t - \frac{t}{T} W_T$，证明 $B_t$ 与终点变量 $W_T$ 严格独立，并求其协方差函数 $\operatorname{Cov}(B_s, B_t)$；
-> 4. 特殊数值验证：求 $W_0 = 0, W_2 = 1$ 条件下中间点 $W_{1/2}$ 的条件期望与方差。
+> 3. 定义无约束布朗桥过程 $B_t = W_t - \frac{t}{T} W_T$，证明 $B_t$ 与终点变量 $W_T$ 严格独立，并求其协方差函数 $\operatorname{Cov}(B_s, B_t)$。
 
 **严格推导与求解**：
 
@@ -1558,11 +1554,5 @@ $$
 $$
 = s - \frac{st}{T} - \frac{st}{T} + \frac{st}{T^2} T = \boxed{s \left( 1 - \frac{t}{T} \right)}
 $$
-
-**步骤 4：特殊数值验证（原图特例：$T=2, t=1/2, x=1$）**
-代入公式：
-- 条件期望：$\mathbb{E}[W_{1/2} \mid W_2 = 1] = \frac{1/2}{2} \times 1 = \boxed{\frac{1}{4}}$
-- 条件方差：$\operatorname{Var}(W_{1/2} \mid W_2 = 1) = \frac{\frac{1}{2} \cdot \left( 2 - \frac{1}{2} \right)}{2} = \frac{\frac{1}{2} \cdot \frac{3}{2}}{2} = \boxed{\frac{3}{8}}$
-
 
 ---

@@ -1209,8 +1209,7 @@ $\operatorname{Var}(X + Y) = \operatorname{Var}(T W_T) = T^2 \operatorname{Var}(
 > A standard 2D Brownian motion $(X_t, Y_t)$ starts at an arbitrary point $(x_0, y_0)$ in the right half-plane ($x_0 > 0, y_0 \in \mathbb{R}$).
 > It stops upon first hitting the $y$-axis, with stopping time $\tau = \inf\{t > 0 : X_t = 0\}$.
 > 1. Find the probability that the stopping point $(0, Y_\tau)$ lies on the **positive $y$-axis ($Y_\tau > 0$)**: $\mathbb{P}(Y_\tau > 0)$;
-> 2. Derive the full probability density function $f_{Y_\tau}(u)$ of the stopping ordinate $Y_\tau$;
-> 3. Verify the special case where the starting position is $(1, 1)$.
+> 2. Derive the full probability density function $f_{Y_\tau}(u)$ of the stopping ordinate $Y_\tau$.
 
 <details class="solution">
 <summary>Background Deep Dive: Brownian Motion and the Gaussian–Lévy–Cauchy Distribution Chain (Click to expand)</summary>
@@ -1355,9 +1354,7 @@ $$
 - Matching boundary limits directly yields:
   $$u(x_0, y_0) = \frac{1}{\pi}\left( \theta + \frac{\pi}{2} \right) = \boxed{\frac{1}{2} + \frac{1}{\pi} \arctan\left( \frac{y_0}{x_0} \right)}$$
 
-**Special Case Verification**:
-- **Starting at $(1, 1)$**:
-  $$\mathbb{P}(Y_\tau > 0) = \frac{1}{2} + \frac{1}{\pi}\arctan(1) = \frac{1}{2} + \frac{1}{4} = \boxed{\frac{3}{4} = 75\%}$$
+**Symmetry & Asymptotic Consistency Checks**:
 - **Starting on the $x$-axis ($y_0 = 0$)**: $\mathbb{P} = 1/2 = 50\%$ (by vertical reflection symmetry).
 - **Asymptotics**: As $y_0 \to +\infty$, $\mathbb{P} \to 1$; as $y_0 \to -\infty$, $\mathbb{P} \to 0$.
 
@@ -1370,8 +1367,7 @@ $$
 > Let $W_t$ be a standard Brownian motion with $W_0 = 0$. Given the terminal condition $W_T = x$ ($T > 0, x \in \mathbb{R}$), for any intermediate time $t \in (0, T)$:
 > 1. Find the conditional expectation $\mathbb{E}[W_t \mid W_T = x]$;
 > 2. Find the conditional variance $\operatorname{Var}(W_t \mid W_T = x)$ and write the full conditional distribution;
-> 3. Define the Brownian Bridge process $B_t = W_t - \frac{t}{T} W_T$, prove that $B_t$ is independent of $W_T$, and compute its covariance function $\operatorname{Cov}(B_s, B_t)$；
-> 4. Verify the special case $W_0 = 0, W_2 = 1$ to find $\mathbb{E}[W_{1/2} \mid W_2 = 1]$ and $\operatorname{Var}(W_{1/2} \mid W_2 = 1)$.
+> 3. Define the Brownian Bridge process $B_t = W_t - \frac{t}{T} W_T$, prove that $B_t$ is independent of $W_T$, and compute its covariance function $\operatorname{Cov}(B_s, B_t)$.
 
 **Step-by-Step Derivation & Solution**:
 
@@ -1405,7 +1401,3 @@ For $B_t = W_t - \frac{t}{T} W_T$:
 $$
 \operatorname{Cov}(B_s, B_t) = \operatorname{Cov}(W_s, W_t) - \frac{t}{T}\operatorname{Cov}(W_s, W_T) - \frac{s}{T}\operatorname{Cov}(W_T, W_t) + \frac{st}{T^2}\operatorname{Var}(W_T) = s - \frac{st}{T} - \frac{st}{T} + \frac{st}{T} = \boxed{s \left( 1 - \frac{t}{T} \right)}
 $$
-
-**Step 4: Special Case ($T=2, t=1/2, x=1$)**
-- $\mathbb{E}[W_{1/2} \mid W_2 = 1] = \frac{1/2}{2} \times 1 = \boxed{\frac{1}{4}}$
-- $\operatorname{Var}(W_{1/2} \mid W_2 = 1) = \frac{(1/2)(3/2)}{2} = \boxed{\frac{3}{8}}$
