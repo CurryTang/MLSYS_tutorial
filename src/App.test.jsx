@@ -1122,6 +1122,42 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: /Quant 15 · Equivalent Martingale Measure/i })).toBeInTheDocument();
   });
 
+  it('opens Quant 16 Linear Regression note and renders FWL interactive geometry visualizer', async () => {
+    globalThis.fetch.mockImplementation(async (input) => {
+      const requestUrl = decodeURIComponent(String(input));
+      return {
+        ok: true,
+        text: async () => {
+          if (requestUrl.includes('Quant16') && requestUrl.endsWith('.en.md')) {
+            return '# Quant 16 · Linear Regression, Kernel Smoothing & Interview Classics: OLS, Gauss–Markov, Ridge/Lasso\n\n```fwl-geometry-demo\n```';
+          }
+          if (requestUrl.includes('Quant16')) {
+            return '# Quant 16 · 线性回归、核平滑与面试经典题：OLS、Gauss–Markov、Ridge/Lasso\n\n```fwl-geometry-demo\n```';
+          }
+          return '# Default note';
+        },
+      };
+    });
+
+    render(<App />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Quant' }));
+    fireEvent.click(screen.getByRole('button', { name: /Quant 16 · 线性回归/i }));
+
+    expect(await screen.findByRole('heading', { name: /Quant 16 · 线性回归/i })).toBeInTheDocument();
+    expect(screen.getByLabelText(/FWL 定理几何投影与两阶段残差回归演示/i)).toBeInTheDocument();
+    expect(screen.getByText(/Frisch–Waugh–Lovell \(FWL\) 几何投影/i)).toBeInTheDocument();
+
+    // Verify interaction with step button
+    fireEvent.click(screen.getByRole('button', { name: /步骤 2: X₂ 正交化得 X̃₂/i }));
+    expect(screen.getByText(/FWL 核心正交化/i)).toBeInTheDocument();
+
+    // Toggle language to English
+    fireEvent.click(screen.getByRole('button', { name: 'English' }));
+    expect(await screen.findByRole('heading', { name: /Quant 16 · Linear Regression/i })).toBeInTheDocument();
+    expect(screen.getByLabelText(/FWL Theorem Geometry & Two-Stage Regression Demo/i)).toBeInTheDocument();
+  });
+
   it('renders the Palindromic Substrings 2D DP matrix visual walkthrough and steps through states', async () => {
     globalThis.fetch.mockImplementation(async (input) => {
       const requestUrl = String(input);

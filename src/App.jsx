@@ -8748,6 +8748,378 @@ function GameTheoryVisual() {
   );
 }
 
+function FWLGeometryVisual() {
+  const { isEnglish, t } = useUiCopy();
+  const [rho, setRho] = useState(0.60);
+  const [activeStep, setActiveStep] = useState('full'); // 'step1' | 'step2' | 'step3' | 'full'
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+    const steps = ['step1', 'step2', 'step3', 'full'];
+    const timer = setInterval(() => {
+      setActiveStep((prev) => {
+        const nextIdx = (steps.indexOf(prev) + 1) % steps.length;
+        return steps[nextIdx];
+      });
+    }, 2600);
+    return () => clearInterval(timer);
+  }, [isPlaying]);
+
+  // Dimensions & Origin
+  const width = 720;
+  const height = 340;
+  const ox = 110;
+  const oy = 250;
+
+  // Horizontal X1
+  const lenX1 = 260;
+  const x1_end = { x: ox + lenX1, y: oy };
+
+  // Angle theta and sinTheta for X2
+  const sinTheta = Math.sqrt(Math.max(0.001, 1 - rho * rho));
+  const lenX2 = 210;
+  const x2_end = {
+    x: ox + lenX2 * rho,
+    y: oy - lenX2 * sinTheta,
+  };
+  const projX2_X1 = { x: ox + lenX2 * rho, y: oy };
+
+  // X2 tilde (vertical residual M1 X2)
+  const lenX2Tilde = lenX2 * sinTheta;
+  const x2Tilde_end = { x: ox, y: oy - lenX2Tilde };
+
+  // Y vector
+  const lenY_X1 = 170;
+  const lenEps = 160;
+  const y_end = { x: ox + lenY_X1, y: oy - lenEps };
+  const projY_X1 = { x: ox + lenY_X1, y: oy };
+  const eps_origin = { x: ox, y: oy - lenEps };
+
+  // Projection of epsilon on line X2
+  // u = (rho, -sinTheta)
+  // dot(eps, u) = lenEps * sinTheta
+  const projDistOnX2 = lenEps * sinTheta;
+  const projEps_X2 = {
+    x: ox + projDistOnX2 * rho,
+    y: oy - projDistOnX2 * sinTheta,
+  };
+
+  // Math metrics
+  const rhoSq = rho * rho;
+  const varRatio = 1 - rhoSq; // beta1 / beta2
+  const vif = 1 / Math.max(0.001, varRatio);
+
+  // Right-angle marker calculation at projEps_X2
+  const v1 = { x: -rho, y: sinTheta };
+  const v2_raw = { x: eps_origin.x - projEps_X2.x, y: eps_origin.y - projEps_X2.y };
+  const lenV2 = Math.hypot(v2_raw.x, v2_raw.y) || 1;
+  const v2 = { x: v2_raw.x / lenV2, y: v2_raw.y / lenV2 };
+  const s = 10;
+  const c1 = { x: projEps_X2.x + s * v1.x, y: projEps_X2.y + s * v1.y };
+  const c2 = { x: projEps_X2.x + s * (v1.x + v2.x), y: projEps_X2.y + s * (v1.y + v2.y) };
+  const c3 = { x: projEps_X2.x + s * v2.x, y: projEps_X2.y + s * v2.y };
+  const rightAngleX2Path = `M ${c1.x.toFixed(1)} ${c1.y.toFixed(1)} L ${c2.x.toFixed(1)} ${c2.y.toFixed(1)} L ${c3.x.toFixed(1)} ${c3.y.toFixed(1)}`;
+
+  // Right-angle at origin for X1 and X2_tilde (or eps)
+  const rightAngleOriginPath = `M ${ox + 12} ${oy} L ${ox + 12} ${oy - 12} L ${ox} ${oy - 12}`;
+
+  // Right-angle at projY_X1
+  const rightAngleProjYPath = `M ${projY_X1.x - 12} ${oy} L ${projY_X1.x - 12} ${oy - 12} L ${projY_X1.x} ${oy - 12}`;
+
+  // Right-angle at projX2_X1
+  const xDir = rho >= 0 ? -12 : 12;
+  const rightAngleProjX2Path = `M ${projX2_X1.x + xDir} ${oy} L ${projX2_X1.x + xDir} ${oy - 12} L ${projX2_X1.x} ${oy - 12}`;
+
+  const showStep1 = activeStep === 'step1' || activeStep === 'full';
+  const showStep2 = activeStep === 'step2' || activeStep === 'full';
+  const showStep3 = activeStep === 'step3' || activeStep === 'full';
+
+  return (
+    <section className="fwl-demo-container" aria-label={t('FWL 定理几何投影与两阶段残差回归演示', 'FWL Theorem Geometry & Two-Stage Regression Demo')}>
+      <header className="fwl-demo-header">
+        <div>
+          <p className="eyebrow">{t('几何正交化与 FWL 定理实验室', 'Geometric Orthogonalization & FWL Lab')}</p>
+          <h2>{t('Frisch–Waugh–Lovell (FWL) 几何投影：β₁ 与 β₂ 的比值 (1 - ρ²)', 'FWL Geometric Projection: Ratio β₁ / β₂ = (1 - ρ²)')}</h2>
+        </div>
+        <div className="fwl-demo-controls">
+          <div className="fwl-tab-group" role="tablist">
+            <button
+              type="button"
+              className={`fwl-tab-btn ${activeStep === 'step1' ? 'active' : ''}`}
+              onClick={() => { setActiveStep('step1'); setIsPlaying(false); }}
+            >
+              {t('步骤 1: Y 投向 X₁', 'Step 1: Y on X₁')}
+            </button>
+            <button
+              type="button"
+              className={`fwl-tab-btn ${activeStep === 'step2' ? 'active' : ''}`}
+              onClick={() => { setActiveStep('step2'); setIsPlaying(false); }}
+            >
+              {t('步骤 2: X₂ 正交化得 X̃₂', 'Step 2: Orthogonalize X₂')}
+            </button>
+            <button
+              type="button"
+              className={`fwl-tab-btn ${activeStep === 'step3' ? 'active' : ''}`}
+              onClick={() => { setActiveStep('step3'); setIsPlaying(false); }}
+            >
+              {t('步骤 3: 投影对比与压缩', 'Step 3: FWL vs Naive')}
+            </button>
+            <button
+              type="button"
+              className={`fwl-tab-btn ${activeStep === 'full' ? 'active' : ''}`}
+              onClick={() => { setActiveStep('full'); setIsPlaying(false); }}
+            >
+              {t('全景几何图', 'Full Panorama')}
+            </button>
+          </div>
+          <button
+            type="button"
+            className="fwl-chip-btn"
+            style={{ padding: '0.35rem 0.65rem', fontWeight: 600 }}
+            onClick={() => setIsPlaying(!isPlaying)}
+          >
+            {isPlaying ? t('⏸ 暂停演练', '⏸ Pause') : t('▶ 自动演练', '▶ Auto Play')}
+          </button>
+        </div>
+      </header>
+
+      {/* Correlation Slider & Presets */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '0.8rem', marginBottom: '0.85rem' }}>
+        <div className="fwl-slider-wrap">
+          <span>{t('相关系数 ρ = Corr(X₁, X₂):', 'Correlation ρ = Corr(X₁, X₂):')}</span>
+          <strong>{rho >= 0 ? `+${rho.toFixed(2)}` : rho.toFixed(2)}</strong>
+          <input
+            type="range"
+            min="-0.90"
+            max="0.90"
+            step="0.05"
+            value={rho}
+            onChange={(e) => setRho(Number(e.target.value))}
+            style={{ width: '130px', accentColor: '#a855f7' }}
+          />
+        </div>
+        <div style={{ display: 'flex', gap: '0.35rem' }}>
+          <button type="button" className="fwl-chip-btn" onClick={() => setRho(0.00)}>ρ = 0.00 ({t('完全正交', 'Orthogonal')})</button>
+          <button type="button" className="fwl-chip-btn" onClick={() => setRho(0.60)}>ρ = 0.60 ({t('典型相关', 'Typical')})</button>
+          <button type="button" className="fwl-chip-btn" onClick={() => setRho(0.85)}>ρ = 0.85 ({t('高共线性', 'Collinear')})</button>
+          <button type="button" className="fwl-chip-btn" onClick={() => setRho(-0.60)}>ρ = -0.60 ({t('负相关', 'Negative')})</button>
+        </div>
+      </div>
+
+      {/* SVG Canvas */}
+      <svg className="fwl-demo-svg" viewBox={`0 0 ${width} ${height}`} role="img">
+        <defs>
+          <marker id="fwl-arrow-x1" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#38bdf8" />
+          </marker>
+          <marker id="fwl-arrow-x2" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#c084fc" />
+          </marker>
+          <marker id="fwl-arrow-x2tilde" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#34d399" />
+          </marker>
+          <marker id="fwl-arrow-y" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#fbbf24" />
+          </marker>
+          <marker id="fwl-arrow-eps" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#f43f5e" />
+          </marker>
+          <marker id="fwl-arrow-proj" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#e879f9" />
+          </marker>
+        </defs>
+
+        {/* Background Grid & Axes */}
+        <line x1="30" y1={oy} x2="690" y2={oy} stroke="#1e293b" strokeWidth="1.5" strokeDasharray="3 3" />
+        <line x1={ox} y1="30" x2={ox} y2="310" stroke="#1e293b" strokeWidth="1.5" strokeDasharray="3 3" />
+        <text x="640" y={oy + 18} fill="#64748b" fontSize="11" fontFamily="IBM Plex Mono">Col(X₁)</text>
+        <text x={ox - 24} y="45" fill="#64748b" fontSize="11" fontFamily="IBM Plex Mono">Col(X₁)ᐩ</text>
+
+        {/* Origin point O */}
+        <circle cx={ox} cy={oy} r="4.5" fill="#f8fafc" />
+        <text x={ox - 16} y={oy + 18} fill="#94a3b8" fontSize="12" fontWeight="700">O</text>
+
+        {/* Vector X1 (Always visible, Sky Blue) */}
+        <line x1={ox} y1={oy} x2={x1_end.x} y2={x1_end.y} stroke="#38bdf8" strokeWidth="3" markerEnd="url(#fwl-arrow-x1)" />
+        <text x={x1_end.x + 8} y={oy + 5} fill="#38bdf8" fontSize="13" fontWeight="800">X₁</text>
+
+        {/* STEP 1: Y and its projection on X1 */}
+        {showStep1 && (
+          <g opacity={activeStep === 'step1' || activeStep === 'full' ? 1 : 0.25} style={{ transition: 'opacity 0.4s' }}>
+            {/* Vector Y */}
+            <line x1={ox} y1={oy} x2={y_end.x} y2={y_end.y} stroke="#fbbf24" strokeWidth="2.5" markerEnd="url(#fwl-arrow-y)" />
+            <text x={y_end.x + 8} y={y_end.y - 4} fill="#fbbf24" fontSize="13" fontWeight="800">Y</text>
+
+            {/* Projection of Y onto X1: gamma X1 */}
+            <circle cx={projY_X1.x} cy={projY_X1.y} r="3.5" fill="#f59e0b" />
+            <text x={projY_X1.x - 24} y={projY_X1.y + 18} fill="#f59e0b" fontSize="11" fontFamily="IBM Plex Mono">γX₁ = Ŷ_{'{X₁}'}</text>
+
+            {/* Dashed vertical dropped from Y to X1 (residual epsilon) */}
+            <line x1={y_end.x} y1={y_end.y} x2={projY_X1.x} y2={projY_X1.y} stroke="#f43f5e" strokeWidth="2" className="fwl-ray-animated" />
+            <path d={rightAngleProjYPath} fill="none" stroke="#f43f5e" strokeWidth="1.2" />
+            <text x={y_end.x + 8} y={(y_end.y + projY_X1.y) / 2} fill="#f43f5e" fontSize="11" fontWeight="700">ε = Y - γX₁</text>
+          </g>
+        )}
+
+        {/* STEP 2: X2 and its orthogonalization to X2_tilde */}
+        {showStep2 && (
+          <g opacity={activeStep === 'step2' || activeStep === 'full' ? 1 : 0.25} style={{ transition: 'opacity 0.4s' }}>
+            {/* Extended ray for X2 direction */}
+            <line
+              x1={ox}
+              y1={oy}
+              x2={ox + 280 * rho}
+              y2={oy - 280 * sinTheta}
+              stroke="#6b21a8"
+              strokeWidth="1"
+              strokeDasharray="2 4"
+            />
+
+            {/* Vector X2 */}
+            <line x1={ox} y1={oy} x2={x2_end.x} y2={x2_end.y} stroke="#c084fc" strokeWidth="3" markerEnd="url(#fwl-arrow-x2)" />
+            <text x={x2_end.x + (rho >= 0 ? 10 : -35)} y={x2_end.y - 6} fill="#c084fc" fontSize="13" fontWeight="800">X₂</text>
+
+            {/* Proj of X2 on X1 */}
+            <circle cx={projX2_X1.x} cy={projX2_X1.y} r="3.5" fill="#a855f7" />
+            <line x1={x2_end.x} y1={x2_end.y} x2={projX2_X1.x} y2={projX2_X1.y} stroke="#a855f7" strokeWidth="1.5" strokeDasharray="3 3" />
+            <path d={rightAngleProjX2Path} fill="none" stroke="#a855f7" strokeWidth="1.2" />
+            <text x={projX2_X1.x - 15} y={projX2_X1.y + 18} fill="#a855f7" fontSize="10" fontFamily="IBM Plex Mono">Proj(X₂)</text>
+
+            {/* X2 tilde (pure orthogonal feature M1 X2 along vertical axis) */}
+            <line x1={ox} y1={oy} x2={x2Tilde_end.x} y2={x2Tilde_end.y} stroke="#34d399" strokeWidth="3.5" markerEnd="url(#fwl-arrow-x2tilde)" />
+            <path d={rightAngleOriginPath} fill="none" stroke="#34d399" strokeWidth="1.2" />
+            <text x={x2Tilde_end.x - 85} y={x2Tilde_end.y + 12} fill="#34d399" fontSize="12" fontWeight="800">X̃₂ = M₁X₂</text>
+          </g>
+        )}
+
+        {/* STEP 3: Epsilon translated to origin & Comparative Projections */}
+        {showStep3 && (
+          <g opacity={activeStep === 'step3' || activeStep === 'full' ? 1 : 0.25} style={{ transition: 'opacity 0.4s' }}>
+            {/* Epsilon at origin (Vertical, Rose) */}
+            <line
+              x1={ox}
+              y1={oy}
+              x2={eps_origin.x}
+              y2={eps_origin.y}
+              stroke="#f43f5e"
+              strokeWidth="3.5"
+              markerEnd="url(#fwl-arrow-eps)"
+              className="fwl-pulse-eps"
+            />
+            <text x={eps_origin.x + 8} y={eps_origin.y + 16} fill="#f43f5e" fontSize="13" fontWeight="800">ε (Col(X₁)ᐩ)</text>
+
+            {/* True FWL projection: epsilon on X2_tilde is colinear on vertical axis */}
+            <circle cx={eps_origin.x} cy={eps_origin.y} r="4" fill="#34d399" />
+            <text x={ox + 8} y={eps_origin.y - 12} fill="#34d399" fontSize="11" fontWeight="700">
+              FWL: β₂ = ⟨ε, X̃₂⟩ / ||X̃₂||²
+            </text>
+
+            {/* Naive projection: dropped perpendicular from eps_origin onto line X2 */}
+            <line
+              x1={eps_origin.x}
+              y1={eps_origin.y}
+              x2={projEps_X2.x}
+              y2={projEps_X2.y}
+              stroke="#e879f9"
+              strokeWidth="2"
+              className="fwl-ray-animated"
+            />
+            {/* Right angle symbol at projEps_X2 */}
+            <path d={rightAngleX2Path} fill="none" stroke="#e879f9" strokeWidth="1.5" />
+
+            {/* Projected vector on X2: length is beta1 * ||X2|| */}
+            <line
+              x1={ox}
+              y1={oy}
+              x2={projEps_X2.x}
+              y2={projEps_X2.y}
+              stroke="#e879f9"
+              strokeWidth="3"
+              markerEnd="url(#fwl-arrow-proj)"
+            />
+            <circle cx={projEps_X2.x} cy={projEps_X2.y} r="4" fill="#e879f9" />
+            <text
+              x={projEps_X2.x + (rho >= 0 ? 12 : -75)}
+              y={projEps_X2.y + 14}
+              fill="#e879f9"
+              fontSize="11"
+              fontWeight="800"
+              fontFamily="IBM Plex Mono"
+            >
+              β₁X₂ = Proj_{'{X₂}'}(ε)
+            </text>
+          </g>
+        )}
+      </svg>
+
+      {/* Real-time Math Metrics Grid */}
+      <div className="fwl-metrics-grid">
+        <div className="fwl-metric-card" style={{ borderLeft: '3px solid #c084fc' }}>
+          <span>{t('相关系数 Corr(X₁, X₂)', 'Correlation ρ')}</span>
+          <strong style={{ color: '#c084fc' }}>{rho >= 0 ? `+${rho.toFixed(2)}` : rho.toFixed(2)}</strong>
+        </div>
+        <div className="fwl-metric-card" style={{ borderLeft: '3px solid #38bdf8' }}>
+          <span>{t('重叠方差比例 R² = ρ²', 'Collinear Shared R²')}</span>
+          <strong style={{ color: '#38bdf8' }}>{(rhoSq * 100).toFixed(1)}%</strong>
+        </div>
+        <div className="fwl-metric-card" style={{ borderLeft: '3px solid #34d399' }}>
+          <span>{t('斜率比值 β₁ / β₂ = 1 - ρ²', 'Slope Ratio β₁ / β₂')}</span>
+          <strong style={{ color: '#34d399', fontSize: '1.25rem' }}>{(varRatio * 100).toFixed(1)}%</strong>
+        </div>
+        <div className="fwl-metric-card" style={{ borderLeft: '3px solid #f43f5e' }}>
+          <span>{t('信号压缩衰减比例 ρ²', 'Naive Attenuation Loss')}</span>
+          <strong style={{ color: '#f43f5e' }}>-{(rhoSq * 100).toFixed(1)}%</strong>
+        </div>
+        <div className="fwl-metric-card" style={{ borderLeft: '3px solid #fbbf24' }}>
+          <span>{t('方差膨胀因子 VIF = 1/(1-ρ²)', 'Variance Inflation (VIF)')}</span>
+          <strong style={{ color: '#fbbf24' }}>{vif.toFixed(2)}x</strong>
+        </div>
+      </div>
+
+      {/* Contextual Intuition Box */}
+      <div className="fwl-explanation-box">
+        {activeStep === 'step1' && (
+          <p style={{ margin: 0 }}>
+            <strong>{t('第 1 步：一元回归提取残差', 'Step 1: Univariate Regression Residual')}</strong>：
+            {t(
+              '将 Y 对 X₁ 进行一元 OLS 拟合，由正规方程必然导出残差正交性 Cov(ε, X₁) = 0。残差向量 ε 在几何上严格落在与 X₁ 垂直的正交补子空间 Col(X₁)ᐩ 中。',
+              'Regressing Y on X₁ yields residual ε = Y - γX₁. By Normal Equations, Cov(ε, X₁) = 0, so ε lies strictly in the orthogonal complement subspace Col(X₁)ᐩ.'
+            )}
+          </p>
+        )}
+        {activeStep === 'step2' && (
+          <p style={{ margin: 0 }}>
+            <strong>{t('第 2 步（FWL 核心正交化）', 'Step 2: FWL Orthogonalization')}</strong>：
+            {t(
+              `将自变量 X₂ 同样对 X₁ 正交化，剥离出净特征增量 X̃₂ = M₁X₂。此时 Var(X̃₂) = Var(X₂)(1 - ρ²) = ${(varRatio * 100).toFixed(1)}% Var(X₂)。X̃₂ 与 ε 处于同一垂直正交子空间中！`,
+              `Orthogonalizing X₂ against X₁ isolates the net innovation X̃₂ = M₁X₂. Var(X̃₂) shrinks to ${(varRatio * 100).toFixed(1)}% of Var(X₂). X̃₂ and ε reside in the exact same orthogonal subspace!`
+            )}
+          </p>
+        )}
+        {activeStep === 'step3' && (
+          <p style={{ margin: 0 }}>
+            <strong>{t('第 3 步（两阶段回归陷阱对比）', 'Step 3: FWL vs Naive Projection Trap')}</strong>：
+            {t(
+              `因为 ε 垂直于 X₁，所以 ε 与原变量 X₂ 的内积严格等于与 X̃₂ 的内积：Cov(ε, X₂) ≡ Cov(ε, X̃₂)。但两者的分母不同：真 FWL 投影在 X̃₂ 上使用净方差，得到真实多元回归系数 β₂；而直接投在 X₂ 上使用了未剥离共线性的全方差，导致估计量被系统性压缩：β₁ = β₂(1 - ρ²) = ${(varRatio * 100).toFixed(1)}% β₂。`,
+              `Because ε ⟂ X₁, the inner products are identical: Cov(ε, X₂) ≡ Cov(ε, X̃₂). However, denominators differ! True FWL uses net variance Var(X̃₂), yielding true multivariate slope β₂. Projecting onto X₂ naively divides by the full variance Var(X₂), compressing the slope to β₁ = β₂(1 - ρ²) = ${(varRatio * 100).toFixed(1)}% β₂.`
+            )}
+          </p>
+        )}
+        {activeStep === 'full' && (
+          <p style={{ margin: 0 }}>
+            <strong>{t('量化多因子实战启示（Barra 因子中性化与增量 Alpha 挖掘）', 'Quantitative Finance Alpha Neutralization Takeaway')}</strong>：
+            {t(
+              `在多因子模型中，若仅对资产收益率 Y 做行业中性化（取残差 ε），却忘记对新增因子 X₂ 做行业中性化（使用原因子而非 X̃₂），测出的因子 IC / 收益率斜率将被虚假压缩 (1 - ρ²) 倍！只有两端同时正交化，才能无偏恢复多元联合回归系数 β₂。`,
+              `In multi-factor alpha models, neutralizing only the return Y but failing to neutralize candidate factor X₂ dilutes the realized factor return slope by (1 - ρ²)! Both sides must be orthogonalized to recover the unbiased multivariate coefficient β₂.`
+            )}
+          </p>
+        )}
+      </div>
+    </section>
+  );
+}
+
 const RECORD_EXAMPLE_SPEEDS = [7, 4, 6, 2, 5, 1, 3];
 
 
@@ -22493,7 +22865,7 @@ function MartingaleRandomWalkVisual() {
 function MarkdownPre({ children, ...props }) {
   const child = Array.isArray(children) ? children[0] : children;
   const className = child?.props?.className ?? '';
-  const match = /language-(quiz|mcq|mermaid|topo-demo|bellman-demo|segment-tree-demo|interval-merge-demo|interval-insert-demo|interval-rooms-demo|interval-query-demo|pow-demo|sliding-window-demo|longest-substring-demo|sliding-window-patterns|monotonic-stack-demo|largest-rectangle-demo|binary-search-template-demo|linked-list-reversal-demo|fast-slow-pointer-demo|array-duplicate-demo|lru-cache-demo|tree-traversal-demo|avl-rotation-demo|build-tree-demo|median-two-heaps-demo|three-sum-demo|rain-water-demo|simple-sort-race-demo|efficient-sort-race-demo|high-dimensional-integral-demo|record-minimum-demo|message-queue-demo|business-algorithm-map|system-design-overview-visual|photo-sharing-architecture-visual|async-messaging-architecture-visual|virtualization-container-visual|grid-multi-source-bfs-demo|union-find-demo|quickselect-partition-demo|trie-core-demo|trie-wildcard-demo|palindrome-dp-demo|coin-change-demo|subset-sum-demo|anisotropy-cone-demo|backtracking-patterns|backtracking-tree-demo|permutations-demo|combination-sum-demo|backtracking-dedup-demo|n-queens-demo|greedy-patterns|kadane-demo|jump-game-demo|gas-station-demo|partition-labels-demo|vtable-dispatch-demo|false-sharing-demo|fork-cow-demo|epoll-vs-select-demo|shared-ptr-cycle-demo|martingale-rw-demo|random-walk-ruin-demo|brownian-motion-demo|two-d-walk-demo|ito-geometry-demo|reflection-principle-demo|delta-hedging-demo|game-theory-interactive-demo)/.exec(className);
+  const match = /language-(quiz|mcq|mermaid|topo-demo|bellman-demo|segment-tree-demo|interval-merge-demo|interval-insert-demo|interval-rooms-demo|interval-query-demo|pow-demo|sliding-window-demo|longest-substring-demo|sliding-window-patterns|monotonic-stack-demo|largest-rectangle-demo|binary-search-template-demo|linked-list-reversal-demo|fast-slow-pointer-demo|array-duplicate-demo|lru-cache-demo|tree-traversal-demo|avl-rotation-demo|build-tree-demo|median-two-heaps-demo|three-sum-demo|rain-water-demo|simple-sort-race-demo|efficient-sort-race-demo|high-dimensional-integral-demo|record-minimum-demo|message-queue-demo|business-algorithm-map|system-design-overview-visual|photo-sharing-architecture-visual|async-messaging-architecture-visual|virtualization-container-visual|grid-multi-source-bfs-demo|union-find-demo|quickselect-partition-demo|trie-core-demo|trie-wildcard-demo|palindrome-dp-demo|coin-change-demo|subset-sum-demo|anisotropy-cone-demo|backtracking-patterns|backtracking-tree-demo|permutations-demo|combination-sum-demo|backtracking-dedup-demo|n-queens-demo|greedy-patterns|kadane-demo|jump-game-demo|gas-station-demo|partition-labels-demo|vtable-dispatch-demo|false-sharing-demo|fork-cow-demo|epoll-vs-select-demo|shared-ptr-cycle-demo|martingale-rw-demo|random-walk-ruin-demo|brownian-motion-demo|two-d-walk-demo|ito-geometry-demo|reflection-principle-demo|delta-hedging-demo|game-theory-interactive-demo|fwl-geometry-demo)/.exec(className);
 
   if (match?.[1] === 'mermaid') {
     return <MermaidDiagram chart={extractPlainText(child.props.children).replace(/\n$/, '')} />;
@@ -22749,6 +23121,10 @@ function MarkdownPre({ children, ...props }) {
 
   if (match?.[1] === 'game-theory-interactive-demo') {
     return <GameTheoryVisual />;
+  }
+
+  if (match?.[1] === 'fwl-geometry-demo') {
+    return <FWLGeometryVisual />;
   }
 
   if (match) {

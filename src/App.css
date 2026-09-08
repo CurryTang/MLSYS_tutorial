@@ -21464,3 +21464,183 @@ button.overview-support-card.active {
   color: #64748b;
   line-height: 1.4;
 }
+
+/* FWL Geometry Visual Demo */
+.fwl-demo-container {
+  margin: 1.35rem auto;
+  max-width: min(100%, 840px);
+  border: 1px solid rgba(168, 85, 247, 0.35);
+  border-radius: 14px;
+  background: #0b1120;
+  color: #f1f5f9;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+  padding: 1.25rem;
+}
+
+.fwl-demo-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.fwl-demo-header .eyebrow {
+  margin: 0;
+  color: #c084fc;
+  font: 700 0.68rem "IBM Plex Mono", "Courier New", monospace;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.fwl-demo-header h2 {
+  margin: 0.2rem 0 0;
+  color: #f8fafc;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.fwl-demo-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.fwl-tab-group {
+  display: flex;
+  gap: 0.35rem;
+  background: rgba(15, 23, 42, 0.8);
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 0.25rem;
+  flex-wrap: wrap;
+}
+
+.fwl-tab-btn {
+  background: transparent;
+  border: none;
+  color: #94a3b8;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.fwl-tab-btn:hover {
+  color: #f8fafc;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.fwl-tab-btn.active {
+  color: #ffffff;
+  background: #7c3aed;
+  box-shadow: 0 2px 8px rgba(124, 58, 237, 0.4);
+}
+
+.fwl-slider-wrap {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.8rem;
+  color: #cbd5e1;
+}
+
+.fwl-slider-wrap strong {
+  color: #c084fc;
+  font-family: "IBM Plex Mono", monospace;
+  min-width: 3.2rem;
+}
+
+.fwl-chip-btn {
+  background: rgba(168, 85, 247, 0.15);
+  border: 1px solid rgba(168, 85, 247, 0.3);
+  color: #d8b4fe;
+  font-size: 0.7rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.fwl-chip-btn:hover {
+  background: rgba(168, 85, 247, 0.3);
+  color: #fff;
+}
+
+.fwl-demo-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: radial-gradient(circle at 110px 250px, #131b2e 0%, #070c18 100%);
+  border-radius: 10px;
+  border: 1px solid #1e293b;
+  margin-bottom: 1rem;
+}
+
+@keyframes fwlDash {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+.fwl-ray-animated {
+  stroke-dasharray: 4 4;
+  animation: fwlDash 1.2s linear infinite;
+}
+
+@keyframes fwlPulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 2px rgba(244, 63, 94, 0.6));
+  }
+  50% {
+    filter: drop-shadow(0 0 8px rgba(244, 63, 94, 0.95));
+  }
+}
+
+.fwl-pulse-eps {
+  animation: fwlPulse 2s ease-in-out infinite;
+}
+
+.fwl-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 0.6rem;
+  margin-bottom: 0.85rem;
+}
+
+.fwl-metric-card {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 0.6rem 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.fwl-metric-card span {
+  font-size: 0.7rem;
+  color: #94a3b8;
+}
+
+.fwl-metric-card strong {
+  font-size: 1.1rem;
+  font-family: "IBM Plex Mono", monospace;
+  font-weight: 700;
+}
+
+.fwl-explanation-box {
+  background: rgba(30, 41, 59, 0.6);
+  border-left: 4px solid #a855f7;
+  border-radius: 0 8px 8px 0;
+  padding: 0.75rem 1rem;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: #e2e8f0;
+}
+
