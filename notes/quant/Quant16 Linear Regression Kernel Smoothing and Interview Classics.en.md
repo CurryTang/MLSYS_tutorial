@@ -23,187 +23,164 @@ Core Mental Models for Regression Interviews:
 
 ## Module 1: OLS Geometry and Algebra (ESL 3.2)
 
-### 1. Matrix Form, Normal Equations, and Closed-Form Solution
-Consider the standard multivariate linear regression model:
+### 1. Simple Linear Regression Model and OLS Estimators
+The simple univariate linear regression model is expressed as:
 $$
-y = X\beta + \varepsilon
+Y_i = \beta_0 + \beta_1 X_i + \varepsilon_i \quad (i = 1, 2, \dots, n)
 $$
-where target vector $y \in \mathbb{R}^N$, design matrix $X \in \mathbb{R}^{N \times (p+1)}$ (with the leading column typically set to $\mathbf{1}$ for the intercept, and assuming full column rank $\operatorname{rank}(X) = p+1 < N$), and coefficient vector $\beta \in \mathbb{R}^{p+1}$. Ordinary Least Squares (OLS) minimizes the Residual Sum of Squares:
+Ordinary Least Squares (OLS) minimizes the residual sum of squares $\sum_{i=1}^n \hat\varepsilon_i^2$, yielding the closed-form OLS estimators:
 $$
-\operatorname{RSS}(\beta) = \|y - X\beta\|_2^2 = (y - X\beta)^\top (y - X\beta) = y^\top y - 2\beta^\top X^\top y + \beta^\top X^\top X \beta
+\hat\beta_1 = \frac{\sum_{i=1}^n (X_i - \bar{X})(Y_i - \bar{Y})}{\sum_{i=1}^n (X_i - \bar{X})^2}, \quad \hat\beta_0 = \bar{Y} - \hat\beta_1 \bar{X}
 $$
-Differentiating with respect to $\beta$ (applying matrix calculus rules $\nabla_\beta (\beta^\top A) = A$ and $\nabla_\beta (\beta^\top A \beta) = 2A\beta$):
+where $\bar{X} = \frac{1}{n}\sum_{i=1}^n X_i$ and $\bar{Y} = \frac{1}{n}\sum_{i=1}^n Y_i$ denote sample means.
+
+---
+
+### 2. Coefficient of Determination $R^2$ and Variance Decomposition (ANOVA)
+$R^2$ measures the goodness of fit of the regression model, defined as:
 $$
-\nabla_\beta \operatorname{RSS}(\beta) = -2 X^\top y + 2 X^\top X \beta = \mathbf{0}
+R^2 = \frac{ESS}{TSS} = 1 - \frac{RSS}{TSS}
 $$
-This yields the foundational **Normal Equations**:
+where $TSS$ is the Total Sum of Squares, $RSS$ is the Residual Sum of Squares, and $ESS$ is the Explained Sum of Squares, respectively defined as:
 $$
-X^\top X \hat\beta = X^\top y
+TSS = \sum_{i=1}^n (Y_i - \bar{Y})^2, \quad RSS = \sum_{i=1}^n \hat\varepsilon_i^2 = \hat\varepsilon^T \hat\varepsilon, \quad ESS = \sum_{i=1}^n (\hat{Y}_i - \bar{Y})^2
 $$
-When $X$ has full column rank, the Gram matrix $X^\top X$ is symmetric positive definite and strictly invertible, providing the unique analytic closed-form solution:
+By residual orthogonality, the variance decomposition identity holds identically:
 $$
-\hat\beta = (X^\top X)^{-1} X^\top y
+TSS = ESS + RSS
 $$
 
 ---
 
-### 2. Residual Orthogonality: Algebraic Identity and Geometric Projection
-Define the fitted vector $\hat{y} = X\hat\beta$ and the sample residual vector $e = y - \hat{y} = y - X\hat\beta$.
-The orthogonality of residuals forms the geometric bedrock of linear modeling, exhibiting five fundamental properties:
+### 3. Multivariate Linear Regression: Matrix Form and Closed-Form Solution
+The multivariate linear regression model in matrix notation is:
+$$
+Y = X\beta + \varepsilon
+$$
+where target vector $Y \in \mathbb{R}^{n \times 1}$, design matrix $X \in \mathbb{R}^{n \times k}$ ($n$ is sample size, $k$ is total number of estimated coefficients including the constant intercept column $\mathbf{1}$; assuming full column rank $\operatorname{rank}(X) = k \le n$), and parameter vector $\beta \in \mathbb{R}^{k \times 1}$.
 
-#### (1) Residuals are Orthogonal to Every Regressor ($X^\top e = \mathbf{0}$)
-Directly rewriting the first-order optimality condition:
+OLS minimizes the Residual Sum of Squares:
 $$
--2 X^\top (y - X\hat\beta) = \mathbf{0} \implies X^\top e = \mathbf{0}
+RSS(\beta) = \|Y - X\beta\|_2^2 = (Y - X\beta)^T (Y - X\beta) = Y^T Y - 2\beta^T X^T Y + \beta^T X^T X \beta
 $$
-Expressed column by column: for any predictor column $X_j$ ($j = 0, 1, \dots, p$):
+Taking the derivative with respect to $\beta$ and setting the gradient to zero:
 $$
-X_j^\top e = \sum_{i=1}^N X_{ij} e_i = 0 \iff X_j \perp e
+\nabla_\beta RSS(\beta) = -2 X^T Y + 2 X^T X \beta = \mathbf{0}
 $$
-**Statistical Intuition**: The sample dot product between the residuals and every included regressor is identically zero (and their sample covariance is zero after mean-centering). This guarantees that **all linear predictive signal present in the explanatory variables has been fully extracted into $\hat\beta$, leaving zero residual linear signal**.
+This gives the foundational **Normal Equations**:
+$$
+X^T X \hat\beta = X^T Y
+$$
+Because $X$ has full column rank, $X^T X$ is symmetric positive definite and strictly invertible, yielding the unique analytical closed-form solution:
+$$
+\hat\beta = (X^T X)^{-1} X^T Y
+$$
 
-#### (2) The Magic of the Intercept: Residual Sum Vanishes ($\mathbf{1}^\top e = 0 \implies \bar{e} = 0$)
-If the regression includes an intercept, the first column of the design matrix is the vector of ones $X_0 = \mathbf{1} = (1, 1, \dots, 1)^\top$.
-Evaluating the orthogonality condition for $X_0 = \mathbf{1}$:
-$$
-\mathbf{1}^\top e = \sum_{i=1}^N e_i = 0 \implies \bar{e} = \frac{1}{N} \sum_{i=1}^N e_i \equiv 0
-$$
-**Two Crucial Corollaries**:
-1. **The sample mean of OLS residuals is strictly zero**;
-2. **The regression hyperplane passes directly through the sample center of mass $(\bar{x}, \bar{y})$**: Since $\bar{e} = \bar{y} - \bar{x}^\top \hat\beta = 0$, it follows that $\bar{y} = \bar{x}^\top \hat\beta$.
-> **Classic Interview Trap: Regression Without Intercept (Through the Origin)**
-> Interviewers often ask: "Is the mean of OLS residuals always zero?"
-> **Wrong Answer**: "Yes, always."
-> **Correct Explanation**: **Only when an intercept is included!** If the model is forced through the origin ($y = X\beta$ with no constant column), $\mathbf{1} \notin \operatorname{Col}(X)$, so $\mathbf{1}^\top e = \sum e_i \ne 0$, and the mean residual does not vanish!
+---
 
-#### (3) Residuals are Orthogonal to Fitted Values ($\hat{y}^\top e = 0$)
-Because fitted values $\hat{y} = X\hat\beta$ reside entirely within the column space $\operatorname{Col}(X)$:
-$$
-\hat{y}^\top e = (X\hat\beta)^\top e = \hat\beta^\top (X^\top e) = \hat\beta^\top \mathbf{0} = 0
-$$
-The fitted prediction vector $\hat{y}$ and residual vector $e$ are strictly perpendicular in $\mathbb{R}^N$ ($\hat{y} \perp e$).
-- Hat matrix $H = X(X^\top X)^{-1}X^\top$ is the orthogonal projection operator onto $\operatorname{Col}(X)$ (symmetric and idempotent: $H^2 = H, H^\top = H$);
-- Annihilator matrix $M = I - H$ is the orthogonal projection operator onto the orthogonal complement $\operatorname{Col}(X)^\perp$ ($M^2 = M, M^\top = M, HM = \mathbf{0}$);
-- Model effective degrees of freedom is $\mathrm{df} = \operatorname{tr}(H) = p+1$.
+### 4. Residual Orthogonality: Five Fundamental Algebraic and Geometric Properties
+Define the fitted values vector $\hat{Y} = X\hat\beta$ and sample residual vector $\hat\varepsilon = Y - \hat{Y} = Y - X\hat\beta$.
+Residual orthogonality forms the geometric bedrock of linear modeling:
 
-#### (4) Pythagorean Theorem & Variance Decomposition (ANOVA / Geometric Origin of $R^2$)
-The observation vector decomposes uniquely into two orthogonal vectors: $y = \hat{y} + e$. By the Pythagorean theorem in Euclidean space:
+#### (1) Residuals are Orthogonal to Every Regressor ($X^T \hat\varepsilon = \mathbf{0}$)
+Directly rewriting the first-order condition of OLS:
 $$
-\|y\|^2 = \|\hat{y} + e\|^2 = \|\hat{y}\|^2 + \|e\|^2 + 2 \underbrace{\hat{y}^\top e}_{= 0} = \|\hat{y}\|^2 + \|e\|^2
+-2 X^T (Y - X\hat\beta) = \mathbf{0} \implies X^T \hat\varepsilon = \mathbf{0}
 $$
-When an intercept is present, centering all vectors by subtracting the sample mean vector $\bar{y}\mathbf{1}$:
+For every predictor column $X_j$ ($j = 0, 1, \dots, k-1$):
 $$
-(y - \bar{y}\mathbf{1}) = (\hat{y} - \bar{y}\mathbf{1}) + e
+X_j^T \hat\varepsilon = \sum_{i=1}^n X_{ij} \hat\varepsilon_i = 0 \iff X_j \perp \hat\varepsilon
 $$
-The inner product cross-term evaluates to:
+**Statistical Intuition**: All linear predictive signal present in $X$ has been fully extracted into $\hat\beta$, leaving zero linear predictive signal in the residuals.
+
+#### (2) The Magic of the Intercept: Residual Sum Vanishes ($\mathbf{1}^T \hat\varepsilon = 0 \implies \bar{\hat\varepsilon} = 0$)
+If an intercept is included, the first column of $X$ is the vector of ones $X_0 = \mathbf{1} = (1, \dots, 1)^T$:
 $$
-(\hat{y} - \bar{y}\mathbf{1})^\top e = \hat{y}^\top e - \bar{y} (\mathbf{1}^\top e) = 0 - \bar{y}(0) = 0
+\mathbf{1}^T \hat\varepsilon = \sum_{i=1}^n \hat\varepsilon_i = 0 \implies \bar{\hat\varepsilon} = \frac{1}{n} \sum_{i=1}^n \hat\varepsilon_i \equiv 0
 $$
-Because the cross-term vanishes identically, the squared Euclidean norms decompose into the canonical Analysis of Variance (ANOVA) identity:
+- **Corollary 1**: The sample mean of OLS residuals is strictly zero;
+- **Corollary 2**: The regression hyperplane strictly passes through the sample centroid $(\bar{X}, \bar{Y})$;
+- **High-Frequency Trap**: If the model is forced through the origin without an intercept ($Y = X\beta$), $\mathbf{1} \notin \operatorname{Col}(X)$, so the sum of residuals is generally non-zero!
+
+#### (3) Residuals are Orthogonal to Fitted Values ($\hat{Y}^T \hat\varepsilon = 0$)
+Because $\hat{Y} = X\hat\beta \in \operatorname{Col}(X)$:
 $$
-\underbrace{\sum_{i=1}^N (y_i - \bar{y})^2}_{\text{Total Sum of Squares } \mathrm{TSS}} = \underbrace{\sum_{i=1}^N (\hat{y}_i - \bar{y})^2}_{\text{Explained Sum of Squares } \mathrm{ESS}} + \underbrace{\sum_{i=1}^N e_i^2}_{\text{Residual Sum of Squares } \mathrm{RSS}}
+\hat{Y}^T \hat\varepsilon = (X\hat\beta)^T \hat\varepsilon = \hat\beta^T (X^T \hat\varepsilon) = \hat\beta^T \mathbf{0} = 0
 $$
-This leads to the coefficient of determination:
+The fitted prediction vector and residual vector are strictly perpendicular ($\hat{Y} \perp \hat\varepsilon$).
+- Hat matrix $H = X(X^T X)^{-1} X^T$ is the orthogonal projection matrix onto $\operatorname{Col}(X)$ ($H^2 = H, H^T = H$);
+- Annihilator matrix $M = I - H$ is the orthogonal projection matrix onto $\operatorname{Col}(X)^\perp$ ($M^2 = M, M^T = M, HM = \mathbf{0}$);
+- Model effective degrees of freedom: $\mathrm{df} = \operatorname{tr}(H) = k$.
+
+#### (4) Pythagorean Theorem and Variance Decomposition ($TSS = ESS + RSS$)
+From $Y = \hat{Y} + \hat\varepsilon$ and $\hat{Y} \perp \hat\varepsilon$:
 $$
-R^2 = \frac{\mathrm{ESS}}{\mathrm{TSS}} = 1 - \frac{\mathrm{RSS}}{\mathrm{TSS}} \in [0, 1]
+\|Y\|^2 = \|\hat{Y} + \hat\varepsilon\|^2 = \|\hat{Y}\|^2 + \|\hat\varepsilon\|^2 + 2\hat{Y}^T \hat\varepsilon = \|\hat{Y}\|^2 + \|\hat\varepsilon\|^2
 $$
-*(Note: In regression without intercept, $(\hat{y})^\top e \ne 0$ in deviation-from-mean space, breaking $\mathrm{TSS} = \mathrm{ESS} + \mathrm{RSS}$ and potentially producing negative $R^2$.)*
+Centering with respect to the sample mean $\bar{Y}\mathbf{1}$:
+$$
+(Y - \bar{Y}\mathbf{1}) = (\hat{Y} - \bar{Y}\mathbf{1}) + \hat\varepsilon
+$$
+Evaluating the inner product cross-term:
+$$
+(\hat{Y} - \bar{Y}\mathbf{1})^T \hat\varepsilon = \hat{Y}^T \hat\varepsilon - \bar{Y}(\mathbf{1}^T \hat\varepsilon) = 0 - 0 = 0
+$$
+Because the cross-term vanishes identically, the variance decomposition holds:
+$$
+\underbrace{\sum_{i=1}^n (Y_i - \bar{Y})^2}_{TSS} = \underbrace{\sum_{i=1}^n (\hat{Y}_i - \bar{Y})^2}_{ESS} + \underbrace{\sum_{i=1}^n \hat\varepsilon_i^2}_{RSS} \implies R^2 = \frac{ESS}{TSS} = 1 - \frac{RSS}{TSS} \in [0, 1]
+$$
 
 #### (5) Key Distinction: Sample Residual Algebraic Orthogonality vs. Population Error Exogeneity
-Distinguishing the sample residual from the unobserved population disturbance is a classic litmus test:
-- **Sample Residual Orthogonality ($X^\top e = 0$)**: An **algebraic/numerical identity**. It is a direct mathematical consequence of setting the gradient of RSS to zero. Regardless of whether the true data-generating process is linear, or whether heteroskedasticity or measurement errors exist, the calculated sample residuals $e$ are guaranteed to be orthogonal to $X$ by construction.
-- **Population Error Exogeneity ($\mathbb{E}[\varepsilon \mid X] = 0 \implies \mathbb{E}[X^\top \varepsilon] = \mathbf{0}$)**: A **structural population assumption**. It asserts that unobserved latent shocks $\varepsilon$ are mean-independent of $X$. In practice, omitted variable bias, simultaneity, or selection bias violate this assumption (endogeneity).
-> **Interview Follow-Up**: "In a misspecified model with omitted variables, are the OLS residuals still orthogonal to the regressors?"
-> **Standard Answer**: The sample residuals $e$ remain **strictly orthogonal** to the included regressors (algebraic necessity); however, the true population errors $\varepsilon$ are **no longer orthogonal** to the regressors, causing $\hat\beta$ to be structurally biased.
+- **Sample Residual Algebraic Orthogonality ($X^T \hat\varepsilon = \mathbf{0}$)**: A **pure algebraic numerical identity**. It is a direct mechanical consequence of setting the gradient of RSS to zero. Regardless of whether the true relationship is linear or whether heteroskedasticity or measurement errors exist, OLS sample residuals are always strictly orthogonal to $X$.
+- **Population Error Exogeneity ($E(\varepsilon \mid X) = \mathbf{0} \implies E(X^T \varepsilon) = \mathbf{0}$)**: An **untestable population structural assumption**. It is frequently violated in practice by omitted variable bias (OVB), reverse causality, or selection bias.
+> **Classic Interview Question**: "In a misspecified model with omitted variables, are the OLS residuals still orthogonal to the regressors?"
+> **Standard Answer**: Sample residuals $\hat\varepsilon$ remain **strictly orthogonal** to the included regressors (algebraic necessity); however, the unobserved true errors $\varepsilon$ are **no longer orthogonal** to the regressors, inducing endogeneity bias in the parameter estimates.
 
 ---
 
-### 3. Deep Connection Between Regression Coefficients and Covariance
-Regression coefficients act as projection operators mapping variance and covariance structures.
+### 5. Deep Connection Between Regression Coefficients and Covariance
 
 #### (1) Univariate OLS: Ratio of Covariance to Regressor Variance
-For simple univariate regression $y = \alpha + \beta x + \varepsilon$ with intercept:
 $$
-\hat\beta = \frac{\sum_{i=1}^N (x_i - \bar{x})(y_i - \bar{y})}{\sum_{i=1}^N (x_i - \bar{x})^2} = \frac{\widehat{\operatorname{Cov}}(x, y)}{\widehat{\operatorname{Var}}(x)} = \hat\rho_{xy} \frac{s_y}{s_x}
-$$
-$$
-\hat\alpha = \bar{y} - \hat\beta \bar{x}
+\hat\beta_1 = \frac{\sum_{i=1}^n (X_i - \bar{X})(Y_i - \bar{Y})}{\sum_{i=1}^n (X_i - \bar{X})^2} = \frac{\widehat{\operatorname{Cov}}(X, Y)}{\widehat{\operatorname{Var}}(X)} = \hat\rho_{XY} \frac{s_Y}{s_X}
 $$
 $$
-R^2 = \hat\rho_{xy}^2
+\hat\beta_0 = \bar{Y} - \hat\beta_1 \bar{X}, \quad R^2 = \hat\rho_{XY}^2
 $$
-- **Correlation $\rho$ vs. Slope $\beta$**:
-  - **Correlation $\rho = \frac{\operatorname{Cov}(x, y)}{\sigma_x \sigma_y} \in [-1, 1]$**: **Dimensionless** and **symmetric** ($\rho_{xy} = \rho_{yx}$). It measures the purity/signal-to-noise ratio of the linear alignment, geometrically representing $\cos \theta$ between unit vectors;
-  - **Regression Slope $\beta = \rho \frac{\sigma_y}{\sigma_x}$**: **Dimensional** (units of $y$ per unit of $x$) and **asymmetric** ($\beta_{y \sim x} \ne \beta_{x \sim y}$). It quantifies the marginal physical expected rate of change in $y$ given a 1-unit increase in $x$;
-  - If both variables are standardized ($Z$-scores, $\sigma_x = \sigma_y = 1$), the slope and correlation **coincide numerically**: $\hat\beta = \hat\rho$.
+- **Correlation $\rho$ (Dimensionless, Symmetric $[-1, 1]$)**: Reflects linear signal purity;
+- **Regression Slope $\beta_1$ (Dimensional, Asymmetric $[Y]/[X]$)**: Quantifies the expected marginal change in $Y$ per 1-unit shift in $X$;
+- **Standardized Data**: When $s_X = s_Y = 1$, the slope and correlation coincide: $\hat\beta_1 = \hat\rho_{XY}$.
 
-#### (2) Asymmetry of Regression & "Regression to the Mean"
-Interview trap: "If regressing $y$ on $x$ yields a slope of 2, does regressing $x$ on $y$ yield a slope of $1/2$?"
-- **Wrong Answer**: $1/2$.
-- **Mathematical Reality**:
-  $$
-  \hat\beta_{y \sim x} = \rho \frac{\sigma_y}{\sigma_x}, \quad \hat\beta_{x \sim y} = \rho \frac{\sigma_x}{\sigma_y}
-  $$
-  Multiplying both slopes:
-  $$
-  \hat\beta_{y \sim x} \times \hat\beta_{x \sim y} = \rho^2 \le 1
-  $$
-  Whenever real data contains noise ($|\rho| < 1$):
-  $$
-  \hat\beta_{x \sim y} = \frac{\rho^2}{\hat\beta_{y \sim x}} < \frac{1}{\hat\beta_{y \sim x}}
-  $$
-- **Geometric & Galton Origins**:
-  If $\hat\beta_{y \sim x} = 2$, then $\sigma_y / \sigma_x \ge 2$ and $\rho \le 1$. The forward and reverse regression lines intersect at the centroid $(\bar{x}, \bar{y})$ with a non-zero angular separation $\theta > 0$, collapsing onto each other only when $|\rho| = 1$. This encapsulates Francis Galton's 1886 insight on "regression toward mediocrity": an exceptionally tall father's son is predicted to be above average, but closer to the population mean.
+#### (2) Asymmetry of Regression and "Regression to the Mean"
+$$
+\hat\beta_{Y \sim X} = \rho \frac{\sigma_Y}{\sigma_X}, \quad \hat\beta_{X \sim Y} = \rho \frac{\sigma_X}{\sigma_Y} \implies \hat\beta_{Y \sim X} \times \hat\beta_{X \sim Y} = \rho^2 \le 1
+$$
+The reverse regression slope is not the reciprocal: $\hat\beta_{X \sim Y} = \frac{\rho^2}{\hat\beta_{Y \sim X}} < \frac{1}{\hat\beta_{Y \sim X}}$ whenever noise exists ($|\rho| < 1$). This is Francis Galton's classic "regression to the mean."
 
-#### (3) Multivariate OLS: Inverse Covariance Matrix & Cross-Covariance Vector
-Centering all regressors and the target ($X \in \mathbb{R}^{N \times p}$, $y \in \mathbb{R}^N$):
-- Regressor sample covariance matrix: $\hat{\boldsymbol{\Sigma}}_{XX} = \frac{1}{N} X^\top X \in \mathbb{R}^{p \times p}$;
-- Cross-covariance vector: $\hat{\boldsymbol{\Sigma}}_{Xy} = \frac{1}{N} X^\top y \in \mathbb{R}^{p \times 1}$.
-The multivariate OLS closed form is expressed purely through covariances:
+#### (3) Multivariate OLS: Inverse Covariance Matrix & Whitening Operator
+Centering regressors and target:
 $$
-\hat\beta = (X^\top X)^{-1} X^\top y = \hat{\boldsymbol{\Sigma}}_{XX}^{-1} \hat{\boldsymbol{\Sigma}}_{Xy}
+\hat\beta = (X^T X)^{-1} X^T Y = \hat{\boldsymbol{\Sigma}}_{XX}^{-1} \hat{\boldsymbol{\Sigma}}_{XY}
 $$
-- **Orthogonal Regressors Decouple**: If all predictors are pairwise uncorrelated ($\boldsymbol{\Sigma}_{XX} = \operatorname{diag}(\sigma_1^2, \dots, \sigma_p^2)$ is diagonal):
-  $$
-  \hat\beta_j = \frac{\operatorname{Cov}(X_j, y)}{\operatorname{Var}(X_j)}
-  $$
-  Every multivariate coefficient **collapses strictly to its separate univariate regression coefficient**!
-- **Correlated Regressors & The Whitening/Decorrelation Operator**:
-  When predictors correlate, the cross-covariance $\operatorname{Cov}(X_j, y)$ is contaminated by indirect confounding paths through other predictors.
-  The inverse covariance matrix $\hat{\boldsymbol{\Sigma}}_{XX}^{-1}$ functions as a **linear decorrelation operator**: it strips out common co-movements and isolates the unique, marginal contribution of each variable.
+- If predictors are mutually orthogonal ($\hat{\boldsymbol{\Sigma}}_{XX}$ is diagonal), multivariate regression decouples into separate univariate regressions: $\hat\beta_j = \frac{\operatorname{Cov}(X_j, Y)}{\operatorname{Var}(X_j)}$;
+- If predictors are correlated, $\hat{\boldsymbol{\Sigma}}_{XX}^{-1}$ acts as a **linear decorrelation (whitening) operator**, stripping indirect confounding paths and isolating the unique marginal contribution of $X_j$.
 
 #### (4) Partial Covariance & The Frisch–Waugh–Lovell (FWL) Theorem
-How does a single coefficient $\hat\beta_j$ in multiple regression reconcile with covariance?
 By the FWL Theorem:
 $$
-\hat\beta_j = \frac{\operatorname{Cov}(\tilde{X}_j, y)}{\operatorname{Var}(\tilde{X}_j)} = \frac{\operatorname{Cov}(\tilde{X}_j, \tilde{y})}{\operatorname{Var}(\tilde{X}_j)}
+\hat\beta_j = \frac{\operatorname{Cov}(\tilde{X}_j, Y)}{\operatorname{Var}(\tilde{X}_j)} = \frac{\operatorname{Cov}(\tilde{X}_j, \tilde{Y})}{\operatorname{Var}(\tilde{X}_j)}
 $$
-where $\tilde{X}_j$ is the residual from regressing $X_j$ onto all remaining predictors $X_{-j}$ (capturing the orthogonal, non-redundant variation of $X_j$), and $\tilde{y}$ is the residual from regressing $y$ onto $X_{-j}$.
-- **Direct Derivation of Variance Inflation Factor (VIF)**:
-  Since $\operatorname{Var}(\tilde{X}_j) = \operatorname{Var}(X_j) (1 - R_{j \mid -j}^2)$, where $R_{j \mid -j}^2$ is the $R^2$ from regressing $X_j$ onto $X_{-j}$:
-  $$
-  \operatorname{Var}(\hat\beta_j) = \frac{\sigma^2}{\sum_{i=1}^N \tilde{x}_{ij}^2} = \frac{\sigma^2}{(N-1)\operatorname{Var}(X_j)} \cdot \underbrace{\frac{1}{1 - R_{j \mid -j}^2}}_{\mathrm{VIF}_j}
-  $$
-  As multicollinearity intensifies ($R_{j \mid -j}^2 \to 1$), the denominator variance $\operatorname{Var}(\tilde{X}_j) \to 0$, driving the parameter variance to infinity.
+where $\tilde{X}_j$ is the residual from regressing $X_j$ on all remaining regressors $X_{-j}$, and $\tilde{Y}$ is the residual from regressing $Y$ on $X_{-j}$.
+- **Variance Inflation Factor (VIF)**:
+$$
+\operatorname{Var}(\hat\beta_j \mid X) = \frac{\sigma^2}{(n-1)\operatorname{Var}(X_j)} \cdot \underbrace{\frac{1}{1 - R_{j \mid -j}^2}}_{\mathrm{VIF}_j}
+$$
 
 #### (5) Four Canonical Quantitative Finance Mappings
-1. **CAPM Asset Beta**:
-   $$ \beta_i = \frac{\operatorname{Cov}(R_i, R_m)}{\operatorname{Var}(R_m)} $$
-   An asset's systematic risk exposure is the covariance between asset excess returns and market excess returns, normalized by market variance.
-2. **Minimum-Variance Optimal Hedge Ratio**:
-   Holding spot $\Delta S$ and shorting $h$ futures contracts $\Delta F$, the hedged portfolio variance is:
-   $$ \min_h \operatorname{Var}(\Delta S - h \Delta F) = \operatorname{Var}(\Delta S) - 2h \operatorname{Cov}(\Delta S, \Delta F) + h^2 \operatorname{Var}(\Delta F) $$
-   First-order condition yields:
-   $$ h^* = \frac{\operatorname{Cov}(\Delta S, \Delta F)}{\operatorname{Var}(\Delta F)} \equiv \beta_{\Delta S \sim \Delta F} $$
-   The optimal hedge ratio is algebraically identical to the univariate OLS slope of spot changes regressed on futures changes!
-3. **Omitted Variable Bias (OVB Formula)**:
-   If the true model is $y = \beta_1 x_1 + \beta_2 x_2 + \varepsilon$, omitting $x_2$ yields:
-   $$ \hat\beta_1^{\text{short}} = \frac{\operatorname{Cov}(x_1, y)}{\operatorname{Var}(x_1)} = \beta_1 + \beta_2 \cdot \underbrace{\frac{\operatorname{Cov}(x_1, x_2)}{\operatorname{Var}(x_1)}}_{\beta_{x_2 \sim x_1}} $$
-   The bias equals the true coefficient of the omitted variable multiplied by the auxiliary regression coefficient of the omitted on the included variable.
-4. **Barra Multi-Factor Risk & Factor Neutralization**:
-   Raw alpha factors $F_{\text{raw}}$ are often exposed to systematic risks like Size and Industry. Running OLS:
-   $$ F_{\text{raw}} = X_{\text{risk}} \gamma + F_{\text{neutral}} $$
-   By residual orthogonality, $F_{\text{neutral}} \perp X_{\text{risk}}$, guaranteeing that the neutralized alpha factor has zero linear covariance with the underlying risk factors.
+1. **CAPM Beta**: $\beta_i = \frac{\operatorname{Cov}(R_i, R_m)}{\operatorname{Var}(R_m)}$;
+2. **Minimum-Variance Optimal Hedge Ratio**: $\min_h \operatorname{Var}(\Delta S - h\Delta F) \implies h^* = \frac{\operatorname{Cov}(\Delta S, \Delta F)}{\operatorname{Var}(\Delta F)} \equiv \beta_{\Delta S \sim \Delta F}$;
+3. **Omitted Variable Bias (OVB Formula)**: If true model is $Y = \beta_1 X_1 + \beta_2 X_2 + \varepsilon$, omitting $X_2$ yields $E(\hat\beta_1^{\text{short}} \mid X) = \beta_1 + \beta_2 \frac{\operatorname{Cov}(X_1, X_2)}{\operatorname{Var}(X_1)}$;
+4. **Barra Factor Neutralization**: $F_{\text{raw}} = X_{\text{risk}} \gamma + F_{\text{neutral}}$, where $F_{\text{neutral}} \perp X_{\text{risk}}$.
 
 ---
 
@@ -214,15 +191,15 @@ The Gauss–Markov theorem along with statistical inference in Classical Normal 
 ---
 
 ### 1. Gauss–Markov Assumptions & The Essence of BLUE
-The Gauss–Markov theorem states that under specific conditions, the OLS estimator is the **Best Linear Unbiased Estimator (BLUE)**—namely, among all linear unbiased estimators, OLS achieves the minimum variance (its covariance matrix difference is positive semi-definite).
+The Gauss–Markov theorem states that under specific assumptions, the OLS estimator is the **Best Linear Unbiased Estimator (BLUE)**—meaning that among all linear unbiased estimators, OLS achieves the minimum variance (its covariance matrix difference is positive semi-definite).
 
-1. **Linearity in Parameters**: The true model satisfies $y = X\beta + \varepsilon$;
-2. **Strict Exogeneity**: $\mathbb{E}[\varepsilon \mid X] = \mathbf{0}$;
+1. **Linearity in Parameters**: $Y = X\beta + \varepsilon$;
+2. **Strict Exogeneity**: $E(\varepsilon \mid X) = \mathbf{0}$;
 3. **Spherical Disturbances**:
    - **Homoskedasticity**: $\operatorname{Var}(\varepsilon_i \mid X) = \sigma^2$;
    - **No Autocorrelation**: $\operatorname{Cov}(\varepsilon_i, \varepsilon_j \mid X) = 0 \quad (i \ne j)$;
-   - In matrix form: $\operatorname{Var}(\varepsilon \mid X) = \sigma^2 I_N$;
-4. **No Full Multicollinearity**: $\operatorname{rank}(X) = k = p+1 \le N$.
+   - In matrix form: $\operatorname{Var}(\varepsilon \mid X) = \sigma^2 I_n$;
+4. **No Full Multicollinearity**: $\operatorname{rank}(X) = k \le n$.
 
 > **Classic Interview Trap: The Normality Myth**
 > **"Does OLS require normally distributed errors to be BLUE?"**
@@ -234,90 +211,92 @@ The Gauss–Markov theorem states that under specific conditions, the OLS estima
 ### 2. Core Problem-Solving Lemma Sheet
 
 #### [Lemma 1] Fundamental Algebraic & Moment Properties of OLS
-- **Linearity**: $\hat\beta = (X^\top X)^{-1} X^\top y = C y$, where weight matrix $C = (X^\top X)^{-1} X^\top$ satisfies $C X = I_k$.
+- **Linearity**: $\hat\beta = (X^T X)^{-1} X^T Y = C Y$, where weight matrix $C = (X^T X)^{-1} X^T$ satisfies $C X = I_k$.
 - **Conditional Unbiasedness**:
-  $$ \mathbb{E}[\hat\beta \mid X] = \mathbb{E}[C(X\beta + \varepsilon) \mid X] = \beta + C \underbrace{\mathbb{E}[\varepsilon \mid X]}_{= \mathbf{0}} = \beta $$
+  $$ E(\hat\beta \mid X) = \beta $$
 - **Conditional Covariance Matrix**:
-  $$ \operatorname{Var}(\hat\beta \mid X) = \operatorname{Var}(Cy \mid X) = C \operatorname{Var}(\varepsilon \mid X) C^\top = C (\sigma^2 I_N) C^\top = \sigma^2 (X^\top X)^{-1} $$
-  - Variance of the $j$-th coefficient: $\operatorname{Var}(\hat\beta_j \mid X) = \sigma^2 [(X^\top X)^{-1}]_{jj}$;
-  - Covariance between two coefficients: $\operatorname{Cov}(\hat\beta_j, \hat\beta_m \mid X) = \sigma^2 [(X^\top X)^{-1}]_{jm}$.
+  $$ \operatorname{Var}(\hat\beta \mid X) = \operatorname{Var}(CY \mid X) = C \operatorname{Var}(\varepsilon \mid X) C^T = C (\sigma^2 I_n) C^T = \sigma^2 (X^T X)^{-1} $$
+  - Variance of the $j$-th coefficient: $\operatorname{Var}(\hat\beta_j \mid X) = \sigma^2 [(X^T X)^{-1}]_{jj}$;
+  - Covariance between two coefficients: $\operatorname{Cov}(\hat\beta_j, \hat\beta_m \mid X) = \sigma^2 [(X^T X)^{-1}]_{jm}$.
 - **Unbiased Residual Variance Estimator**:
-  $$ \hat\sigma^2 = s^2 = \frac{e^\top e}{N - k} = \frac{\sum_{i=1}^N e_i^2}{N - k} $$
-  where $N$ is sample size and $k = p+1$ is the number of estimated parameters (including intercept).
+  $$ \hat\sigma^2 = \frac{\hat\varepsilon^T \hat\varepsilon}{n - k} = \frac{\sum_{i=1}^n \hat\varepsilon_i^2}{n - k} $$
+  where $n$ is sample size and $k$ is total number of estimated parameters (including intercept $\beta_0$).
   - **Derivation Proof (Quadratic Form Expectation Lemma)**:
-    Residuals express as $e = (I - H)y = (I - H)(X\beta + \varepsilon) = (I - H)\varepsilon$.
-    Residual sum of squares is the quadratic form $e^\top e = \varepsilon^\top (I - H) \varepsilon$.
-    Applying the expectation lemma $\mathbb{E}[\varepsilon^\top A \varepsilon] = \operatorname{tr}(A \operatorname{Var}(\varepsilon)) + \mathbb{E}[\varepsilon]^\top A \mathbb{E}[\varepsilon]$:
-    $$ \mathbb{E}[e^\top e \mid X] = \operatorname{tr}\left( (I - H) \sigma^2 I_N \right) + \mathbf{0} = \sigma^2 \operatorname{tr}(I - H) = \sigma^2 (N - \operatorname{tr}(H)) = \sigma^2 (N - k) $$
-    Dividing both sides by $N - k$ yields $\mathbb{E}[\hat\sigma^2 \mid X] = \sigma^2$.
+    Residuals express as $\hat\varepsilon = (I - H)Y = (I - H)(X\beta + \varepsilon) = (I - H)\varepsilon$.
+    Residual sum of squares is the quadratic form $\hat\varepsilon^T \hat\varepsilon = \varepsilon^T (I - H) \varepsilon$.
+    Applying the expectation lemma $E(\varepsilon^T A \varepsilon) = \operatorname{tr}(A \operatorname{Var}(\varepsilon)) + E(\varepsilon)^T A E(\varepsilon)$:
+    $$ E(\hat\varepsilon^T \hat\varepsilon \mid X) = \operatorname{tr}\left( (I - H) \sigma^2 I_n \right) + \mathbf{0} = \sigma^2 \operatorname{tr}(I - H) = \sigma^2 (n - \operatorname{tr}(H)) = \sigma^2 (n - k) $$
+    Dividing both sides by $n - k$ yields $E(\hat\sigma^2 \mid X) = \sigma^2$.
 
 #### [Lemma 2] Statistical Inference Distributional Lemmas under Normality
-Assuming conditional normality $\varepsilon \mid X \sim \mathcal{N}(\mathbf{0}, \sigma^2 I_N)$:
+Assuming conditional normality $\varepsilon \mid X \sim \mathcal{N}(\mathbf{0}, \sigma^2 I_n)$:
 - **Independence Lemma (Core Corollary of Cochran's Theorem)**:
-  $$ \hat\beta \text{ and the sample residuals } e \text{ (and } \hat\sigma^2 \text{) are strictly statistically independent!} $$
-  **Algebraic Proof**: $\hat\beta = C y$ and $e = (I - H)y$. Their cross-covariance evaluates to:
-  $$ \operatorname{Cov}(\hat\beta, e \mid X) = C \operatorname{Var}(y \mid X) (I - H)^\top = \sigma^2 C (I - H) = \sigma^2 \left( (X^\top X)^{-1}X^\top - (X^\top X)^{-1}X^\top H \right) = \mathbf{0} $$
-  Under joint Gaussianity, zero covariance implies strict statistical independence: $\hat\beta \perp e$.
+  $$ \hat\beta \text{ and the sample residuals } \hat\varepsilon \text{ (and } \hat\sigma^2 \text{) are strictly statistically independent!} $$
+  **Algebraic Proof**: $\hat\beta = C Y$ and $\hat\varepsilon = (I - H)Y$. Their cross-covariance evaluates to:
+  $$ \operatorname{Cov}(\hat\beta, \hat\varepsilon \mid X) = C \operatorname{Var}(Y \mid X) (I - H)^T = \sigma^2 C (I - H) = \sigma^2 \left( (X^T X)^{-1}X^T - (X^T X)^{-1}X^T H \right) = \mathbf{0} $$
+  Under joint Gaussianity, zero covariance implies strict statistical independence: $\hat\beta \perp \hat\varepsilon$.
 - **Residual Sum of Squares Chi-Square Distribution**:
-  $$ \frac{e^\top e}{\sigma^2} = \frac{(N - k)\hat\sigma^2}{\sigma^2} \sim \chi^2(N - k) $$
+  $$ \frac{\hat\varepsilon^T \hat\varepsilon}{\sigma^2} = \frac{(n - k)\hat\sigma^2}{\sigma^2} \sim \chi^2(n - k) $$
 - **Single-Coefficient $t$-Test**:
   Testing $H_0: \beta_j = \beta_{j,0}$ (typically testing significance $\beta_{j,0} = 0$):
-  $$ t = \frac{\hat\beta_j - \beta_{j,0}}{\operatorname{SE}(\hat\beta_j)} = \frac{\hat\beta_j - \beta_{j,0}}{\sqrt{\hat\sigma^2 [(X^\top X)^{-1}]_{jj}}} \sim t(N - k) $$
+  $$ t = \frac{\hat\beta_j - \beta_{j,0}}{\sqrt{\hat\sigma^2 [(X^T X)^{-1}]_{jj}}} \sim t_{n - k} $$
 - **Multiple Linear Restrictions $F$-Test**:
-  Testing joint hypothesis $H_0: R\beta = r$ ($q$ linear restrictions, $R$ is $q \times k$ with full row rank):
-  $$ F = \frac{(R\hat\beta - r)^\top [R(X^\top X)^{-1} R^\top]^{-1} (R\hat\beta - r) / q}{\hat\sigma^2} \sim F(q, N - k) $$
+  Testing joint hypothesis $H_0: R\beta = r$ ($q$ linear restrictions, $R \in \mathbb{R}^{q \times k}$ with full row rank):
+  $$ F = \frac{(R\hat\beta - r)^T [R(X^T X)^{-1} R^T]^{-1} (R\hat\beta - r) / q}{\hat\sigma^2} \sim F_{q, n - k} $$
   - **Problem-Solving Shortcut (Restricted $R$ vs. Unrestricted $UR$)**:
-    $$ F = \frac{(\operatorname{RSS}_R - \operatorname{RSS}_{UR}) / q}{\operatorname{RSS}_{UR} / (N - k)} = \frac{(R_{UR}^2 - R_R^2) / q}{(1 - R_{UR}^2) / (N - k)} $$
-  - **Overall Regression Significance Test** ($H_0: \beta_1 = \dots = \beta_p = 0$, with $q = p$):
-    $$ F = \frac{\mathrm{ESS} / p}{\mathrm{RSS} / (N - p - 1)} = \frac{R^2 / p}{(1 - R^2) / (N - p - 1)} \sim F(p, N - p - 1) $$
+    $$ F = \frac{(RSS_R - RSS_{UR}) / q}{RSS_{UR} / (n - k)} = \frac{(R_{UR}^2 - R_R^2) / q}{(1 - R_{UR}^2) / (n - k)} \sim F_{q, n - k} $$
+  - **Overall Regression Significance Test** ($H_0: \beta_1 = \dots = \beta_{k-1} = 0$, with $q = k - 1$):
+    $$ F = \frac{ESS / (k - 1)}{RSS / (n - k)} = \frac{R^2 / (k - 1)}{(1 - R^2) / (n - k)} \sim F_{k-1, n - k} $$
   - **Equivalence of $t$ and $F$**: For a single restriction ($q=1$), $t^2 \equiv F$.
 
 #### [Lemma 3] Prediction Intervals vs. Confidence Intervals
-Given a new query point $x_0 \in \mathbb{R}^k$:
-- **Confidence Interval for Conditional Mean Response ($\mathbb{E}[y_0 \mid x_0] = x_0^\top \beta$)**:
-  Fitted point $\hat{y}_0 = x_0^\top \hat\beta$. Variance stems strictly from parameter estimation error:
-  $$ \operatorname{Var}(\hat{y}_0 \mid X) = x_0^\top \operatorname{Var}(\hat\beta \mid X) x_0 = \sigma^2 x_0^\top (X^\top X)^{-1} x_0 $$
-  $1-\alpha$ Confidence Interval: $\hat{y}_0 \pm t_{1-\alpha/2, N-k} \cdot \hat\sigma \sqrt{x_0^\top (X^\top X)^{-1} x_0}$.
-- **Prediction Interval for an Individual New Observation ($y_0 = x_0^\top \beta + \varepsilon_0$)**:
-  Prediction error $e_0 = y_0 - \hat{y}_0 = \varepsilon_0 - x_0^\top(\hat\beta - \beta)$. Because future disturbance $\varepsilon_0$ is independent of the training sample:
-  $$ \operatorname{Var}(e_0 \mid X) = \operatorname{Var}(\varepsilon_0) + \operatorname{Var}(\hat{y}_0 \mid X) = \sigma^2 \left[ 1 + x_0^\top (X^\top X)^{-1} x_0 \right] $$
-  $1-\alpha$ Prediction Interval: $\hat{y}_0 \pm t_{1-\alpha/2, N-k} \cdot \hat\sigma \sqrt{1 + x_0^\top (X^\top X)^{-1} x_0}$.
-> **Key Takeaway**: Prediction variance strictly exceeds confidence variance by $\sigma^2$ (the irreducible error variance). Hence, **prediction intervals are always strictly wider than confidence intervals**; even as $N \to \infty$, prediction interval width does not collapse to zero, remaining bounded at $\pm z_{\alpha/2}\sigma$.
+Given a new query point $X_0 \in \mathbb{R}^k$:
+- **Confidence Interval for Conditional Mean Response ($E(Y_0 \mid X_0) = X_0^T \beta$)**:
+  Fitted point $\hat{Y}_0 = X_0^T \hat\beta$. Variance stems strictly from parameter estimation error:
+  $$ \operatorname{Var}(\hat{Y}_0 \mid X) = X_0^T \operatorname{Var}(\hat\beta \mid X) X_0 = \sigma^2 X_0^T (X^T X)^{-1} X_0 $$
+  $1-\alpha$ Confidence Interval:
+  $$ \hat{Y}_0 \pm t_{n-k, 1-\alpha/2} \cdot \sqrt{\hat\sigma^2 X_0^T (X^T X)^{-1} X_0} $$
+- **Prediction Interval for an Individual New Observation ($Y_0 = X_0^T \beta + \varepsilon_0$)**:
+  Prediction error $e_0 = Y_0 - \hat{Y}_0 = \varepsilon_0 - X_0^T(\hat\beta - \beta)$. Because future disturbance $\varepsilon_0$ is independent of the training sample:
+  $$ \operatorname{Var}(e_0 \mid X) = \operatorname{Var}(\varepsilon_0) + \operatorname{Var}(\hat{Y}_0 \mid X) = \sigma^2 \left[ 1 + X_0^T (X^T X)^{-1} X_0 \right] $$
+  $1-\alpha$ Prediction Interval:
+  $$ \hat{Y}_0 \pm t_{n-k, 1-\alpha/2} \cdot \sqrt{\hat\sigma^2 \left[ 1 + X_0^T (X^T X)^{-1} X_0 \right]} $$
+> **Key Takeaway**: Prediction variance strictly exceeds confidence variance by $\sigma^2$ (the irreducible error variance). Hence, **prediction intervals are always strictly wider than confidence intervals**; even as $n \to \infty$, prediction interval width does not collapse to zero, remaining bounded at $\pm z_{\alpha/2}\sigma$.
 
 #### [Lemma 4] Leave-One-Out Cross-Validation & Leverage
 - **Hat Matrix Diagonal (Leverage $H_{ii}$)**:
-  $H_{ii} = x_i^\top (X^\top X)^{-1} x_i$ measures the outlier distance of point $i$ in predictor space.
-  Properties: $0 \le H_{ii} \le 1$, $\sum_{i=1}^N H_{ii} = k$, with average leverage $\bar{H} = k/N$.
+  $H_{ii} = X_i^T (X^T X)^{-1} X_i$ measures the outlier distance of point $i$ in predictor space.
+  Properties: $0 \le H_{ii} \le 1$, $\sum_{i=1}^n H_{ii} = k$, with average leverage $\bar{H} = k/n$.
 - **Leave-One-Out Residual Formula (via Sherman–Morrison Lemma)**:
-  Without retraining $N$ separate models, the out-of-fold prediction error when omitting sample $i$ is:
-  $$ e_{(-i)} = y_i - \hat{y}_{(-i)} = \frac{e_i}{1 - H_{ii}} $$
+  Without retraining $n$ separate models, the out-of-fold prediction error when omitting sample $i$ is:
+  $$ \hat\varepsilon_{(-i)} = Y_i - \hat{Y}_{(-i)} = \frac{\hat\varepsilon_i}{1 - H_{ii}} $$
   Yielding an exact one-step computation for LOOCV:
-  $$ \mathrm{LOOCV} = \frac{1}{N} \sum_{i=1}^N \left( \frac{e_i}{1 - H_{ii}} \right)^2 $$
+  $$ \mathrm{LOOCV} = \frac{1}{n} \sum_{i=1}^n \left( \frac{\hat\varepsilon_i}{1 - H_{ii}} \right)^2 $$
 - **Sample Deletion Effect on Coefficients (Foundation of Cook's Distance)**:
-  $$ \hat\beta - \hat\beta_{(-i)} = \frac{(X^\top X)^{-1} x_i e_i}{1 - H_{ii}} $$
+  $$ \hat\beta - \hat\beta_{(-i)} = \frac{(X^T X)^{-1} X_i \hat\varepsilon_i}{1 - H_{ii}} $$
 
 #### [Lemma 5] Omitted Variable Bias & Irrelevant Regressors
 - **Omitted Variable Bias (OVB)**:
-  If the true data-generating process is $y = X_1 \beta_1 + X_2 \beta_2 + \varepsilon$, but $X_2$ is omitted:
-  $$ \mathbb{E}[\hat\beta_1^{\text{short}} \mid X] = \beta_1 + \underbrace{(X_1^\top X_1)^{-1} X_1^\top X_2}_{\hat\Gamma_{2 \sim 1}} \beta_2 $$
-  **Unbiasedness Condition**: The short regression is unbiased if and only if $\beta_2 = \mathbf{0}$ (omitted variables have zero true impact) or $X_1^\top X_2 = \mathbf{0}$ (omitted variables are orthogonal to included variables).
+  If the true data-generating process is $Y = X_1 \beta_1 + X_2 \beta_2 + \varepsilon$, but $X_2$ is omitted:
+  $$ E(\hat\beta_1^{\text{short}} \mid X) = \beta_1 + \underbrace{(X_1^T X_1)^{-1} X_1^T X_2}_{\hat\Gamma_{2 \sim 1}} \beta_2 $$
+  **Unbiasedness Condition**: The short regression is unbiased if and only if $\beta_2 = \mathbf{0}$ (omitted variables have zero true impact) or $X_1^T X_2 = \mathbf{0}$ (omitted variables are orthogonal to included variables).
 - **Including Irrelevant Variables (Overfitting)**:
   If the true model does not contain $X_2$ ($\beta_2 = \mathbf{0}$), but $X_2$ is erroneously included:
-  - $\hat\beta_1^{\text{long}}$ **remains unbiased** ($\mathbb{E}[\hat\beta_1^{\text{long}}] = \beta_1$);
+  - $\hat\beta_1^{\text{long}}$ **remains unbiased** ($E(\hat\beta_1^{\text{long}}) = \beta_1$);
   - But variance inflates: $\operatorname{Var}(\hat\beta_1^{\text{long}}) \ge \operatorname{Var}(\hat\beta_1^{\text{short}})$, with equality holding if and only if $X_1 \perp X_2$.
 
 #### [Lemma 6] Measurement Error (Errors-in-Variables / Attenuation Bias)
 - **Regressor Measurement Error (Attenuation Bias)**:
-  True model $y = \beta x^* + \varepsilon$, with observed $x = x^* + u$ ($u \sim (0, \sigma_u^2)$ independent of $x^*, \varepsilon$):
-  $$ \operatorname{plim}_{N \to \infty} \hat\beta = \beta \cdot \frac{\sigma_{x^*}^2}{\sigma_{x^*}^2 + \sigma_u^2} < \beta $$
+  True model $Y_i = \beta_0 + \beta_1 X_i^* + \varepsilon_i$, with observed $X_i = X_i^* + u_i$ ($u_i \sim (0, \sigma_u^2)$ independent of $X_i^*, \varepsilon_i$):
+  $$ \operatorname{plim}_{n \to \infty} \hat\beta_1 = \beta_1 \cdot \frac{\sigma_{X^*}^2}{\sigma_{X^*}^2 + \sigma_u^2} < \beta_1 $$
   **Takeaway**: Noise in independent variables attenuates the coefficient estimate toward zero (systematic underestimation).
 - **Dependent Variable Measurement Error**:
-  If observed $y = y^* + v$ ($v$ independent of $x$), $\hat\beta$ **remains unbiased and consistent**, only inflating error variance to $\sigma^2 + \sigma_v^2$ and reducing statistical power.
+  If observed $Y_i = Y_i^* + v_i$ ($v_i$ independent of $X_i$), $\hat\beta_1$ **remains unbiased and consistent**, only inflating error variance to $\sigma^2 + \sigma_v^2$ and reducing statistical power.
 
 #### [Lemma 7] Scale & Affine Invariance
-- **Predictor Rescaling**: If $x_{\text{new}} = c \cdot x$, then $\hat\beta_{\text{new}} = \frac{1}{c} \hat\beta$;
-- **Target Rescaling**: If $y_{\text{new}} = d \cdot y$, then $\hat\beta_{\text{new}} = d \cdot \hat\beta$;
-- **Centering / Shifting**: Adding constants to $x$ or $y$ leaves the slope $\hat\beta$ **strictly invariant**, altering only the intercept $\hat\alpha$;
+- **Predictor Rescaling**: If $X_{\text{new}} = c \cdot X$, then $\hat\beta_{\text{new}} = \frac{1}{c} \hat\beta$;
+- **Target Rescaling**: If $Y_{\text{new}} = d \cdot Y$, then $\hat\beta_{\text{new}} = d \cdot \hat\beta$;
+- **Centering / Shifting**: Adding constants to $X$ or $Y$ leaves the slope $\hat\beta_1$ **strictly invariant**, altering only the intercept $\hat\beta_0$;
 - **Invariance**: Non-zero affine scaling and shifts leave **$t$-statistics, $F$-statistics, $R^2$, and $p$-values completely unchanged**.
 
 ---
@@ -325,15 +304,15 @@ Given a new query point $x_0 \in \mathbb{R}^k$:
 ### 3. Violations of Assumptions & Remedies (White / Newey–West / GLS)
 When empirical financial data violates Gauss–Markov conditions:
 - **Heteroskedasticity / Autocorrelation**:
-  OLS remains unbiased and consistent, but ceases to be BLUE. Standard errors computed via $\sigma^2(X^\top X)^{-1}$ are severely underestimated, generating spurious significance.
+  OLS remains unbiased and consistent, but ceases to be BLUE. Standard errors computed via $\sigma^2(X^T X)^{-1}$ are severely underestimated, generating spurious significance.
 - **Remedies**:
   1. **White Heteroskedasticity-Consistent Standard Errors (HC0 / Sandwich Estimator)**:
-     $$ \operatorname{Var}_{\text{White}}(\hat\beta) = (X^\top X)^{-1} \left( \sum_{i=1}^N e_i^2 x_i x_i^\top \right) (X^\top X)^{-1} $$
+     $$ \operatorname{Var}_{\text{White}}(\hat\beta) = (X^T X)^{-1} \left( \sum_{i=1}^n \hat\varepsilon_i^2 X_i X_i^T \right) (X^T X)^{-1} $$
   2. **Newey–West Heteroskedasticity and Autocorrelation Consistent (HAC)**:
      Incorporates a Bartlett lag-decay kernel to handle serial autocorrelation in financial time series.
   3. **Generalized Least Squares (GLS / WLS, Aitken's Theorem)**:
      If error covariance $\operatorname{Var}(\varepsilon \mid X) = \sigma^2 \boldsymbol{\Omega}$ is known, pre-multiplying by $P = \boldsymbol{\Omega}^{-1/2}$ yields the BLUE estimator:
-     $$ \hat\beta_{\text{GLS}} = (X^\top \boldsymbol{\Omega}^{-1} X)^{-1} X^\top \boldsymbol{\Omega}^{-1} y $$
+     $$ \hat\beta_{\text{GLS}} = (X^T \boldsymbol{\Omega}^{-1} X)^{-1} X^T \boldsymbol{\Omega}^{-1} Y $$
 
 ---
 

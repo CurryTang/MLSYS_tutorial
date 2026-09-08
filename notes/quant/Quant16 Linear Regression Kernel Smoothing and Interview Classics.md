@@ -23,189 +23,161 @@
 
 ## 模块一：OLS 几何与代数（ESL 3.2）
 
-### 1. 矩阵形式、正规方程与封闭解
-对于多元线性回归模型：
+### 1. 一元线性回归模型与 OLS 估计量
+一元线性回归模型的基础表达式为：
 $$
-y = X\beta + \varepsilon
+Y_i = \beta_0 + \beta_1 X_i + \varepsilon_i \quad (i = 1, 2, \dots, n)
 $$
-其中因变量向量 $y \in \mathbb{R}^N$，设计矩阵 $X \in \mathbb{R}^{N \times (p+1)}$（首列通常为截距常数项 $\mathbf{1}$，假定列满秩 $\operatorname{rank}(X) = p+1 < N$），参数向量 $\beta \in \mathbb{R}^{p+1}$。普通最小二乘法（Ordinary Least Squares, OLS）的目标是最小化残差平方和（Residual Sum of Squares）：
+普通最小二乘法（OLS）通过最小化残差平方和 $\sum_{i=1}^n \hat\varepsilon_i^2$，求解出的 OLS 估计量为：
 $$
-\operatorname{RSS}(\beta) = \|y - X\beta\|_2^2 = (y - X\beta)^\top (y - X\beta) = y^\top y - 2\beta^\top X^\top y + \beta^\top X^\top X \beta
+\hat\beta_1 = \frac{\sum_{i=1}^n (X_i - \bar{X})(Y_i - \bar{Y})}{\sum_{i=1}^n (X_i - \bar{X})^2}, \quad \hat\beta_0 = \bar{Y} - \hat\beta_1 \bar{X}
 $$
-对向量 $\beta$ 求导（利用矩阵微积分 $\nabla_\beta (\beta^\top A) = A$ 以及 $\nabla_\beta (\beta^\top A \beta) = 2A\beta$）：
+其中 $\bar{X} = \frac{1}{n}\sum_{i=1}^n X_i$ 与 $\bar{Y} = \frac{1}{n}\sum_{i=1}^n Y_i$ 为样本均值。
+
+---
+
+### 2. 判定系数 $R^2$ 与方差分解（ANOVA）
+$R^2$ 衡量回归模型的拟合优度（Goodness of fit），定义为：
 $$
-\nabla_\beta \operatorname{RSS}(\beta) = -2 X^\top y + 2 X^\top X \beta = \mathbf{0}
+R^2 = \frac{ESS}{TSS} = 1 - \frac{RSS}{TSS}
 $$
-这便得到了著名的**正规方程（Normal Equations）**：
+其中 $TSS$ 为总平方和（Total Sum of Squares），$RSS$ 为残差平方和（Residual Sum of Squares），$ESS$ 为回归解释平方和（Explained Sum of Squares），分别定义为：
 $$
-X^\top X \hat\beta = X^\top y
+TSS = \sum_{i=1}^n (Y_i - \bar{Y})^2, \quad RSS = \sum_{i=1}^n \hat\varepsilon_i^2 = \hat\varepsilon^T \hat\varepsilon, \quad ESS = \sum_{i=1}^n (\hat{Y}_i - \bar{Y})^2
 $$
-当设计矩阵 $X$ 满秩时，$X^\top X$ 必为对称正定矩阵（可逆），得到唯一的解析封闭解：
+由残差正交性，立即成立方差分解恒等式：
 $$
-\hat\beta = (X^\top X)^{-1} X^\top y
+TSS = ESS + RSS
 $$
 
 ---
 
-### 2. 残差的正交性（Residual Orthogonality）：代数恒等性与几何投影
-定义拟合值向量 $\hat{y} = X\hat\beta$ 与样本残差向量 $e = y - \hat{y} = y - X\hat\beta$。
-残差的正交性是整个线性模型理论的几何基石，它在代数与几何上拥有五大不可撼动的性质：
+### 3. 多元线性回归的矩阵表达与封闭解
+多元线性回归模型的矩阵形式为：
+$$
+Y = X\beta + \varepsilon
+$$
+其中因变量向量 $Y \in \mathbb{R}^{n \times 1}$，设计矩阵 $X \in \mathbb{R}^{n \times k}$（其中 $n$ 为样本容量，$k$ 为待估回归系数个数；第 1 列通常为常数截距项 $\mathbf{1}$，假定列满秩 $\operatorname{rank}(X) = k \le n$），参数列向量 $\beta \in \mathbb{R}^{k \times 1}$。
 
-#### （1）残差与所有解释变量正交（$X^\top e = \mathbf{0}$）
-由正规方程的梯度为零直接变形：
+OLS 最小化残差平方和（Residual Sum of Squares）：
 $$
--2 X^\top (y - X\hat\beta) = \mathbf{0} \implies X^\top e = \mathbf{0}
+RSS(\beta) = \|Y - X\beta\|_2^2 = (Y - X\beta)^T (Y - X\beta) = Y^T Y - 2\beta^T X^T Y + \beta^T X^T X \beta
 $$
-按列展开：对于设计矩阵的任意第 $j$ 列特征向量 $X_j$（$j = 0, 1, \dots, p$），都有：
+对 $\beta$ 求偏导令梯度为零：
 $$
-X_j^\top e = \sum_{i=1}^N X_{ij} e_i = 0 \iff X_j \perp e
+\nabla_\beta RSS(\beta) = -2 X^T Y + 2 X^T X \beta = \mathbf{0}
 $$
-**统计直觉**：样本残差与模型中引入的所有自变量的点积严格为零（未中心化时为内积为 0，中心化后样本协方差为 0）。这意味着：**现有特征集中所包含的全部线性预测信息已被 $\hat\beta$ 榨取殆尽，残差中不存在任何可被这些变量线性预测的剩余信号**。
+导出**正规方程（Normal Equations）**：
+$$
+X^T X \hat\beta = X^T Y
+$$
+由于 $X$ 满列秩，$X^T X$ 必为对称正定可逆矩阵，得到唯一的解析封闭解：
+$$
+\hat\beta = (X^T X)^{-1} X^T Y
+$$
 
-#### （2）截距项的魔力：残差和恒为 0（$\mathbf{1}^\top e = 0 \implies \bar{e} = 0$）
-若回归模型包含截距项（常数项），则设计矩阵的第一列为全 1 向量 $X_0 = \mathbf{1} = (1, 1, \dots, 1)^\top$。
-将 $X_0 = \mathbf{1}$ 代入上述正交性：
-$$
-\mathbf{1}^\top e = \sum_{i=1}^N e_i = 0 \implies \bar{e} = \frac{1}{N} \sum_{i=1}^N e_i \equiv 0
-$$
-**两大推论**：
-1. **残差样本均值恒等于 0**；
-2. **回归超平面必过样本重心**：由于 $\bar{e} = \bar{y} - \bar{x}^\top \hat\beta = 0$，必然有 $\bar{y} = \bar{x}^\top \hat\beta$。
-> **面试经典陷阱：无截距回归（Regression through the Origin）**
-> 面试常问：“OLS 残差均值一定等于 0 吗？”
-> **错误回答**：“是的，一定为 0。”
-> **正确解析**：**仅当模型包含截距项时才为 0**！如果强制去除截距项（即拟合 $y = x\beta$ 过原点），$\mathbf{1} \notin \operatorname{Col}(X)$，则 $\mathbf{1}^\top e = \sum e_i \ne 0$，残差均值不为零！
+---
 
-#### （3）残差与拟合值正交（$\hat{y}^\top e = 0$）
-由于拟合值 $\hat{y} = X\hat\beta$ 严格落在 $X$ 的列空间 $\operatorname{Col}(X)$ 内，根据 $X^\top e = \mathbf{0}$：
-$$
-\hat{y}^\top e = (X\hat\beta)^\top e = \hat\beta^\top (X^\top e) = \hat\beta^\top \mathbf{0} = 0
-$$
-拟合向量 $\hat{y}$ 与残差向量 $e$ 在几何上严格互相垂直（$\hat{y} \perp e$）。
-- 帽子矩阵 $H = X(X^\top X)^{-1}X^\top$ 是向 $\operatorname{Col}(X)$ 的正交投影算子（对称且幂等：$H^2 = H, H^\top = H$）；
-- 消除矩阵（Annihilator Matrix） $M = I - H$ 是向正交补空间 $\operatorname{Col}(X)^\perp$ 的正交投影算子（$M^2 = M, M^\top = M, HM = \mathbf{0}$）；
-- 模型有效自由度为 $\mathrm{df} = \operatorname{tr}(H) = p+1$。
+### 4. 残差的正交性（Residual Orthogonality）：五大代数与几何性质
+定义拟合值向量 $\hat{Y} = X\hat\beta$ 与样本残差向量 $\hat\varepsilon = Y - \hat{Y} = Y - X\hat\beta$。
+残差的正交性是整个线性模型理论的几何基石：
 
-#### （4）毕达哥拉斯定理与方差分解（ANOVA / $R^2$ 的几何起源）
-观测向量被唯一分解为两个互相垂直的向量之和：$y = \hat{y} + e$。根据高维欧氏空间的毕达哥拉斯（勾股）定理：
+#### （1）残差与所有解释变量正交（$X^T \hat\varepsilon = \mathbf{0}$）
+由正规方程直接变形：
 $$
-\|y\|^2 = \|\hat{y} + e\|^2 = \|\hat{y}\|^2 + \|e\|^2 + 2 \underbrace{\hat{y}^\top e}_{= 0} = \|\hat{y}\|^2 + \|e\|^2
+-2 X^T (Y - X\hat\beta) = \mathbf{0} \implies X^T \hat\varepsilon = \mathbf{0}
 $$
-当模型包含截距项时，将每个向量减去样本均值向量 $\bar{y}\mathbf{1}$ 进行中心化：
+对任意自变量列向量 $X_j$（$j = 0, 1, \dots, k-1$），都有 $X_j^T \hat\varepsilon = \sum_{i=1}^n X_{ij} \hat\varepsilon_i = 0 \iff X_j \perp \hat\varepsilon$。
+**统计直觉**：自变量中的所有线性信号已被 $\hat\beta$ 完全提取，残差中没有任何可被 $X$ 线性预测的剩余信息。
+
+#### （2）截距项的魔力：残差和恒为 0（$\mathbf{1}^T \hat\varepsilon = 0 \implies \bar{\hat\varepsilon} = 0$）
+若模型包含截距项 $\beta_0$，则 $X$ 的第 1 列为全 1 向量 $X_0 = \mathbf{1} = (1, \dots, 1)^T$。
 $$
-(y - \bar{y}\mathbf{1}) = (\hat{y} - \bar{y}\mathbf{1}) + e
+\mathbf{1}^T \hat\varepsilon = \sum_{i=1}^n \hat\varepsilon_i = 0 \implies \bar{\hat\varepsilon} = \frac{1}{n} \sum_{i=1}^n \hat\varepsilon_i \equiv 0
+$$
+- **推论 1**：残差样本均值恒等于 0；
+- **推论 2**：回归超平面必穿过样本重心 $(\bar{X}, \bar{Y})$；
+- **高频陷阱**：若强制去掉截距项（拟合 $Y = X\beta$ 过原点），$\mathbf{1} \notin \operatorname{Col}(X)$，残差和通常不为 0！
+
+#### （3）残差与拟合值正交（$\hat{Y}^T \hat\varepsilon = 0$）
+因为 $\hat{Y} = X\hat\beta \in \operatorname{Col}(X)$：
+$$
+\hat{Y}^T \hat\varepsilon = (X\hat\beta)^T \hat\varepsilon = \hat\beta^T (X^T \hat\varepsilon) = \hat\beta^T \mathbf{0} = 0
+$$
+拟合向量与残差向量在几何上严格垂直（$\hat{Y} \perp \hat\varepsilon$）。
+- 帽子矩阵 $H = X(X^T X)^{-1} X^T$ 是向 $\operatorname{Col}(X)$ 的正交投影矩阵（对称幂等：$H^2 = H, H^T = H$）；
+- 消除矩阵 $M = I - H$ 是向正交补空间 $\operatorname{Col}(X)^\perp$ 的正交投影矩阵（$M^2 = M, M^T = M, HM = \mathbf{0}$）；
+- 模型有效自由度为 $\mathrm{df} = \operatorname{tr}(H) = k$。
+
+#### （4）毕达哥拉斯定理与方差分解推导（$TSS = ESS + RSS$）
+由 $Y = \hat{Y} + \hat\varepsilon$ 且 $\hat{Y} \perp \hat\varepsilon$：
+$$
+\|Y\|^2 = \|\hat{Y} + \hat\varepsilon\|^2 = \|\hat{Y}\|^2 + \|\hat\varepsilon\|^2 + 2\hat{Y}^T \hat\varepsilon = \|\hat{Y}\|^2 + \|\hat\varepsilon\|^2
+$$
+中心化后：
+$$
+(Y - \bar{Y}\mathbf{1}) = (\hat{Y} - \bar{Y}\mathbf{1}) + \hat\varepsilon
 $$
 计算内积交叉项：
 $$
-(\hat{y} - \bar{y}\mathbf{1})^\top e = \hat{y}^\top e - \bar{y} (\mathbf{1}^\top e) = 0 - \bar{y}(0) = 0
+(\hat{Y} - \bar{Y}\mathbf{1})^T \hat\varepsilon = \hat{Y}^T \hat\varepsilon - \bar{Y}(\mathbf{1}^T \hat\varepsilon) = 0 - 0 = 0
 $$
-交叉项再度精确归零！因此模长平方直接拆分，得出经典方差分析（ANOVA）恒等式：
+交叉项再度精确归零，因此直接导出方差分解恒等式：
 $$
-\underbrace{\sum_{i=1}^N (y_i - \bar{y})^2}_{\text{总平方和 } \mathrm{TSS}} = \underbrace{\sum_{i=1}^N (\hat{y}_i - \bar{y})^2}_{\text{回归平方和 } \mathrm{ESS}} + \underbrace{\sum_{i=1}^N e_i^2}_{\text{残差平方和 } \mathrm{RSS}}
+\underbrace{\sum_{i=1}^n (Y_i - \bar{Y})^2}_{TSS} = \underbrace{\sum_{i=1}^n (\hat{Y}_i - \bar{Y})^2}_{ESS} + \underbrace{\sum_{i=1}^n \hat\varepsilon_i^2}_{RSS} \implies R^2 = \frac{ESS}{TSS} = 1 - \frac{RSS}{TSS} \in [0, 1]
 $$
-由此定义拟合优度判定系数：
-$$
-R^2 = \frac{\mathrm{ESS}}{\mathrm{TSS}} = 1 - \frac{\mathrm{RSS}}{\mathrm{TSS}} \in [0, 1]
-$$
-*(注：若无截距项，交叉项 $(\hat{y})^\top e \ne 0$ 在离均差下不成立，$\mathrm{TSS} \ne \mathrm{ESS} + \mathrm{RSS}$，会导致计算出的 $R^2$ 可能为负数！)*
 
 #### （5）核心辨析：样本残差代数正交 vs. 总体误差外生性假定
-面试官极度看重考生能否分清“残差（Residual）”与“误差（Error）”：
-- **样本残差正交性（$X^\top e = 0$）**：属于**纯代数恒等式（Numerical Identity）**。它完全是 OLS 优化求解的一阶导数必然结果。只要你用最小二乘法算出了 $\hat\beta$，哪怕真实的因变量生成机制是极其非线性的、哪怕数据充满异方差或测量误差，样本残差 $e$ 与解释变量 $X$ 都百分之百正交！
-- **总体误差外生性（$\mathbb{E}[\varepsilon \mid X] = 0 \implies \mathbb{E}[X^\top \varepsilon] = \mathbf{0}$）**：属于**统计学总体假设（Data Generating Assumption）**。它断言未被观测到的客观随机扰动 $\varepsilon$ 在期望意义上与 $X$ 无关。在量化实战中，遗漏变量（OVB）、内生选择性偏差、同时性（Simultaneity）等都会破坏该假设。
-> **连环追问**：“在存在遗漏变量（如遗漏了重要因子）的错误模型中，OLS 残差和自变量还正交吗？”
-> **标准回答**：样本残差 $e$ 与纳入模型的自变量依然**绝对正交**（代数必然性无法被违背）；但真实的不可见误差项 $\varepsilon$ 与自变量**已经不再正交**，导致系数估计量 $\hat\beta$ 发生系统性偏误（Endogeneity Bias）。
+- **样本残差代数正交（$X^T \hat\varepsilon = \mathbf{0}$）**：是一个**纯代数数值恒等式**，由 OLS 梯度的 FOC 条件机械保证，无论真实模型是否线性、是否存在异方差或测量误差，只要跑了 OLS，残差与 $X$ 绝对正交！
+- **总体误差外生性（$E(\varepsilon \mid X) = \mathbf{0} \implies E(X^T \varepsilon) = \mathbf{0}$）**：是一个**不可验证的统计学总体假定**，现实中常被遗漏变量（OVB）或同时性偏差破坏。
+> **面试连环追问**：“在存在遗漏变量的错误模型中，OLS 残差和自变量还正交吗？”
+> **标准回答**：样本残差 $\hat\varepsilon$ 与已纳入模型的自变量依然**严格正交**（代数必然）；但不可见的真实误差 $\varepsilon$ 与自变量**已经不再正交**，导致系数估计产生内生性偏差。
 
 ---
 
-### 3. 回归系数与协方差（Covariance）的深刻内在联系
-
-回归系数本质上是变量间协方差与方差结构的投影算子。
+### 5. 回归系数与协方差（Covariance）的深刻内在联系
 
 #### （1）单变量回归：协方差与自变量方差的商
-对于一元线性回归 $y = \alpha + \beta x + \varepsilon$（含截距），最小化平方和求解得到：
 $$
-\hat\beta = \frac{\sum_{i=1}^N (x_i - \bar{x})(y_i - \bar{y})}{\sum_{i=1}^N (x_i - \bar{x})^2} = \frac{\widehat{\operatorname{Cov}}(x, y)}{\widehat{\operatorname{Var}}(x)} = \hat\rho_{xy} \frac{s_y}{s_x}
-$$
-$$
-\hat\alpha = \bar{y} - \hat\beta \bar{x}
+\hat\beta_1 = \frac{\sum_{i=1}^n (X_i - \bar{X})(Y_i - \bar{Y})}{\sum_{i=1}^n (X_i - \bar{X})^2} = \frac{\widehat{\operatorname{Cov}}(X, Y)}{\widehat{\operatorname{Var}}(X)} = \hat\rho_{XY} \frac{s_Y}{s_X}
 $$
 $$
-R^2 = \hat\rho_{xy}^2
+\hat\beta_0 = \bar{Y} - \hat\beta_1 \bar{X}, \quad R^2 = \hat\rho_{XY}^2
 $$
-- **相关系数 $\rho$ vs. 回归斜率 $\beta$ 的核心差异**：
-  - **相关系数 $\rho = \frac{\operatorname{Cov}(x, y)}{\sigma_x \sigma_y} \in [-1, 1]$**：**无量纲（Dimensionless）**且**对称**（$\rho_{xy} = \rho_{yx}$）。它刻画的是两变量线性关联的“纯净度/紧密程度”，本质是高维单位球面上的内积余弦值 $\cos \theta$；
-  - **回归斜率 $\beta = \rho \frac{\sigma_y}{\sigma_x}$**：**有量纲**（单位为 $y$ 的单位除以 $x$ 的单位）且**非对称**（$\beta_{y \sim x} \ne \beta_{x \sim y}$）。它刻画的是自变量每变动 1 个单位时，因变量条件期望的**边际物理变动速率**；
-  - 若事先对 $x$ 和 $y$ 均进行标准化（Z-score 化，$\sigma_x = \sigma_y = 1$），则回归斜率与相关系数**数值完全重合**：$\hat\beta = \hat\rho$。
+- **相关系数 $\rho$（对称、无量纲 $[-1, 1]$）**：反映线性关联紧密程度（纯净度）；
+- **回归斜率 $\beta_1$（非对称、有量纲 $[Y]/[X]$）**：反映 $X$ 变动 1 单位时 $Y$ 的边际物理变动速率；
+- **标准化数据下**（$s_X = s_Y = 1$），两者完全重合：$\hat\beta_1 = \hat\rho_{XY}$。
 
 #### （2）回归的非对称性与“均值回归”（Regression to the Mean）
-面试高频陷阱：“若 $y$ 对 $x$ 回归的斜率是 2，那么 $x$ 对 $y$ 回归的斜率是 $1/2$ 吗？”
-- **错误答案**：$1/2$。
-- **数学解析**：
-  $$
-  \hat\beta_{y \sim x} = \rho \frac{\sigma_y}{\sigma_x}, \quad \hat\beta_{x \sim y} = \rho \frac{\sigma_x}{\sigma_y}
-  $$
-  两者相乘：
-  $$
-  \hat\beta_{y \sim x} \times \hat\beta_{x \sim y} = \rho^2 \le 1
-  $$
-  由于任何现实数据中都存在噪声（$|\rho| < 1$），因此：
-  $$
-  \hat\beta_{x \sim y} = \frac{\rho^2}{\hat\beta_{y \sim x}} < \frac{1}{\hat\beta_{y \sim x}}
-  $$
-- **几何与高尔顿（Galton）渊源**：
-  若 $\hat\beta_{y \sim x} = 2$，说明 $\sigma_y / \sigma_x \ge 2$ 且 $\rho \le 1$。两条正反回归线在以 $(\bar{x}, \bar{y})$ 为中心的散点图中并不重合，它们夹着一个非零夹角。这正是英国统计学家高尔顿在 1886 年发现的“均值回归”：身材极高的父亲，其儿子的平均身高依然倾向于朝人群均值回缩（Shrink towards the mean）。
+$$
+\hat\beta_{Y \sim X} = \rho \frac{\sigma_Y}{\sigma_X}, \quad \hat\beta_{X \sim Y} = \rho \frac{\sigma_X}{\sigma_Y} \implies \hat\beta_{Y \sim X} \times \hat\beta_{X \sim Y} = \rho^2 \le 1
+$$
+反向回归斜率并非倒数，而是 $\hat\beta_{X \sim Y} = \frac{\rho^2}{\hat\beta_{Y \sim X}} < \frac{1}{\hat\beta_{Y \sim X}}$（存在噪声 $|\rho| < 1$ 时）。这正是高尔顿发现的“均值回归”。
 
-#### （3）多元回归：逆协方差矩阵与互协方差向量（矩阵形式）
-将所有自变量与因变量中心化（即去均值），令 $X \in \mathbb{R}^{N \times p}$，$y \in \mathbb{R}^N$：
-- 自变量样本协方差矩阵：$\hat{\boldsymbol{\Sigma}}_{XX} = \frac{1}{N} X^\top X \in \mathbb{R}^{p \times p}$；
-- 自变量与因变量互协方差向量：$\hat{\boldsymbol{\Sigma}}_{Xy} = \frac{1}{N} X^\top y \in \mathbb{R}^{p \times 1}$。
-多元 OLS 估计量可完全用协方差表示：
+#### （3）多元回归的协方差表达：白化与去相关算子
+对自变量和因变量中心化（去均值）后：
 $$
-\hat\beta = (X^\top X)^{-1} X^\top y = \hat{\boldsymbol{\Sigma}}_{XX}^{-1} \hat{\boldsymbol{\Sigma}}_{Xy}
+\hat\beta = (X^T X)^{-1} X^T Y = \hat{\boldsymbol{\Sigma}}_{XX}^{-1} \hat{\boldsymbol{\Sigma}}_{XY}
 $$
-- **特征相互正交时的独立解耦**：若所有特征互不相关（$\boldsymbol{\Sigma}_{XX} = \operatorname{diag}(\sigma_1^2, \dots, \sigma_p^2)$ 为对角阵），则：
-  $$
-  \hat\beta_j = \frac{\operatorname{Cov}(X_j, y)}{\operatorname{Var}(X_j)}
-  $$
-  此时多元回归系数**严格退化为各自独立的一元回归系数**！
-- **特征相关时的“白化/去相关”（Whitening / Decorrelation）机制**：
-  当特征之间存在相关性时，互协方差向量 $\hat{\boldsymbol{\Sigma}}_{Xy}$ 中的每一个分量不仅包含该特征对 $y$ 的直接贡献，还混杂了与其他特征共动引起的**间接虚假关联**。
-  逆协方差矩阵 $\hat{\boldsymbol{\Sigma}}_{XX}^{-1}$ 的作用正是**线性解耦算子**：它自动消除所有特征之间的交叉冗余，分离出各特征独占的净贡献。
+- 若特征彼此正交（$\hat{\boldsymbol{\Sigma}}_{XX}$ 为对角阵），多元回归解耦为独立的单变量回归：$\hat\beta_j = \frac{\operatorname{Cov}(X_j, Y)}{\operatorname{Var}(X_j)}$；
+- 若特征相关，$\hat{\boldsymbol{\Sigma}}_{XX}^{-1}$ 扮演**线性去相关（Whitening）算子**，剔除间接共动路径，剥离出 $X_j$ 独有的净边际贡献。
 
-#### （4）偏协方差（Partial Covariance）与 Frisch–Waugh–Lovell (FWL) 定理
-多元回归中第 $j$ 个变量的系数 $\hat\beta_j$ 是如何与单变量协方差统一的？
-根据 FWL 定理：
+#### （4）偏协方差（Partial Covariance）与 FWL 定理
+根据 FWL 定理，多元回归中单个变量 $X_j$ 的系数满足：
 $$
-\hat\beta_j = \frac{\operatorname{Cov}(\tilde{X}_j, y)}{\operatorname{Var}(\tilde{X}_j)} = \frac{\operatorname{Cov}(\tilde{X}_j, \tilde{y})}{\operatorname{Var}(\tilde{X}_j)}
+\hat\beta_j = \frac{\operatorname{Cov}(\tilde{X}_j, Y)}{\operatorname{Var}(\tilde{X}_j)} = \frac{\operatorname{Cov}(\tilde{X}_j, \tilde{Y})}{\operatorname{Var}(\tilde{X}_j)}
 $$
-其中 $\tilde{X}_j$ 是将 $X_j$ 对所有其他解释变量 $X_{-j}$ 线性回归所得到的**残差**（代表 $X_j$ 中完全无法被其他变量解释的正交纯净信号）；$\tilde{y}$ 是将 $y$ 对 $X_{-j}$ 回归的残差。
-- **与方差膨胀因子（VIF）的直接推导**：
-  因为 $\operatorname{Var}(\tilde{X}_j) = \operatorname{Var}(X_j) (1 - R_{j \mid -j}^2)$，其中 $R_{j \mid -j}^2$ 是用其他所有变量预测 $X_j$ 的判定系数。
-  根据高斯-马尔可夫定理，系数估计量的方差为：
-  $$
-  \operatorname{Var}(\hat\beta_j) = \frac{\sigma^2}{\sum_{i=1}^N \tilde{x}_{ij}^2} = \frac{\sigma^2}{(N-1)\operatorname{Var}(X_j)} \cdot \underbrace{\frac{1}{1 - R_{j \mid -j}^2}}_{\mathrm{VIF}_j}
-  $$
-  当多重共线性加剧时（$R_{j \mid -j}^2 \to 1$），$\tilde{X}_j$ 的方差趋于 0，协方差公式的分母急剧变小，导致系数估计方差发散！
+其中 $\tilde{X}_j$ 是 $X_j$ 对其余所有特征 $X_{-j}$ 回归后的残差。
+由此直接导出方差膨胀因子（VIF）：
+$$
+\operatorname{Var}(\hat\beta_j \mid X) = \frac{\sigma^2}{(n-1)\operatorname{Var}(X_j)} \cdot \underbrace{\frac{1}{1 - R_{j \mid -j}^2}}_{\mathrm{VIF}_j}
+$$
 
-#### （5）量化金融中的四大经典协方差-回归映射
-1. **资本资产定价模型（CAPM 资产 Beta）**：
-   $$ \beta_i = \frac{\operatorname{Cov}(R_i, R_m)}{\operatorname{Var}(R_m)} $$
-   资产 $i$ 相对市场的系统性风险敞口，严格等于其超额收益与市场超额收益的协方差除以市场方差。
-2. **最小方差最优套期保值比率（Optimal Hedge Ratio）**：
-   持有现货资产变动 $\Delta S$，通过做空数量为 $h$ 的期货 $\Delta F$ 进行对冲。组合方差为：
-   $$ \min_h \operatorname{Var}(\Delta S - h \Delta F) = \operatorname{Var}(\Delta S) - 2h \operatorname{Cov}(\Delta S, \Delta F) + h^2 \operatorname{Var}(\Delta F) $$
-   对 $h$ 求导令其为 0：
-   $$ h^* = \frac{\operatorname{Cov}(\Delta S, \Delta F)}{\operatorname{Var}(\Delta F)} \equiv \beta_{\Delta S \sim \Delta F} $$
-   **结论**：最优对冲比率严格等于现货变动对期货变动的单变量回归斜率！
-3. **遗漏变量偏差（Omitted Variable Bias, OVB 公式）**：
-   假定真实生成机制为 $y = \beta_1 x_1 + \beta_2 x_2 + \varepsilon$。若遗漏 $x_2$ 仅对 $x_1$ 建模：
-   $$ \hat\beta_1^{\text{short}} = \frac{\operatorname{Cov}(x_1, y)}{\operatorname{Var}(x_1)} = \beta_1 + \beta_2 \cdot \underbrace{\frac{\operatorname{Cov}(x_1, x_2)}{\operatorname{Var}(x_1)}}_{\beta_{x_2 \sim x_1}} $$
-   偏差项直接等于遗漏因子的真实系数 $\beta_2$ 乘以两自变量间的回归系数。
-4. **Barra 因子风险模型与因子中性化（Factor Neutralization）**：
-   在 Alpha 因子挖掘中，原始因子 $F_{\text{raw}}$ 常受市值（Size）、行业（Industry）等已知风险驱动。通过回归：
-   $$ F_{\text{raw}} = X_{\text{risk}} \gamma + F_{\text{neutral}} $$
-   根据残差正交性，$F_{\text{neutral}} \perp X_{\text{risk}}$，中性化后的因子对已知风险因子的敞口（协方差）严格为 0。
+#### （5）量化金融四大高频映射
+1. **CAPM Beta**：$\beta_i = \frac{\operatorname{Cov}(R_i, R_m)}{\operatorname{Var}(R_m)}$；
+2. **最优套保比率（Minimum-Variance Hedge Ratio）**：$\min_h \operatorname{Var}(\Delta S - h\Delta F) \implies h^* = \frac{\operatorname{Cov}(\Delta S, \Delta F)}{\operatorname{Var}(\Delta F)} \equiv \beta_{\Delta S \sim \Delta F}$；
+3. **遗漏变量偏差（OVB 公式）**：若真实模型为 $Y = \beta_1 X_1 + \beta_2 X_2 + \varepsilon$，遗漏 $X_2$ 的短回归估计量为 $E(\hat\beta_1^{\text{short}} \mid X) = \beta_1 + \beta_2 \frac{\operatorname{Cov}(X_1, X_2)}{\operatorname{Var}(X_1)}$；
+4. **Barra 因子中性化**：$F_{\text{raw}} = X_{\text{risk}} \gamma + F_{\text{neutral}}$，利用 $F_{\text{neutral}} \perp X_{\text{risk}}$ 剥离风格风险。
 
 ---
 
@@ -218,13 +190,13 @@ Gauss-Markov 定理与基于经典正态线性模型（Classical Normal Linear M
 ### 1. Gauss-Markov 假设与 BLUE 本质
 Gauss-Markov 定理指出，在特定假设下，OLS 估计量是**最佳线性无偏估计量（Best Linear Unbiased Estimator, BLUE）**，即在所有线性的、无偏的估计量中，OLS 的方差最小（协方差矩阵差值半正定）。
 
-1. **参数线性（Linearity in parameters）**：模型为 $y = X\beta + \varepsilon$；
-2. **严格外生性（Strict Exogeneity）**：$\mathbb{E}[\varepsilon \mid X] = \mathbf{0}$；
+1. **参数线性（Linearity in parameters）**：模型为 $Y = X\beta + \varepsilon$；
+2. **严格外生性（Strict Exogeneity）**：$E(\varepsilon \mid X) = \mathbf{0}$；
 3. **球形扰动项（Spherical Errors）**：
    - **同方差性（Homoskedasticity）**：$\operatorname{Var}(\varepsilon_i \mid X) = \sigma^2$；
    - **无自相关性（No Autocorrelation）**：$\operatorname{Cov}(\varepsilon_i, \varepsilon_j \mid X) = 0 \quad (i \ne j)$；
-   - 综合写为矩阵形式：$\operatorname{Var}(\varepsilon \mid X) = \sigma^2 I_N$；
-4. **无完全多重共线性（No Full Multicollinearity）**：$\operatorname{rank}(X) = k = p+1 \le N$。
+   - 综合写为矩阵形式：$\operatorname{Var}(\varepsilon \mid X) = \sigma^2 I_n$；
+4. **无完全多重共线性（No Full Multicollinearity）**：$\operatorname{rank}(X) = k \le n$。
 
 > **面试经典陷阱：正态性（Normality）的迷思**
 > **“OLS 成为 BLUE 需要假设误差项服从正态分布吗？”**
@@ -236,90 +208,92 @@ Gauss-Markov 定理指出，在特定假设下，OLS 估计量是**最佳线性�
 ### 2. 做题必备核心 Lemma 清单（Core Problem-Solving Lemma Sheet）
 
 #### 【Lemma 1】OLS 估计量的基本代数与矩性质
-- **线性性**：$\hat\beta = (X^\top X)^{-1} X^\top y = C y$，其中权重矩阵 $C = (X^\top X)^{-1} X^\top$ 满足 $C X = I_k$。
+- **线性性**：$\hat\beta = (X^T X)^{-1} X^T Y = C Y$，其中权重矩阵 $C = (X^T X)^{-1} X^T$ 满足 $C X = I_k$。
 - **条件无偏性（Unbiasedness）**：
-  $$ \mathbb{E}[\hat\beta \mid X] = \mathbb{E}[C(X\beta + \varepsilon) \mid X] = \beta + C \underbrace{\mathbb{E}[\varepsilon \mid X]}_{= \mathbf{0}} = \beta $$
+  $$ E(\hat\beta \mid X) = \beta $$
 - **条件协方差矩阵（Variance-Covariance Matrix）**：
-  $$ \operatorname{Var}(\hat\beta \mid X) = \operatorname{Var}(Cy \mid X) = C \operatorname{Var}(\varepsilon \mid X) C^\top = C (\sigma^2 I_N) C^\top = \sigma^2 (X^\top X)^{-1} $$
-  - 第 $j$ 个系数的方差：$\operatorname{Var}(\hat\beta_j \mid X) = \sigma^2 [(X^\top X)^{-1}]_{jj}$；
-  - 两个系数的协方差：$\operatorname{Cov}(\hat\beta_j, \hat\beta_m \mid X) = \sigma^2 [(X^\top X)^{-1}]_{jm}$。
-- **残差方差的无偏估计量（Unbiased Residual Variance Estimator）**：
-  $$ \hat\sigma^2 = s^2 = \frac{e^\top e}{N - k} = \frac{\sum_{i=1}^N e_i^2}{N - k} $$
-  其中 $N$ 为样本量，$k = p+1$ 为待估参数个数（含截距）。
+  $$ \operatorname{Var}(\hat\beta \mid X) = \operatorname{Var}(CY \mid X) = C \operatorname{Var}(\varepsilon \mid X) C^T = C (\sigma^2 I_n) C^T = \sigma^2 (X^T X)^{-1} $$
+  - 第 $j$ 个系数的方差：$\operatorname{Var}(\hat\beta_j \mid X) = \sigma^2 [(X^T X)^{-1}]_{jj}$；
+  - 两个系数的协方差：$\operatorname{Cov}(\hat\beta_j, \hat\beta_m \mid X) = \sigma^2 [(X^T X)^{-1}]_{jm}$。
+- **残差方差的无偏估计量（Residual Variance Estimate）**：
+  $$ \hat\sigma^2 = \frac{\hat\varepsilon^T \hat\varepsilon}{n - k} = \frac{\sum_{i=1}^n \hat\varepsilon_i^2}{n - k} $$
+  其中 $n$ 为样本量，$k$ 为待估回归系数个数（含截距 $\beta_0$）。
   - **推导证明（二次型期望引理，做题高频考点）**：
-    残差可表为 $e = (I - H)y = (I - H)(X\beta + \varepsilon) = (I - H)\varepsilon$。
-    因此残差平方和为二次型：$e^\top e = \varepsilon^\top (I - H) \varepsilon$。
-    利用二次型期望公式 $\mathbb{E}[\varepsilon^\top A \varepsilon] = \operatorname{tr}(A \operatorname{Var}(\varepsilon)) + \mathbb{E}[\varepsilon]^\top A \mathbb{E}[\varepsilon]$：
-    $$ \mathbb{E}[e^\top e \mid X] = \operatorname{tr}\left( (I - H) \sigma^2 I_N \right) + \mathbf{0} = \sigma^2 \operatorname{tr}(I - H) = \sigma^2 (N - \operatorname{tr}(H)) = \sigma^2 (N - k) $$
-    两边除以 $N - k$，即证 $\mathbb{E}[\hat\sigma^2 \mid X] = \sigma^2$。
+    残差可表为 $\hat\varepsilon = (I - H)Y = (I - H)(X\beta + \varepsilon) = (I - H)\varepsilon$。
+    因此残差平方和为二次型：$\hat\varepsilon^T \hat\varepsilon = \varepsilon^T (I - H) \varepsilon$。
+    利用二次型期望公式 $E(\varepsilon^T A \varepsilon) = \operatorname{tr}(A \operatorname{Var}(\varepsilon)) + E(\varepsilon)^T A E(\varepsilon)$：
+    $$ E(\hat\varepsilon^T \hat\varepsilon \mid X) = \operatorname{tr}\left( (I - H) \sigma^2 I_n \right) + \mathbf{0} = \sigma^2 \operatorname{tr}(I - H) = \sigma^2 (n - \operatorname{tr}(H)) = \sigma^2 (n - k) $$
+    两边除以 $n - k$，即证 $E(\hat\sigma^2 \mid X) = \sigma^2$。
 
 #### 【Lemma 2】正态假定下的统计分布引理（Statistical Inference under Normality）
-当假设 $\varepsilon \mid X \sim \mathcal{N}(\mathbf{0}, \sigma^2 I_N)$ 时：
+当假设 $\varepsilon \mid X \sim \mathcal{N}(\mathbf{0}, \sigma^2 I_n)$ 时：
 - **独立性引理（Cochran 定理核心结论）**：
-  $$ \hat\beta \text{ 与样本残差 } e \text{（以及方差估计 } \hat\sigma^2 \text{）严格统计独立！} $$
-  **代数证明**：$\hat\beta = C y$，$e = (I - H)y$。两者互协方差为：
-  $$ \operatorname{Cov}(\hat\beta, e \mid X) = C \operatorname{Var}(y \mid X) (I - H)^\top = \sigma^2 C (I - H) = \sigma^2 \left( (X^\top X)^{-1}X^\top - (X^\top X)^{-1}X^\top H \right) = \mathbf{0} $$
-  由于多元正态分布下**协方差为零等价于独立**，故 $\hat\beta \perp e$。
+  $$ \hat\beta \text{ 与样本残差 } \hat\varepsilon \text{（以及方差估计 } \hat\sigma^2 \text{）严格统计独立！} $$
+  **代数证明**：$\hat\beta = C Y$，$\hat\varepsilon = (I - H)Y$。两者互协方差为：
+  $$ \operatorname{Cov}(\hat\beta, \hat\varepsilon \mid X) = C \operatorname{Var}(Y \mid X) (I - H)^T = \sigma^2 C (I - H) = \sigma^2 \left( (X^T X)^{-1}X^T - (X^T X)^{-1}X^T H \right) = \mathbf{0} $$
+  由于多元正态分布下**协方差为零等价于独立**，故 $\hat\beta \perp \hat\varepsilon$。
 - **残差平方和卡方分布**：
-  $$ \frac{e^\top e}{\sigma^2} = \frac{(N - k)\hat\sigma^2}{\sigma^2} \sim \chi^2(N - k) $$
-- **单系数 $t$ 检验统计量**：
+  $$ \frac{\hat\varepsilon^T \hat\varepsilon}{\sigma^2} = \frac{(n - k)\hat\sigma^2}{\sigma^2} \sim \chi^2(n - k) $$
+- **单系数 $t$ 检验统计量（t-test）**：
   检验单参数假设 $H_0: \beta_j = \beta_{j,0}$（通常检验显著性 $\beta_{j,0} = 0$）：
-  $$ t = \frac{\hat\beta_j - \beta_{j,0}}{\operatorname{SE}(\hat\beta_j)} = \frac{\hat\beta_j - \beta_{j,0}}{\sqrt{\hat\sigma^2 [(X^\top X)^{-1}]_{jj}}} \sim t(N - k) $$
-- **多重线性约束 $F$ 检验统计量**：
-  检验联合假设 $H_0: R\beta = r$（$q$ 个线性约束，$R$ 为 $q \times k$ 满行秩矩阵）：
-  $$ F = \frac{(R\hat\beta - r)^\top [R(X^\top X)^{-1} R^\top]^{-1} (R\hat\beta - r) / q}{\hat\sigma^2} \sim F(q, N - k) $$
+  $$ t = \frac{\hat\beta_j - \beta_{j,0}}{\sqrt{\hat\sigma^2 [(X^T X)^{-1}]_{jj}}}, \quad t \sim t_{n-k} $$
+- **多重线性约束 $F$ 检验统计量（F-test）**：
+  检验联合假设 $H_0: R\beta = r$（$q$ 个线性约束，$R \in \mathbb{R}^{q \times k}$ 满行秩）：
+  $$ F = \frac{(R\hat\beta - r)^T [R(X^T X)^{-1} R^T]^{-1} (R\hat\beta - r) / q}{\hat\sigma^2} \sim F_{q, n-k} $$
   - **做题秒杀快捷公式（受限模型 $R$ vs. 非受限模型 $UR$）**：
-    $$ F = \frac{(\operatorname{RSS}_R - \operatorname{RSS}_{UR}) / q}{\operatorname{RSS}_{UR} / (N - k)} = \frac{(R_{UR}^2 - R_R^2) / q}{(1 - R_{UR}^2) / (N - k)} $$
-  - **方程整体显著性检验**（检验 $H_0: \beta_1 = \dots = \beta_p = 0$，约束数 $q = p$）：
-    $$ F = \frac{\mathrm{ESS} / p}{\mathrm{RSS} / (N - p - 1)} = \frac{R^2 / p}{(1 - R^2) / (N - p - 1)} \sim F(p, N - p - 1) $$
+    $$ F = \frac{(RSS_R - RSS_{UR}) / q}{RSS_{UR} / (n - k)} = \frac{(R_{UR}^2 - R_R^2) / q}{(1 - R_{UR}^2) / (n - k)} \sim F_{q, n-k} $$
+  - **方程整体显著性检验**（检验 $H_0: \beta_1 = \dots = \beta_{k-1} = 0$，约束数 $q = k - 1$）：
+    $$ F = \frac{ESS / (k - 1)}{RSS / (n - k)} = \frac{R^2 / (k - 1)}{(1 - R^2) / (n - k)} \sim F_{k-1, n-k} $$
   - **$t$ 与 $F$ 的代数恒等**：对单约束检验（$q=1$），$t^2 \equiv F$。
 
 #### 【Lemma 3】预测区间 vs. 置信区间引理（Prediction vs. Confidence Intervals）
-对于新给定的特征输入点 $x_0 \in \mathbb{R}^k$：
-- **条件均值响应的置信区间（Confidence Interval for $\mathbb{E}[y_0 \mid x_0] = x_0^\top \beta$）**：
-  预测均值 $\hat{y}_0 = x_0^\top \hat\beta$，方差仅来自参数估计误差：
-  $$ \operatorname{Var}(\hat{y}_0 \mid X) = x_0^\top \operatorname{Var}(\hat\beta \mid X) x_0 = \sigma^2 x_0^\top (X^\top X)^{-1} x_0 $$
-  $1-\alpha$ 置信区间：$\hat{y}_0 \pm t_{1-\alpha/2, N-k} \cdot \hat\sigma \sqrt{x_0^\top (X^\top X)^{-1} x_0}$。
-- **单个新观测值的预测区间（Prediction Interval for $y_0 = x_0^\top \beta + \varepsilon_0$）**：
-  单点预测误差为 $e_0 = y_0 - \hat{y}_0 = \varepsilon_0 - x_0^\top(\hat\beta - \beta)$。由于未来样本扰动 $\varepsilon_0$ 独立于历史样本：
-  $$ \operatorname{Var}(e_0 \mid X) = \operatorname{Var}(\varepsilon_0) + \operatorname{Var}(\hat{y}_0 \mid X) = \sigma^2 \left[ 1 + x_0^\top (X^\top X)^{-1} x_0 \right] $$
-  $1-\alpha$ 预测区间：$\hat{y}_0 \pm t_{1-\alpha/2, N-k} \cdot \hat\sigma \sqrt{1 + x_0^\top (X^\top X)^{-1} x_0}$。
-> **考点总结**：预测区间的方差恒比置信区间多一项 $\sigma^2$（不可约随机扰动方差）。因此，**预测区间永远严格宽于置信区间**；且即使样本量 $N \to \infty$（估计误差趋向于 0），预测区间半宽也不会收缩为 0，依然保持 $\pm z_{\alpha/2}\sigma$。
+对于新给定的特征输入点 $X_0 \in \mathbb{R}^k$：
+- **条件均值响应的置信区间（Confidence Interval for $E(Y_0 \mid X_0) = X_0^T \beta$）**：
+  预测均值 $\hat{Y}_0 = X_0^T \hat\beta$，方差仅来自参数估计误差：
+  $$ \operatorname{Var}(\hat{Y}_0 \mid X) = X_0^T \operatorname{Var}(\hat\beta \mid X) X_0 = \sigma^2 X_0^T (X^T X)^{-1} X_0 $$
+  $1-\alpha$ 置信区间：
+  $$ \hat{Y}_0 \pm t_{n-k, 1-\alpha/2} \cdot \sqrt{\hat\sigma^2 X_0^T (X^T X)^{-1} X_0} $$
+- **单个新观测值的预测区间（Prediction Interval for $Y_0 = X_0^T \beta + \varepsilon_0$）**：
+  单点预测误差为 $e_0 = Y_0 - \hat{Y}_0 = \varepsilon_0 - X_0^T(\hat\beta - \beta)$。由于未来样本扰动 $\varepsilon_0$ 独立于历史样本：
+  $$ \operatorname{Var}(e_0 \mid X) = \operatorname{Var}(\varepsilon_0) + \operatorname{Var}(\hat{Y}_0 \mid X) = \sigma^2 \left[ 1 + X_0^T (X^T X)^{-1} X_0 \right] $$
+  $1-\alpha$ 预测区间：
+  $$ \hat{Y}_0 \pm t_{n-k, 1-\alpha/2} \cdot \sqrt{\hat\sigma^2 \left[ 1 + X_0^T (X^T X)^{-1} X_0 \right]} $$
+> **考点总结**：预测区间的方差恒比置信区间多一项 $\sigma^2$（不可约随机扰动方差）。因此，**预测区间永远严格宽于置信区间**；且即使样本量 $n \to \infty$（估计误差趋向于 0），预测区间半宽也不会收缩为 0，依然保持 $\pm z_{\alpha/2}\sigma$。
 
 #### 【Lemma 4】留一法与杠杆值引理（LOOCV & Leverage）
 - **帽子矩阵对角线（杠杆值 $H_{ii}$）**：
-  $H_{ii} = x_i^\top (X^\top X)^{-1} x_i$ 衡量第 $i$ 个样本在特征空间中的偏离程度。
-  性质：$0 \le H_{ii} \le 1$，$\sum_{i=1}^N H_{ii} = k$，平均杠杆值为 $\bar{H} = k/N$。
+  $H_{ii} = X_i^T (X^T X)^{-1} X_i$ 衡量第 $i$ 个样本在特征空间中的偏离程度。
+  性质：$0 \le H_{ii} \le 1$，$\sum_{i=1}^n H_{ii} = k$，平均杠杆值为 $\bar{H} = k/n$。
 - **留一残差公式（Sherman-Morrison 逆矩阵引理推导）**：
-  无需重新训练 $N$ 次模型，剔除第 $i$ 个样本后的预测误差为：
-  $$ e_{(-i)} = y_i - \hat{y}_{(-i)} = \frac{e_i}{1 - H_{ii}} $$
+  无需重新训练 $n$ 次模型，剔除第 $i$ 个样本后的预测误差为：
+  $$ \hat\varepsilon_{(-i)} = Y_i - \hat{Y}_{(-i)} = \frac{\hat\varepsilon_i}{1 - H_{ii}} $$
   一步得出严格的留一交叉验证（LOOCV）误差：
-  $$ \mathrm{LOOCV} = \frac{1}{N} \sum_{i=1}^N \left( \frac{e_i}{1 - H_{ii}} \right)^2 $$
+  $$ \mathrm{LOOCV} = \frac{1}{n} \sum_{i=1}^n \left( \frac{\hat\varepsilon_i}{1 - H_{ii}} \right)^2 $$
 - **剔除样本对参数的影响（Cook's Distance 的来源）**：
-  $$ \hat\beta - \hat\beta_{(-i)} = \frac{(X^\top X)^{-1} x_i e_i}{1 - H_{ii}} $$
+  $$ \hat\beta - \hat\beta_{(-i)} = \frac{(X^T X)^{-1} X_i \hat\varepsilon_i}{1 - H_{ii}} $$
 
 #### 【Lemma 5】遗漏变量与多余变量引理（OVB & Irrelevant Regressors）
 - **遗漏变量偏差（Omitted Variable Bias, OVB）**：
-  若真实模型为 $y = X_1 \beta_1 + X_2 \beta_2 + \varepsilon$。若遗漏 $X_2$ 只对 $X_1$ 回归：
-  $$ \mathbb{E}[\hat\beta_1^{\text{short}} \mid X] = \beta_1 + \underbrace{(X_1^\top X_1)^{-1} X_1^\top X_2}_{\hat\Gamma_{2 \sim 1}} \beta_2 $$
-  **无偏条件**：若 $\beta_2 = \mathbf{0}$（遗漏变量真实无影响）或 $X_1^\top X_2 = \mathbf{0}$（遗漏变量与包含变量严格正交），则短回归无偏。
+  若真实模型为 $Y = X_1 \beta_1 + X_2 \beta_2 + \varepsilon$。若遗漏 $X_2$ 只对 $X_1$ 回归：
+  $$ E(\hat\beta_1^{\text{short}} \mid X) = \beta_1 + \underbrace{(X_1^T X_1)^{-1} X_1^T X_2}_{\hat\Gamma_{2 \sim 1}} \beta_2 $$
+  **无偏条件**：若 $\beta_2 = \mathbf{0}$（遗漏变量真实无影响）或 $X_1^T X_2 = \mathbf{0}$（遗漏变量与包含变量严格正交），则短回归无偏。
 - **引入多余无关变量（Overfitting / Irrelevant Regressor）**：
   若真实模型不含 $X_2$（$\beta_2 = \mathbf{0}$），但强行纳入 $X_2$ 回归：
-  - $\hat\beta_1^{\text{long}}$ **仍然是无偏的**（$\mathbb{E}[\hat\beta_1^{\text{long}}] = \beta_1$）；
+  - $\hat\beta_1^{\text{long}}$ **仍然是无偏的**（$E(\hat\beta_1^{\text{long}}) = \beta_1$）；
   - 但方差必然膨胀：$\operatorname{Var}(\hat\beta_1^{\text{long}}) \ge \operatorname{Var}(\hat\beta_1^{\text{short}})$，且相等当且仅当 $X_1 \perp X_2$。
 
 #### 【Lemma 6】测量误差引理（Errors-in-Variables / Attenuation Bias）
 - **自变量测量误差（衰减偏误 Attenuation Bias）**：
-  真实模型 $y = \beta x^* + \varepsilon$，观测值 $x = x^* + u$（$u \sim (0, \sigma_u^2)$ 独立于 $x^*, \varepsilon$）：
-  $$ \operatorname{plim}_{N \to \infty} \hat\beta = \beta \cdot \frac{\sigma_{x^*}^2}{\sigma_{x^*}^2 + \sigma_u^2} < \beta $$
+  真实模型 $Y_i = \beta_0 + \beta_1 X_i^* + \varepsilon_i$，观测值 $X_i = X_i^* + u_i$（$u_i \sim (0, \sigma_u^2)$ 独立于 $X_i^*, \varepsilon_i$）：
+  $$ \operatorname{plim}_{n \to \infty} \hat\beta_1 = \beta_1 \cdot \frac{\sigma_{X^*}^2}{\sigma_{X^*}^2 + \sigma_u^2} < \beta_1 $$
   **做题口诀**：自变量加噪声，估计值向 0 衰减（绝对值低估）。
 - **因变量测量误差**：
-  若 $y = y^* + v$（$v$ 独立于 $x$），则 $\hat\beta$ **仍然无偏且一致**，仅仅增大了误差项方差 $\sigma^2 + \sigma_v^2$，导致估计精度下降（标准误变大）。
+  若 $Y_i = Y_i^* + v_i$（$v_i$ 独立于 $X_i$），则 $\hat\beta_1$ **仍然无偏且一致**，仅仅增大了误差项方差 $\sigma^2 + \sigma_v^2$，导致估计精度下降（标准误变大）。
 
 #### 【Lemma 7】变量尺度与仿射变换引理（Scale & Affine Invariance）
-- **自变量缩放**：若 $x_{\text{new}} = c \cdot x$，则 $\hat\beta_{\text{new}} = \frac{1}{c} \hat\beta$；
-- **因变量缩放**：若 $y_{\text{new}} = d \cdot y$，则 $\hat\beta_{\text{new}} = d \cdot \hat\beta$；
-- **自变量/因变量平移**：若 $x$ 或 $y$ 增加常数，**斜率 $\hat\beta$ 绝对不变**，仅截距 $\hat\alpha$ 发生对应代数平移；
+- **自变量缩放**：若 $X_{\text{new}} = c \cdot X$，则 $\hat\beta_{\text{new}} = \frac{1}{c} \hat\beta$；
+- **因变量缩放**：若 $Y_{\text{new}} = d \cdot Y$，则 $\hat\beta_{\text{new}} = d \cdot \hat\beta$；
+- **自变量/因变量平移**：若 $X$ 或 $Y$ 增加常数，**斜率 $\hat\beta_1$ 绝对不变**，仅截距 $\hat\beta_0$ 发生对应代数平移；
 - **不变性（Invariance）**：非零尺度缩放与平移变换下，**$t$ 统计量、$F$ 统计量、$R^2$、回归 $p$ 值完全保持不变**。
 
 ---
@@ -327,15 +301,15 @@ Gauss-Markov 定理指出，在特定假设下，OLS 估计量是**最佳线性�
 ### 3. 违反假设的后果与补救（White / Newey-West / GLS）
 当金融数据违背 Gauss-Markov 假设时：
 - **异方差（Heteroskedasticity） / 自相关（Autocorrelation）**：
-  OLS 估计量**依然无偏且一致**，但不再是 BLUE。若继续套用普通标准误公式 $\sigma^2 (X^\top X)^{-1}$，标准误将被严重低估，产生虚假统计显著性。
+  OLS 估计量**依然无偏且一致**，但不再是 BLUE。若继续套用普通标准误公式 $\sigma^2 (X^T X)^{-1}$，标准误将被严重低估，产生虚假统计显著性。
 - **补救方案**：
   1. **White 异方差稳健标准误（HC0 / Sandwich Estimator）**：
-     $$ \operatorname{Var}_{\text{White}}(\hat\beta) = (X^\top X)^{-1} \left( \sum_{i=1}^N e_i^2 x_i x_i^\top \right) (X^\top X)^{-1} $$
+     $$ \operatorname{Var}_{\text{White}}(\hat\beta) = (X^T X)^{-1} \left( \sum_{i=1}^n \hat\varepsilon_i^2 X_i X_i^T \right) (X^T X)^{-1} $$
   2. **Newey–West 异方差自相关稳健标准误（HAC）**：
      加入 Bartlett 滞后核函数修正自相关截断，为时间序列金融数据必备标配。
   3. **广义最小二乘法（GLS / WLS, Aitken 定理）**：
      若已知协方差结构 $\operatorname{Var}(\varepsilon \mid X) = \sigma^2 \boldsymbol{\Omega}$，令变换权重矩阵 $P = \boldsymbol{\Omega}^{-1/2}$ 对原方程预乘进行白化，求得：
-     $$ \hat\beta_{\text{GLS}} = (X^\top \boldsymbol{\Omega}^{-1} X)^{-1} X^\top \boldsymbol{\Omega}^{-1} y $$
+     $$ \hat\beta_{\text{GLS}} = (X^T \boldsymbol{\Omega}^{-1} X)^{-1} X^T \boldsymbol{\Omega}^{-1} Y $$
      $\hat\beta_{\text{GLS}}$ 严格达到异方差/自相关场景下的最佳线性无偏（BLUE）。
 
 ---
