@@ -1,11 +1,14 @@
 # ML Coding 00 · ML 基础：数据预处理、数据泄露与经典损失函数
 
-在机器学习系统设计与算法工程实践中，扎实的统计学基础与严密的数据管道工程是构建高可用模型的基石。许多模型在离线评测中指标优异，上线后效果却断崖式下跌，其根源往往不在于复杂的模型架构，而在于数据泄露（Data Leakage）、不恰当的缺失值处理（Missing Data Imputation）或对损失函数（Loss Functions）统计假设的认知偏差。
+在机器学习系统设计与算法工程实践中，扎实的统计学基础与严密的数据管道工程是构建高可用模型的基石。许多模型在离线评测中指标优异，上线后效果却断崖式下跌，其根源往往不在于复杂的模型架构，而在于数据泄露（Data Leakage）、不恰当的缺失值处理（Missing Data Imputation）、样本不平衡的评估陷阱或对损失函数（Loss Functions）统计假设的认知偏差。
 
-本篇系统梳理工业界最高频的 3 大 ML 基础核心模块：
+本篇系统梳理工业界机器学习基础与工程落地的 6 大核心模块：
 1. **数据泄露（Data Leakage）机理与全方位防御体系**
 2. **缺失值机制（MCAR / MAR / MNAR）与处理策略权衡**
-3. **经典损失函数推导：线性回归 vs 逻辑回归，MSE vs MAE 及统计学收敛特性**
+3. **样本不平衡处理体系、表征学习与 VAE 核心价值**
+4. **分类、排序、校准与业务评估指标全景体系（含可折叠代码实现）**
+5. **经典损失函数推导：线性回归 vs 逻辑回归，MSE vs MAE 及统计学收敛特性**
+6. **核心机制辨析与高频问题清单**
 
 ---
 
@@ -212,7 +215,524 @@ print("Pipeline 训练完成，转换后特征维度（含 is_missing 指示列�
 
 ---
 
-## 模块三：经典损失函数剖析：线性回归 vs 逻辑回归，MSE vs MAE
+## 模块三：样本不平衡处理体系、表征学习与 VAE 核心价值
+
+### 1. 不平衡数据处理的三个层级
+
+在实际机器学习系统中，处理类别不平衡主要分布在三个层级：
+
+* **数据层**：
+  * **欠采样（Under-sampling）**：Random Under-sampling、Tomek Links（识别并移除异类最近邻对中的多数类以清晰类别分界）、ENN（Edited Nearest Neighbours，清理边界噪点）；
+  * **过采样（Over-sampling）**：SMOTE（在特征空间通过 $k$ 近邻线性插值合成少数类样本）、ADASYN（根据少数类样本周围多数类的密集程度自适应分配插值权重）；
+  * **针对性特征/样本增强**：长尾特征扰动与数据扩增。
+* **算法与损失层**：
+  * **代价敏感加权（Cost-sensitive / Class Weights）**：在损失函数中按类别频次反比赋予样本权重 $w_c \propto \frac{1}{N_c}$；
+  * **聚焦损失（Focal Loss）**：引入调制因子 $(1 - p_t)^\gamma$，自适应衰减易分类样本对梯度的贡献；
+  * **任务重构为单分类或异常检测**：One-Class SVM、Isolation Forest，避开极度不平衡的有监督分类直接学习正常样本分布支持集。
+* **决策与后处理层**：
+  * **动态阈值微调（Threshold Moving / Threshold Tuning）**：不直接采用 0.5 默认截断，依据验证集上的特定业务效用函数（如最大化 $F_\beta$ 或收益总和）搜索最优决策阈值；
+  * **概率校准（Platt Scaling, Isotonic Regression）**：纠正因采样或加权导致的输出后验概率偏离真实经验发生率的问题；
+  * **业务容量限制下的 Top-$k$ 截断**：按预测概率从高到低排序，仅截取前 $k$ 个最高风险/收益样本进入下游执行流。
+
+---
+
+### 2. 为什么严重不平衡有时对业务“没关系”？
+
+1. **ROC-AUC 的排序不变性**：
+   ROC-AUC 的统计学本质是 Wilcoxon-Mann-Whitney 统计量，等价于从正负样本中各随机抽取一个样本，正样本预测概率大于负样本预测概率的先验期望：
+   $$ \text{AUC} = P(S^+ > S^-) $$
+   排序关系仅取决于条件分布 $P(X \mid Y=1)$ 与 $P(X \mid Y=0)$ 在投影方向上的可分离度，在数学上完全独立于类别先验概率 $P(Y)$。即便负样本数量增加数倍，只要正负样本内部的分数分布未变，ROC-AUC 保持数学恒定。
+2. **决策场景只依赖 Top 排序**：
+   在推荐系统召回排序、量化多因子选股或风控初筛中，业务逻辑往往是选取固定容量的头部样本（如每日做多 Top 1% 股票，或人工审核前 500 笔可疑交易）。此时只要模型对头部的相对排序准确，绝对先验概率的偏移不影响最终决策集的构成。
+3. **ROC-AUC 的“虚假繁荣”陷阱与 PR-AUC 边界**：
+   虽然 ROC-AUC 对先验不敏感，但在极度不平衡下（如正例比例为 0.1%），假阳率公式为：
+   $$ \text{FPR} = \frac{\text{FP}}{\text{TN} + \text{FP}} $$
+   庞大的 $\text{TN}$ 会极度稀释 $\text{FPR}$ 的分母。模型即便产生数千个误报（$\text{FP}$ 远超 $\text{TP}$），$\text{FPR}$ 依然极低，表现为 ROC-AUC 高达 0.98，但线上真实精确率（Precision）可能不足 5%。这也是为何实际反欺诈与故障诊断更推荐 **PR-AUC (Average Precision)**。
+
+---
+
+### 3. 对比学习 (SupCon)、SMOTE 与 Focal Loss 机制对比
+
+| 方法 | 基本思想 | 适用范围 | 局限与边界 |
+|---|---|---|---|
+| **SMOTE** | 在特征空间中寻找少数类样本的 $k$ 近邻，通过线性插值合成新样本：$x_{\text{new}} = x + \lambda(x_{nn} - x)$。 | 中低维结构化表格数据；少数类分布连续且无大量边界重叠的场景。 | 高维稀疏特征下失效（维数灾难）；会盲目插值噪声与离群点，加剧类别混淆。 |
+| **Focal Loss** | 在交叉熵损失上引入动态衰减因子 $(1 - p_t)^\gamma$，自适应降低易分类样本对梯度的贡献，强迫网络聚焦于难分样本。 | 密集预测（如目标检测）、高容量神经网络、样本极度不平衡且不希望修改采样率的端到端训练。 | 对标签噪声（Label Noise）极度敏感，因错误标注的样本天然会被视作“极难样本”而赋予极高权重。 |
+| **对比学习 (SupCon)** | 利用样本间成对约束，拉近同类嵌入距离、推远异类嵌入距离，学习具有判别性的低维几何流形。 | 高维复杂表征学习（文本、时序、图表征）；长尾分布（Long-tailed recognition）；少样本冷启动。 | 训练开销大（依赖大 Batch Size 或 Memory Bank），需要精细构建正负样本对与表征投影头。 |
+
+---
+
+### 4. 变分自编码器（VAE）在噪声、不平衡与低信噪比数据中的价值
+
+在量化金融高频时序与强噪声表格建模中，数据通常具有极低信噪比（$\text{SNR} < 0.05$）与非平稳性。变分自编码器（VAE，包括 CVAE、Bottleneck Autoencoder）展现出以下核心价值：
+
+* **隐式高斯扰动与去噪正则化**：
+  传统 Autoencoder 或 MLP 容易记忆微观结构中的高频随机噪声导致过拟合。VAE 通过将输入编码为均值 $\mu$ 与方差 $\sigma$，并引入重参数化技巧（Reparameterization Trick）采样：
+  $$ z = \mu + \sigma \odot \epsilon, \quad \epsilon \sim \mathcal{N}(0, I) $$
+  强制隐空间满足高斯先验 $\mathcal{N}(0, I)$。这种随机扰动相当于在隐特征上施加连续的数据增强，迫使解码器或下游预测头只关注宏观拓扑流形，过滤高频噪声。
+* **非线性宏观状态因子（Market Regime）抽取**：
+  复杂系统往往由少数不可观测的潜变量驱动（如系统状态切换、流动性枯竭）。线性主成分分析（PCA）无法捕获跨维度的非线性协同交互。VAE 的低维 Bottleneck $z$ 能提取正交、连续的非线性因子，作为下游树模型（LightGBM）或时序模型（Transformer）的稳健输入。
+* **多任务联合预训练（End-to-End Joint Loss）**：
+  将 VAE 特征重构损失与下游任务预测损失联合端到端优化：
+  $$ \mathcal{L} = \mathcal{L}_{\text{prediction}}(y, \hat{y}) + \lambda_1 \mathcal{L}_{\text{recon}}(x, \hat{x}) + \lambda_2 D_{\text{KL}}(q(z \mid x) \parallel p(z)) $$
+  无监督重构项充当强正则化约束，防止模型参数过早坍缩到局部假相关（Spurious Correlation）中。
+* **不平衡与异常检测**：
+  极端异常模式（系统崩盘、离群故障）在历史样本中极度稀缺。基于 VAE 的重构误差 $\|x - \hat{x}\|_2^2$ 或边缘似然估计，可以直接作为样本的“异常度评分”（Anomaly Score），用于头寸保护或风险兜底。
+
+<details>
+<summary><b>实现代码与解析：带下游联合预测头的 VAE 完整架构（PyTorch）</b></summary>
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TabularVAEWithJointHead(nn.Module):
+    """带下游联合预测头的变分自编码器架构"""
+    def __init__(self, input_dim: int, latent_dim: int = 16, hidden_dim: int = 64):
+        super().__init__()
+        # 编码器 (Encoder)
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.SiLU()
+        )
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        
+        # 解码器 (Decoder: 特征重构去噪)
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, input_dim)
+        )
+        
+        # 联合预测头 (Prediction Head: 下游回归/分类任务)
+        self.pred_head = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dim // 2),
+            nn.SiLU(),
+            nn.Linear(hidden_dim // 2, 1)
+        )
+        
+    def encode(self, x: torch.Tensor):
+        h = self.encoder(x)
+        return self.fc_mu(h), self.fc_logvar(h)
+        
+    def reparameterize(self, mu: torch.Tensor, logvar: torch.Tensor) -> torch.Tensor:
+        """重参数化技巧：z = mu + sigma * eps"""
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+        
+    def forward(self, x: torch.Tensor):
+        mu, logvar = self.encode(x)
+        z = self.reparameterize(mu, logvar)
+        recon_x = self.decoder(z)
+        pred_y = self.pred_head(z)
+        return recon_x, pred_y, mu, logvar
+
+def compute_joint_vae_loss(
+    x: torch.Tensor, recon_x: torch.Tensor, 
+    y_true: torch.Tensor, y_pred: torch.Tensor, 
+    mu: torch.Tensor, logvar: torch.Tensor,
+    lambda_recon: float = 1.0, lambda_kl: float = 0.01
+):
+    """端到端联合优化损失计算：预测 MSE + 重构 MSE + KL 散度约束"""
+    pred_loss = F.mse_loss(y_pred.squeeze(-1), y_true)
+    recon_loss = F.mse_loss(recon_x, x)
+    # KL 散度：-0.5 * sum(1 + log(sigma^2) - mu^2 - sigma^2)
+    kl_loss = -0.5 * torch.mean(torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1))
+    
+    total_loss = pred_loss + lambda_recon * recon_loss + lambda_kl * kl_loss
+    return total_loss, {
+        "pred_loss": pred_loss.item(),
+        "recon_loss": recon_loss.item(),
+        "kl_loss": kl_loss.item()
+    }
+```
+</details>
+
+---
+
+## 模块四：分类、排序、校准与业务评估指标全景体系
+
+### 1. 十大常用评估指标全景比对矩阵
+
+| 指标类型 | 指标名称 | 核心定义 / 计算公式 | 核心适用场景 | 盲区与潜在陷阱 |
+|---|---|---|---|---|
+| **排序类（阈值无关）** | **ROC-AUC** | TPR 对 FPR 的积分曲线下宽度，统计本质为 $P(S^+ > S^-)$。 | 评估模型全局分离能力；类别分布相对稳定或需要与先验解耦的模型横向对比。 | 负样本巨大时对假阳率钝化，在极度不平衡下易产生虚假繁荣。 |
+|  | **PR-AUC (AP)** | Precision 对 Recall 积分曲线下宽度，加权阶梯面积：$\sum (R_k - R_{k-1})P_k$。 | **极度不平衡分类（反欺诈、违约预测、故障排查）核心指标**；聚焦于正样本检出率与查准率。 | 对负样本纯度不敏感；若无统一基准线（随机猜测基准为正类先验比例 $P$），跨数据集难以横向比较。 |
+| **决策类（阈值相关）** | **F1-Score / $F_\beta$** | $F_\beta = (1 + \beta^2)\frac{P \cdot R}{\beta^2 P + R}$，调和平均数。 | 单一阈值上线决策；根据业务诉求微调检出偏好（如漏报代价高设 $\beta=2$）。 | 强依赖所选固定截断阈值；未考虑不同预测概率区间的风险分布。 |
+|  | **Precision@k / Recall@k** | 预测置信度最高的前 $k$ 个样本中的查准率或查全率。 | 生产端具有严格吞吐上限（如人工复审团队每日限额、推荐系统前 $k$ 位展现）。 | 仅衡量头部排序质量，对 $k$ 之后的长尾分布完全盲区。 |
+|  | **Balanced Accuracy** | $\frac{\text{TPR} + \text{TNR}}{2} = \frac{\text{Recall}_{\text{pos}} + \text{Recall}_{\text{neg}}}{2}$。 | 需要兼顾每一个类别的准确性，避免模型全部预测为多数类。 | 对极端分类器容易给出钝化评分，忽略了正负类在业务侧的不对称成本。 |
+| **概率质量与校准** | **Log-Loss (Cross-Entropy)** | $-\frac{1}{N}\sum [y \ln p + (1-y)\ln(1-p)]$。 | 概率预测敏感任务（如点击率预估 CTR、期望收益定价）。 | 极易受高置信度错误分类的剧烈惩罚；受类别不平衡先验漂移影响极大。 |
+|  | **Brier Score** | $\frac{1}{N}\sum (p_i - y_i)^2$，概率空间的均方误差。 | 衡量校准质量；可严格分解为可靠性（Reliability）、分辨率（Resolution）和不确定性。 | 无法直接替代分类决策阈值设计。 |
+|  | **ECE (Expected Calibration Error)** | 概率分桶后，桶内置信度与真实标签比例的加权差绝对值。 | 风险定价系统、安全关键系统（医疗诊断、信贷授信）中的模型可信度验证。 | 结果受分桶策略（固定宽度 vs 等频分桶）影响较大，且不衡量区分能力。 |
+| **量化 / 业务类** | **Rank IC (Information Coefficient)** | 预测打分排名与实际未来收益排名的 Spearman 秩相关系数。 | **量化截面 Alpha 因子有效性评价指标**；评估截面相对强弱。 | 无法衡量收益的非线性厚尾特征以及实际扣减交易滑点/换手率后的表现。 |
+|  | **Expected Business Cost** | $\sum_{i,j} C_{ij} \cdot P(\hat{Y}=i, Y=j)$，业务代价矩阵。 | 终极线上决策：为误报（FP）和漏报（FN）赋予显式资金损失函数。 | 业务损失矩阵的量化成本往往难以动态精确建模。 |
+
+---
+
+### 2. 十大评估指标底层实现与解析（可折叠代码块）
+
+<details>
+<summary><b>实现 1：ROC-AUC（基于 Wilcoxon-Mann-Whitney 秩和检验算法）</b></summary>
+
+```python
+import numpy as np
+
+def compute_roc_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    """计算二分类 ROC-AUC
+    
+    数学原理：Wilcoxon-Mann-Whitney 统计量
+    AUC = (sum(rank(S_pos)) - n_pos * (n_pos + 1) / 2) / (n_pos * n_neg)
+    支持平局分数（Tied Scores）的平均秩次处理。
+    """
+    y_true = np.asarray(y_true).ravel()
+    y_score = np.asarray(y_score).ravel()
+    
+    pos_mask = (y_true == 1)
+    neg_mask = (y_true == 0)
+    n_pos = np.sum(pos_mask)
+    n_neg = np.sum(neg_mask)
+    
+    if n_pos == 0 or n_neg == 0:
+        raise ValueError("y_true 必须同时包含正例与负例样本")
+        
+    # 计算升序排列索引
+    order = np.argsort(y_score)
+    ranks = np.empty_like(order, dtype=float)
+    ranks[order] = np.arange(1, len(y_score) + 1)
+    
+    # 平局分数的平均化（Fractional Ranking）
+    sorted_scores = y_score[order]
+    unique_scores, inverse_indices, counts = np.unique(sorted_scores, return_inverse=True, return_counts=True)
+    if len(unique_scores) < len(y_score):
+        tie_ranks = np.cumsum(counts) - (counts - 1) / 2.0
+        ranks = tie_ranks[inverse_indices][np.argsort(order)]
+    
+    sum_pos_ranks = np.sum(ranks[pos_mask])
+    u_stat = sum_pos_ranks - (n_pos * (n_pos + 1)) / 2.0
+    return float(u_stat / (n_pos * n_neg))
+
+# 测试验证
+y_t = np.array([0, 0, 1, 1])
+y_s = np.array([0.1, 0.4, 0.35, 0.8])
+print("ROC-AUC:", compute_roc_auc(y_t, y_s))  # 0.75
+```
+</details>
+
+<details>
+<summary><b>实现 2：PR-AUC / Average Precision（梯步加权面积法）</b></summary>
+
+```python
+import numpy as np
+
+def compute_average_precision(y_true: np.ndarray, y_score: np.ndarray) -> float:
+    """计算 PR-AUC / Average Precision (AP)
+    
+    数学定义：AP = sum_k (R_k - R_{k-1}) * P_k
+    按预测分数降序排列，逐点计算 Precision 与 Recall 的梯步变化。
+    """
+    y_true = np.asarray(y_true).ravel()
+    y_score = np.asarray(y_score).ravel()
+    
+    order = np.argsort(-y_score)
+    y_sorted = y_true[order]
+    
+    tp = np.cumsum(y_sorted == 1)
+    fp = np.cumsum(y_sorted == 0)
+    n_pos = tp[-1]
+    
+    if n_pos == 0:
+        return 0.0
+        
+    precision = tp / (tp + fp)
+    recall = tp / n_pos
+    
+    # 前驱召回率点 (R_0 = 0)
+    recall_prev = np.concatenate(([0.0], recall[:-1]))
+    recall_diff = recall - recall_prev
+    
+    return float(np.sum(precision * recall_diff))
+
+# 测试验证
+print("Average Precision:", compute_average_precision(y_t, y_s))
+```
+</details>
+
+<details>
+<summary><b>实现 3：F1-Score 与 F-beta 评分（阈值决策指标）</b></summary>
+
+```python
+import numpy as np
+
+def compute_f_beta(
+    y_true: np.ndarray, 
+    y_score: np.ndarray, 
+    threshold: float = 0.5, 
+    beta: float = 1.0, 
+    eps: float = 1e-12
+) -> float:
+    """计算二分类在指定决策阈值下的 F-beta 评分
+    
+    数学公式：F_beta = (1 + beta^2) * (P * R) / (beta^2 * P + R)
+    beta = 1.0: F1-Score (平衡精确率与召回率)
+    beta = 2.0: 偏向召回率 (如反欺诈、重大疾病筛查，漏报成本极高)
+    beta = 0.5: 偏向精确率 (如垃圾邮件拦截，误报成本极高)
+    """
+    y_true = np.asarray(y_true).ravel()
+    y_pred = (np.asarray(y_score).ravel() >= threshold).astype(int)
+    
+    tp = np.sum((y_pred == 1) & (y_true == 1))
+    fp = np.sum((y_pred == 1) & (y_true == 0))
+    fn = np.sum((y_pred == 0) & (y_true == 1))
+    
+    precision = tp / (tp + fp + eps)
+    recall = tp / (tp + fn + eps)
+    
+    beta_sq = beta ** 2
+    f_beta = (1.0 + beta_sq) * (precision * recall) / (beta_sq * precision + recall + eps)
+    return float(f_beta)
+
+# 测试验证
+print("F1-Score:", compute_f_beta(y_t, y_s, threshold=0.5, beta=1.0))
+print("F2-Score:", compute_f_beta(y_t, y_s, threshold=0.5, beta=2.0))
+```
+</details>
+
+<details>
+<summary><b>实现 4：Precision@k 与 Recall@k（容量受限 Top-k 截断）</b></summary>
+
+```python
+import numpy as np
+
+def compute_precision_recall_at_k(y_true: np.ndarray, y_score: np.ndarray, k: int) -> tuple[float, float]:
+    """计算置信度最高的 Top-k 样本中的查准率与查全率
+    
+    适用场景：人工复审名额受限、推荐系统前 k 个曝光位等。
+    使用 argpartition 保证 O(N) 的选择复杂度。
+    """
+    y_true = np.asarray(y_true).ravel()
+    y_score = np.asarray(y_score).ravel()
+    n = len(y_true)
+    k = min(max(1, k), n)
+    
+    # 快速获取 Top-k 索引
+    top_k_indices = np.argpartition(-y_score, k - 1)[:k]
+    
+    hits = np.sum(y_true[top_k_indices] == 1)
+    total_positives = np.sum(y_true == 1)
+    
+    p_at_k = float(hits / k)
+    r_at_k = float(hits / total_positives) if total_positives > 0 else 0.0
+    return p_at_k, r_at_k
+
+# 测试验证
+print("P@2, R@2:", compute_precision_recall_at_k(y_t, y_s, k=2))
+```
+</details>
+
+<details>
+<summary><b>实现 5：Balanced Accuracy（各类别召回率宏平均）</b></summary>
+
+```python
+import numpy as np
+
+def compute_balanced_accuracy(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    """计算平衡准确率 Balanced Accuracy
+    
+    数学定义：各类别召回率（Sensitivity / Specificity）的未加权平均：
+    Balanced_Acc = 0.5 * (TPR + TNR)
+    完全克服多数类掩盖少数类预测失败的虚高准确率陷阱。
+    """
+    y_true = np.asarray(y_true).ravel()
+    y_pred = np.asarray(y_pred).ravel()
+    classes = np.unique(y_true)
+    
+    recalls = []
+    for c in classes:
+        mask = (y_true == c)
+        total_c = np.sum(mask)
+        if total_c > 0:
+            tp_c = np.sum((y_pred == c) & mask)
+            recalls.append(tp_c / total_c)
+            
+    return float(np.mean(recalls)) if len(recalls) > 0 else 0.0
+
+# 测试验证
+print("Balanced Acc:", compute_balanced_accuracy(y_t, (y_s >= 0.5).astype(int)))
+```
+</details>
+
+<details>
+<summary><b>实现 6：Log-Loss / Binary Cross-Entropy（数值稳定对数损失）</b></summary>
+
+```python
+import numpy as np
+
+def compute_log_loss(y_true: np.ndarray, y_prob: np.ndarray, eps: float = 1e-15) -> float:
+    """计算数值稳定的二元对数损失（Log-Loss / BCE）
+    
+    数学公式：-1/N * sum(y * ln(p) + (1-y) * ln(1-p))
+    边界保护：将预测概率 clip 到 [eps, 1-eps] 防止 log(0) 产生 NaN。
+    """
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    y_prob = np.clip(np.asarray(y_prob, dtype=float).ravel(), eps, 1.0 - eps)
+    loss = -np.mean(y_true * np.log(y_prob) + (1.0 - y_true) * np.log(1.0 - y_prob))
+    return float(loss)
+
+# 测试验证
+print("Log Loss:", compute_log_loss(y_t, y_s))
+```
+</details>
+
+<details>
+<summary><b>实现 7：Brier Score（概率空间均方误差与校准质量）</b></summary>
+
+```python
+import numpy as np
+
+def compute_brier_score(y_true: np.ndarray, y_prob: np.ndarray) -> float:
+    """计算二分类 Brier Score
+    
+    数学公式：BS = 1/N * sum (p_i - y_i)^2
+    性质：
+    1. 取值范围 [0, 1]，0 表示完美校准与完美分类；
+    2. 可严格分解为：Brier = Reliability - Resolution + Uncertainty
+       - Reliability (可靠性/校准误差)：概率预测是否匹配真实发生频率；
+       - Resolution (分辨率)：模型区分类别的能力；
+       - Uncertainty (固有不确定性)：事件先验方差 p*(1-p)。
+    """
+    y_true = np.asarray(y_true, dtype=float).ravel()
+    y_prob = np.asarray(y_prob, dtype=float).ravel()
+    return float(np.mean((y_prob - y_true) ** 2))
+
+# 测试验证
+print("Brier Score:", compute_brier_score(y_t, y_s))
+```
+</details>
+
+<details>
+<summary><b>实现 8：Expected Calibration Error / ECE（等宽分桶期望校准误差）</b></summary>
+
+```python
+import numpy as np
+
+def compute_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> float:
+    """计算期望校准误差 ECE（Expected Calibration Error）
+    
+    数学公式：ECE = sum_{m=1}^M (|B_m| / N) * |acc(B_m) - conf(B_m)|
+    衡量模型输出概率与真实观测经验频率之间的绝对校准差距。
+    """
+    y_true = np.asarray(y_true).ravel()
+    y_prob = np.asarray(y_prob).ravel()
+    n = len(y_true)
+    
+    bin_boundaries = np.linspace(0, 1, n_bins + 1)
+    ece = 0.0
+    
+    for i in range(n_bins):
+        bin_lower = bin_boundaries[i]
+        bin_upper = bin_boundaries[i + 1]
+        
+        if i == n_bins - 1:
+            in_bin = (y_prob >= bin_lower) & (y_prob <= bin_upper)
+        else:
+            in_bin = (y_prob >= bin_lower) & (y_prob < bin_upper)
+            
+        bin_size = np.sum(in_bin)
+        if bin_size > 0:
+            bin_acc = np.mean(y_true[in_bin])
+            bin_conf = np.mean(y_prob[in_bin])
+            ece += (bin_size / n) * np.abs(bin_acc - bin_conf)
+            
+    return float(ece)
+
+# 测试验证
+print("ECE (10 bins):", compute_ece(y_t, y_s, n_bins=10))
+```
+</details>
+
+<details>
+<summary><b>实现 9：Rank IC（截面 Spearman 秩相关系数）</b></summary>
+
+```python
+import numpy as np
+
+def compute_rank_ic(pred_scores: np.ndarray, true_returns: np.ndarray) -> float:
+    """计算量化 Alpha 因子截面 Rank IC（Spearman 秩相关系数）
+    
+    数学定义：预测得分排序向量与实际未来收益排序向量的 Pearson 线性相关系数。
+    评估因子对全市场资产相对表现的单调排序能力。
+    """
+    pred_scores = np.asarray(pred_scores).ravel()
+    true_returns = np.asarray(true_returns).ravel()
+    
+    def rank_array(a: np.ndarray) -> np.ndarray:
+        order = np.argsort(a)
+        ranks = np.empty_like(order, dtype=float)
+        ranks[order] = np.arange(len(a))
+        return ranks
+        
+    rank_p = rank_array(pred_scores)
+    rank_y = rank_array(true_returns)
+    
+    # 协方差与方差计算
+    cov = np.cov(rank_p, rank_y)[0, 1]
+    std_p = np.std(rank_p, ddof=1)
+    std_y = np.std(rank_y, ddof=1)
+    
+    if std_p == 0 or std_y == 0:
+        return 0.0
+    return float(cov / (std_p * std_y))
+
+# 测试验证
+print("Rank IC:", compute_rank_ic(y_s, y_t))
+```
+</details>
+
+<details>
+<summary><b>实现 10：Expected Business Cost（业务代价矩阵加权损失）</b></summary>
+
+```python
+import numpy as np
+
+def compute_expected_business_cost(
+    y_true: np.ndarray, 
+    y_pred: np.ndarray, 
+    cost_matrix: np.ndarray
+) -> float:
+    """计算线上决策的期望业务代价
+    
+    参数定义：
+    cost_matrix: 二维数组 C[pred_class, true_class]
+    例如风控二分类代价矩阵：
+    cost_matrix = [[C_00 (正常判为正常: 0元),   C_01 (盗刷漏报: 损失1000元)],
+                   [C_10 (误封正常用户: 损失50元), C_11 (盗刷拦截: 挽损成本5元)]]
+    """
+    y_true = np.asarray(y_true, dtype=int).ravel()
+    y_pred = np.asarray(y_pred, dtype=int).ravel()
+    
+    # 向量化直接索引对应成本
+    costs = cost_matrix[y_pred, y_true]
+    return float(np.mean(costs))
+
+# 测试验证
+cost_mat = np.array([
+    [0.0, 1000.0],  # 预测为 0
+    [50.0, 5.0]     # 预测为 1
+])
+y_p_hard = (y_s >= 0.5).astype(int)
+print("平均业务单笔损失:", compute_expected_business_cost(y_t, y_p_hard, cost_mat))
+```
+</details>
+
+---
+
+## 模块五：经典损失函数剖析：线性回归 vs 逻辑回归，MSE vs MAE
 
 ### 1. 线性回归目标函数与高斯 MLE 概率推导
 
@@ -260,7 +780,7 @@ $$\mathcal{L}_{\text{Logistic}}(\mathbf{w}) = -\frac{1}{N} \sum_{i=1}^N \left[ y
 
 ---
 
-### 3. 深度面试考点：为什么逻辑回归不能使用 MSE？
+### 3. 为什么逻辑回归分类不能使用 MSE 损失？
 
 许多初学者会问：“既然 MSE 能衡量误差，为什么不能直接在逻辑回归的 $\hat{p}_i = \sigma(\mathbf{w}^T \mathbf{x}_i)$ 上使用 MSE 损失？”
 
@@ -389,7 +909,7 @@ print("✅ 所有损失函数数值测试均通过验证！")
 
 ---
 
-## 模块四：面试前速记与核心问答清单（Interview FAQ）
+## 模块六：核心机制辨析与系统问答清单
 
 ### Q1：如果训练集和测试集的分布不一致（Covariate Shift），如何设计交叉验证？
 > **答**：
@@ -404,3 +924,8 @@ print("✅ 所有损失函数数值测试均通过验证！")
 ### Q3：为什么说最小化 MAE 比 MSE 更适合存在大量错误标记（Label Noise）的回归任务？
 > **答**：
 > 因为 MSE 会将离群点的巨大残差进行平方放大，导致模型被少数几个具有大标注错误的噪声样本“绑架”，过度扭曲模型拟合方向；而 MAE 的惩罚上限是线性的，对应的最优解是条件中位数，中位数对单侧尾部的极端噪声拥有天然的崩溃点（Breakdown Point）免疫力。
+
+### Q4：在极度不平衡业务中，为什么即便 ROC-AUC 达到 0.98，模型上线后查准率依然可能崩溃？
+> **答**：
+> 核心根源在于假阳率公式 $\text{FPR} = \frac{\text{FP}}{\text{TN} + \text{FP}}$。当负样本基数极大（如正负比 1:1000）时，巨大的 $\text{TN}$ 会稀释分母，使得即便模型产生了大量误报（例如 $\text{FP} = 1000$ 对比 $\text{TP} = 50$），$\text{FPR}$ 依然仅有千分之几，ROC 曲线显得极为优异。然而在实际业务中，查准率 $\text{Precision} = \frac{\text{TP}}{\text{TP} + \text{FP}} = \frac{50}{1050} \approx 4.76\%$，导致人工审核资源被海量误报完全瘫痪。因此极端不平衡场景必须以 **PR-AUC（Average Precision）** 或 **Precision@k** 作为核心评估基准。
+
