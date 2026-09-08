@@ -359,6 +359,9 @@ def compute_joint_vae_loss(
 
 ## Module 4: Comprehensive Evaluation Metrics Framework & Vectorized Implementations
 
+```ml-metrics-demo
+```
+
 ### 1. Landscape of Top 10 Evaluation Metrics
 
 | Metric Family | Metric Name | Mathematical Definition / Formula | Ideal Use Cases | Pitfalls & Failure Modes |

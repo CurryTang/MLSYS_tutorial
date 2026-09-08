@@ -1294,6 +1294,54 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: /ML Coding 00 · ML 基础：数据预处理、数据泄露与经典损失函数/i })).toBeInTheDocument();
   });
 
+  it('renders the interactive ML metrics lab in ML Coding 00 note and switches tabs', async () => {
+    globalThis.fetch.mockImplementation(async (input) => {
+      const requestUrl = decodeURIComponent(String(input));
+      return {
+        ok: true,
+        text: async () => {
+          if (requestUrl.includes('MLCoding00') && requestUrl.endsWith('.en.md')) {
+            return '# ML Coding 00 · ML Basics: Data Preprocessing, Data Leakage & Loss Functions\n\n```ml-metrics-demo\n```';
+          }
+          if (requestUrl.includes('MLCoding00')) {
+            return '# ML Coding 00 · ML 基础：数据预处理、数据泄露与经典损失函数\n\n```ml-metrics-demo\n```';
+          }
+          return '# Default note';
+        },
+      };
+    });
+
+    window.location.hash = '#MLCoding00%20ML%20Basics%20Data%20Preprocessing%20Loss%20Functions.md';
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /混淆矩阵、ROC\/PR 双曲线与校准业务代价全景/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /双曲线与混淆矩阵/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /概率校准 \(ECE \/ Brier\)/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Top-k 与业务损失曲面/i })).toBeInTheDocument();
+
+    // Verify presence of confusion matrix & metrics
+    expect(screen.getByText(/TP \(真正例\)/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/ROC-AUC/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/PR-AUC \(AP\)/i).length).toBeGreaterThan(0);
+
+    // Switch to Calibration tab
+    fireEvent.click(screen.getByRole('button', { name: /概率校准 \(ECE \/ Brier\)/i }));
+    expect(screen.getByText(/校准温度系数/i)).toBeInTheDocument();
+    expect(screen.getByText(/Reliability Diagram/i)).toBeInTheDocument();
+    expect(screen.getByText(/ECE =/i)).toBeInTheDocument();
+
+    // Switch to Business Cost tab
+    fireEvent.click(screen.getByRole('button', { name: /Top-k 与业务损失曲面/i }));
+    expect(screen.getByText(/Top-k 审核容量/i)).toBeInTheDocument();
+    expect(screen.getByText(/当前预期损失/i)).toBeInTheDocument();
+    expect(screen.getByText(/全局最优 k\*/i)).toBeInTheDocument();
+
+    // Toggle language to English
+    fireEvent.click(screen.getByRole('button', { name: 'English' }));
+    expect(await screen.findByRole('heading', { name: /Confusion Matrix, Dual ROC\/PR Curves & Cost Frontier/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Top-k & Business Cost/i })).toBeInTheDocument();
+  });
+
   it('routes directly to ML Coding 00B and ML Coding 01B via URL hash and renders them properly', async () => {
     // 1. Test MLCoding00B
     window.location.hash = '#MLCoding00B%20LLM%20Basics%20Decoder%20Only%20Precision%20Alignment%20Distillation.md';

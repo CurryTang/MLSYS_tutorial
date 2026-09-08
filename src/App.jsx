@@ -9120,6 +9120,715 @@ function FWLGeometryVisual() {
   );
 }
 
+function mathErf(x) {
+  const sign = x >= 0 ? 1 : -1;
+  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+  const t = 1.0 / (1.0 + p * Math.abs(x));
+  const y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+  return sign * y;
+}
+
+function mathNormCdf(x) {
+  return 0.5 * (1 + mathErf(x / Math.SQRT2));
+}
+
+function MLMetricsInteractiveVisual() {
+  const { isEnglish, t } = useUiCopy();
+  const [activeTab, setActiveTab] = useState('curves'); // 'curves' | 'calibration' | 'business'
+  const [threshold, setThreshold] = useState(0.50);
+  const [prevalence, setPrevalence] = useState(0.10); // Positive class ratio: 0.5, 0.10, 0.01, 0.002
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [temperature, setTemperature] = useState(1.0); // Calibration temperature
+  const [topK, setTopK] = useState(60); // Top-k capacity
+  const [costFN, setCostFN] = useState(500); // Cost of missed anomaly ($)
+  const [costFP, setCostFP] = useState(25);  // Cost of false alarm ($)
+
+  // Threshold sweep animation
+  useEffect(() => {
+    if (!isPlaying) return;
+    const interval = setInterval(() => {
+      setThreshold((prev) => {
+        let next = prev + 0.02;
+        if (next > 0.94) next = 0.06;
+        return parseFloat(next.toFixed(2));
+      });
+    }, 180);
+    return () => clearInterval(interval);
+  }, [isPlaying]);
+
+  // Synthetic Score Model:
+  // Positive scores ~ N(1.2, 1.0), Negative scores ~ N(-1.2, 1.0)
+  // Theoretical ROC-AUC = normCdf(2.4 / sqrt(2)) ~ 0.955 (invariant to prevalence)
+  const totalN = 1000;
+  const posCount = Math.max(1, Math.round(totalN * prevalence));
+  const negCount = totalN - posCount;
+
+  const zCurrent = Math.log(Math.max(0.01, Math.min(0.99, threshold)) / (1 - Math.max(0.01, Math.min(0.99, threshold))));
+  const curTpr = Math.max(0.001, Math.min(0.999, 1 - mathNormCdf(zCurrent - 1.2)));
+  const curFpr = Math.max(0.001, Math.min(0.999, 1 - mathNormCdf(zCurrent + 1.2)));
+
+  const curTP = Math.round(posCount * curTpr);
+  const curFP = Math.round(negCount * curFpr);
+  const curFN = Math.max(0, posCount - curTP);
+  const curTN = Math.max(0, negCount - curFP);
+
+  const curPrecision = curTP / Math.max(1, curTP + curFP);
+  const curRecall = curTpr;
+  const curF1 = (2 * curPrecision * curRecall) / Math.max(0.0001, curPrecision + curRecall);
+  const curF2 = (5 * curPrecision * curRecall) / Math.max(0.0001, 4 * curPrecision + curRecall);
+  const curBalAcc = (curTpr + (1 - curFpr)) / 2;
+
+  // Precompute 60 curve points for smooth SVG plotting
+  const curvePoints = useMemo(() => {
+    const pts = [];
+    for (let i = 0; i <= 60; i++) {
+      const tau = 0.01 + (i / 60) * 0.98;
+      const z = Math.log(tau / (1 - tau));
+      const tpr = Math.max(0, Math.min(1, 1 - mathNormCdf(z - 1.2)));
+      const fpr = Math.max(0, Math.min(1, 1 - mathNormCdf(z + 1.2)));
+      const tp = posCount * tpr;
+      const fp = negCount * fpr;
+      const prec = tp / Math.max(1e-6, tp + fp);
+      pts.push({ tau, tpr, fpr, prec, recall: tpr });
+    }
+    return pts;
+  }, [posCount, negCount]);
+
+  // Approximate PR-AUC via trapezoidal integration on Recall
+  const prAuc = useMemo(() => {
+    const sorted = [...curvePoints].sort((a, b) => a.recall - b.recall);
+    let area = 0;
+    for (let i = 1; i < sorted.length; i++) {
+      const dRecall = sorted[i].recall - sorted[i - 1].recall;
+      const avgPrec = (sorted[i].prec + sorted[i - 1].prec) / 2;
+      area += Math.max(0, dRecall * avgPrec);
+    }
+    return Math.min(0.99, Math.max(prevalence, area));
+  }, [curvePoints, prevalence]);
+
+  // SVG dimensions for ROC and PR curves
+  const svgW = 280;
+  const svgH = 220;
+  const pLeft = 36;
+  const pBottom = 185;
+  const pRight = 260;
+  const pTop = 22;
+  const pWidth = pRight - pLeft;
+  const pHeight = pBottom - pTop;
+
+  // ROC Path
+  const rocPathD = useMemo(() => {
+    // Sort by FPR ascending
+    const sorted = [...curvePoints].sort((a, b) => a.fpr - b.fpr);
+    let d = `M ${pLeft} ${pBottom}`;
+    sorted.forEach((pt) => {
+      const x = pLeft + pt.fpr * pWidth;
+      const y = pBottom - pt.tpr * pHeight;
+      d += ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
+    });
+    d += ` L ${pRight} ${pTop}`;
+    return d;
+  }, [curvePoints, pWidth, pHeight, pLeft, pBottom, pRight, pTop]);
+
+  // ROC Area Path
+  const rocAreaD = `${rocPathD} L ${pRight} ${pBottom} Z`;
+
+  // PR Path
+  const prPathD = useMemo(() => {
+    // Sort by recall ascending
+    const sorted = [...curvePoints].sort((a, b) => a.recall - b.recall);
+    let d = `M ${pLeft} ${(pBottom - Math.max(0.01, sorted[0]?.prec || 1) * pHeight).toFixed(1)}`;
+    sorted.forEach((pt) => {
+      const x = pLeft + pt.recall * pWidth;
+      const y = pBottom - pt.prec * pHeight;
+      d += ` L ${x.toFixed(1)} ${y.toFixed(1)}`;
+    });
+    return d;
+  }, [curvePoints, pWidth, pHeight, pLeft, pBottom]);
+
+  // PR Area Path
+  const prAreaD = `${prPathD} L ${pRight} ${pBottom} L ${pLeft} ${pBottom} Z`;
+
+  // Current operating points
+  const rocCurX = pLeft + curFpr * pWidth;
+  const rocCurY = pBottom - curTpr * pHeight;
+  const prCurX = pLeft + curRecall * pWidth;
+  const prCurY = pBottom - curPrecision * pHeight;
+  const prBaseY = pBottom - prevalence * pHeight;
+
+  // Tab 2: Calibration / Reliability Calculations (10 bins)
+  const calibBins = useMemo(() => {
+    const weights = [0.08, 0.12, 0.15, 0.14, 0.12, 0.10, 0.09, 0.08, 0.07, 0.05];
+    return weights.map((w, m) => {
+      const conf = 0.05 + m * 0.10;
+      // Model distorted by temperature T: z = logit(conf) * T
+      const logitVal = Math.log(conf / (1 - conf));
+      const acc = 1 / (1 + Math.exp(-logitVal * temperature));
+      const gap = Math.abs(acc - conf);
+      return { binIdx: m, conf, acc, gap, weight: w };
+    });
+  }, [temperature]);
+
+  const eceValue = useMemo(() => {
+    return calibBins.reduce((acc, b) => acc + b.weight * b.gap, 0);
+  }, [calibBins]);
+
+  const brierScore = useMemo(() => {
+    return eceValue * 0.45 + 0.05 + 0.02 * Math.abs(temperature - 1.0);
+  }, [eceValue, temperature]);
+
+  // Tab 3: Top-k Capacity and Business Cost Curve
+  const costCurveData = useMemo(() => {
+    const pts = [];
+    let minCost = Infinity;
+    let bestK = 50;
+    for (let kVal = 10; kVal <= 250; kVal += 5) {
+      const hits = Math.min(kVal, Math.min(posCount, Math.round(posCount * (1 - Math.exp(-2.5 * Math.pow(kVal / totalN, 0.65))))));
+      const missed = posCount - hits;
+      const falseAlarm = kVal - hits;
+      const totalCost = missed * costFN + falseAlarm * costFP;
+      if (totalCost < minCost) {
+        minCost = totalCost;
+        bestK = kVal;
+      }
+      pts.push({ kVal, totalCost, hits, missed, falseAlarm });
+    }
+    return { pts, minCost, bestK };
+  }, [posCount, totalN, costFN, costFP]);
+
+  const currentTopKHits = Math.min(topK, Math.min(posCount, Math.round(posCount * (1 - Math.exp(-2.5 * Math.pow(topK / totalN, 0.65))))));
+  const currentCost = (posCount - currentTopKHits) * costFN + (topK - currentTopKHits) * costFP;
+  const currentPrecAtK = currentTopKHits / Math.max(1, topK);
+  const currentRecallAtK = currentTopKHits / Math.max(1, posCount);
+
+  return (
+    <section className="ml-metrics-container" aria-label={t('机器学习评估指标与样本不平衡交互实验室', 'ML Evaluation Metrics & Class Imbalance Interactive Lab')}>
+      <header className="ml-metrics-header">
+        <div>
+          <p className="eyebrow">{t('评估指标与决策几何实验室', 'Evaluation Metrics & Decision Geometry Lab')}</p>
+          <h2>{t('混淆矩阵、ROC/PR 双曲线与校准业务代价全景', 'Confusion Matrix, Dual ROC/PR Curves & Cost Frontier')}</h2>
+        </div>
+
+        <div className="ml-metrics-controls">
+          <div className="ml-metrics-tab-group" role="tablist">
+            <button
+              type="button"
+              className={`ml-metrics-tab-btn ${activeTab === 'curves' ? 'active' : ''}`}
+              onClick={() => { setActiveTab('curves'); }}
+            >
+              {t('双曲线与混淆矩阵', 'ROC/PR & Confusion Matrix')}
+            </button>
+            <button
+              type="button"
+              className={`ml-metrics-tab-btn ${activeTab === 'calibration' ? 'active' : ''}`}
+              onClick={() => { setActiveTab('calibration'); setIsPlaying(false); }}
+            >
+              {t('概率校准 (ECE / Brier)', 'Calibration & ECE')}
+            </button>
+            <button
+              type="button"
+              className={`ml-metrics-tab-btn ${activeTab === 'business' ? 'active' : ''}`}
+              onClick={() => { setActiveTab('business'); setIsPlaying(false); }}
+            >
+              {t('Top-k 与业务损失曲面', 'Top-k & Business Cost')}
+            </button>
+          </div>
+
+          {activeTab === 'curves' && (
+            <button
+              type="button"
+              className="ml-metrics-chip-btn"
+              style={{ padding: '0.35rem 0.65rem', fontWeight: 600 }}
+              onClick={() => setIsPlaying(!isPlaying)}
+            >
+              {isPlaying ? t('⏸ 暂停扫描', '⏸ Pause') : t('▶ 自动扫描阈值', '▶ Sweep Threshold')}
+            </button>
+          )}
+        </div>
+      </header>
+
+      {/* Mode 1: Dual Curves & Confusion Matrix */}
+      {activeTab === 'curves' && (
+        <>
+          {/* Controls Bar: Prevalence Preset & Threshold Slider */}
+          <div className="ml-metrics-control-bar">
+            <div className="ml-metrics-slider-wrap">
+              <span>{t('正类先验比例 (Prevalence π):', 'Positive Prevalence (π):')}</span>
+              <div style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className={`ml-metrics-chip-btn ${prevalence === 0.50 ? 'active' : ''}`}
+                  onClick={() => setPrevalence(0.50)}
+                >
+                  50% {t('均衡', 'Balanced')}
+                </button>
+                <button
+                  type="button"
+                  className={`ml-metrics-chip-btn ${prevalence === 0.10 ? 'active' : ''}`}
+                  onClick={() => setPrevalence(0.10)}
+                >
+                  10% {t('适度偏斜', 'Moderate')}
+                </button>
+                <button
+                  type="button"
+                  className={`ml-metrics-chip-btn ${prevalence === 0.01 ? 'active' : ''}`}
+                  onClick={() => setPrevalence(0.01)}
+                >
+                  1% {t('罕见风控', 'Rare Fraud')}
+                </button>
+                <button
+                  type="button"
+                  className={`ml-metrics-chip-btn ${prevalence === 0.002 ? 'active' : ''}`}
+                  onClick={() => setPrevalence(0.002)}
+                >
+                  0.2% {t('极度不平衡', 'Extreme')}
+                </button>
+              </div>
+            </div>
+
+            <div className="ml-metrics-slider-wrap">
+              <span>{t('决策阈值 τ:', 'Decision Threshold τ:')}</span>
+              <strong style={{ color: '#38bdf8', minWidth: '2.8rem' }}>{threshold.toFixed(2)}</strong>
+              <input
+                type="range"
+                min="0.05"
+                max="0.95"
+                step="0.01"
+                value={threshold}
+                onChange={(e) => { setThreshold(Number(e.target.value)); setIsPlaying(false); }}
+                style={{ width: '130px', accentColor: '#38bdf8' }}
+              />
+            </div>
+          </div>
+
+          {/* Dynamic 2x2 Confusion Matrix */}
+          <div className="ml-cm-grid">
+            <div className="ml-cm-card ml-cm-tp">
+              <div className="ml-cm-header">
+                <span className="ml-cm-tag">TP (真正例)</span>
+                <span className="ml-cm-formula">TPR = TP/P = {(curTpr * 100).toFixed(1)}%</span>
+              </div>
+              <div className="ml-cm-count">{curTP}</div>
+              <div className="ml-cm-bar-wrap">
+                <div className="ml-cm-bar" style={{ width: `${curTpr * 100}%`, background: '#10b981' }} />
+              </div>
+            </div>
+
+            <div className="ml-cm-card ml-cm-fp">
+              <div className="ml-cm-header">
+                <span className="ml-cm-tag">FP (假正例 / 误报)</span>
+                <span className="ml-cm-formula">FPR = FP/N = {(curFpr * 100).toFixed(1)}%</span>
+              </div>
+              <div className="ml-cm-count">{curFP}</div>
+              <div className="ml-cm-bar-wrap">
+                <div className="ml-cm-bar" style={{ width: `${curFpr * 100}%`, background: '#f59e0b' }} />
+              </div>
+            </div>
+
+            <div className="ml-cm-card ml-cm-fn">
+              <div className="ml-cm-header">
+                <span className="ml-cm-tag">FN (假负例 / 漏报)</span>
+                <span className="ml-cm-formula">FNR = FN/P = {((1 - curTpr) * 100).toFixed(1)}%</span>
+              </div>
+              <div className="ml-cm-count">{curFN}</div>
+              <div className="ml-cm-bar-wrap">
+                <div className="ml-cm-bar" style={{ width: `${(1 - curTpr) * 100}%`, background: '#f43f5e' }} />
+              </div>
+            </div>
+
+            <div className="ml-cm-card ml-cm-tn">
+              <div className="ml-cm-header">
+                <span className="ml-cm-tag">TN (真负例)</span>
+                <span className="ml-cm-formula">TNR = TN/N = {((1 - curFpr) * 100).toFixed(1)}%</span>
+              </div>
+              <div className="ml-cm-count">{curTN}</div>
+              <div className="ml-cm-bar-wrap">
+                <div className="ml-cm-bar" style={{ width: `${(1 - curFpr) * 100}%`, background: '#64748b' }} />
+              </div>
+            </div>
+          </div>
+
+          {/* Synchronized Dual SVG Curves: ROC vs PR */}
+          <div className="ml-svg-grid">
+            {/* ROC Curve Chart */}
+            <div className="ml-chart-box">
+              <div className="ml-chart-header">
+                <span style={{ fontWeight: 700, color: '#38bdf8' }}>ROC Curve (TPR vs. FPR)</span>
+                <span className="ml-badge-pill" style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8' }}>
+                  AUC = 0.955 ({t('先验不变', 'Prior Invariant')})
+                </span>
+              </div>
+              <svg viewBox={`0 0 ${svgW} ${svgH}`} className="ml-demo-svg" role="img" aria-label="ROC Curve">
+                <defs>
+                  <linearGradient id="rocGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#38bdf8" stopOpacity="0.4" />
+                    <stop offset="100%" stopColor="#38bdf8" stopOpacity="0.02" />
+                  </linearGradient>
+                </defs>
+                {/* Axes and Grid */}
+                <line x1={pLeft} y1={pBottom} x2={pRight} y2={pBottom} stroke="#334155" strokeWidth="1.5" />
+                <line x1={pLeft} y1={pBottom} x2={pLeft} y2={pTop} stroke="#334155" strokeWidth="1.5" />
+                {/* Diagonal baseline (Random guess) */}
+                <line x1={pLeft} y1={pBottom} x2={pRight} y2={pTop} stroke="#475569" strokeDasharray="3 3" strokeWidth="1.2" />
+                {/* ROC Shaded Area */}
+                <path d={rocAreaD} fill="url(#rocGrad)" />
+                {/* ROC Curve Line */}
+                <path d={rocPathD} fill="none" stroke="#38bdf8" strokeWidth="2.5" strokeLinecap="round" />
+                {/* Guideline to point */}
+                <line x1={rocCurX} y1={pBottom} x2={rocCurX} y2={rocCurY} stroke="rgba(56, 189, 248, 0.5)" strokeDasharray="2 2" />
+                <line x1={pLeft} y1={rocCurY} x2={rocCurX} y2={rocCurY} stroke="rgba(56, 189, 248, 0.5)" strokeDasharray="2 2" />
+                {/* Operating Point & Pulse */}
+                <circle cx={rocCurX} cy={rocCurY} r="7" fill="none" stroke="#38bdf8" className="ml-pulse-beacon" />
+                <circle cx={rocCurX} cy={rocCurY} r="4" fill="#38bdf8" />
+                {/* Axis Labels */}
+                <text x={pLeft} y={pBottom + 16} fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">0.0</text>
+                <text x={pRight - 15} y={pBottom + 16} fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">FPR=1.0</text>
+                <text x={pLeft - 28} y={pTop + 10} fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">TPR=1</text>
+                <text x={pLeft - 28} y={pBottom} fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">0</text>
+                {/* Point label */}
+                <text x={Math.min(pRight - 80, rocCurX + 10)} y={Math.max(pTop + 18, rocCurY - 8)} fill="#e0f2fe" fontSize="11" fontWeight="700" fontFamily="IBM Plex Mono">
+                  ({curFpr.toFixed(2)}, {curTpr.toFixed(2)})
+                </text>
+              </svg>
+            </div>
+
+            {/* PR Curve Chart */}
+            <div className="ml-chart-box">
+              <div className="ml-chart-header">
+                <span style={{ fontWeight: 700, color: '#f59e0b' }}>PR Curve (Precision vs. Recall)</span>
+                <span className="ml-badge-pill" style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24' }}>
+                  PR-AUC ≈ {prAuc.toFixed(3)}
+                </span>
+              </div>
+              <svg viewBox={`0 0 ${svgW} ${svgH}`} className="ml-demo-svg" role="img" aria-label="PR Curve">
+                <defs>
+                  <linearGradient id="prGrad" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stopColor="#f59e0b" stopOpacity="0.4" />
+                    <stop offset="100%" stopColor="#f59e0b" stopOpacity="0.02" />
+                  </linearGradient>
+                </defs>
+                {/* Axes */}
+                <line x1={pLeft} y1={pBottom} x2={pRight} y2={pBottom} stroke="#334155" strokeWidth="1.5" />
+                <line x1={pLeft} y1={pBottom} x2={pLeft} y2={pTop} stroke="#334155" strokeWidth="1.5" />
+                {/* Baseline: horizontal line at y = prevalence */}
+                <line x1={pLeft} y1={prBaseY} x2={pRight} y2={prBaseY} stroke="#b45309" strokeDasharray="3 3" strokeWidth="1.2" />
+                <text x={pRight - 65} y={Math.max(pTop + 12, prBaseY - 4)} fill="#f59e0b" fontSize="9.5" fontFamily="IBM Plex Mono">
+                  Base π={prevalence}
+                </text>
+                {/* PR Shaded Area */}
+                <path d={prAreaD} fill="url(#prGrad)" />
+                {/* PR Curve Line */}
+                <path d={prPathD} fill="none" stroke="#f59e0b" strokeWidth="2.5" strokeLinecap="round" />
+                {/* Guidelines */}
+                <line x1={prCurX} y1={pBottom} x2={prCurX} y2={prCurY} stroke="rgba(245, 158, 11, 0.5)" strokeDasharray="2 2" />
+                <line x1={pLeft} y1={prCurY} x2={prCurX} y2={prCurY} stroke="rgba(245, 158, 11, 0.5)" strokeDasharray="2 2" />
+                {/* Operating Point & Pulse */}
+                <circle cx={prCurX} cy={prCurY} r="7" fill="none" stroke="#f59e0b" className="ml-pulse-beacon" />
+                <circle cx={prCurX} cy={prCurY} r="4" fill="#f59e0b" />
+                {/* Axis Labels */}
+                <text x={pLeft} y={pBottom + 16} fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">0.0</text>
+                <text x={pRight - 20} y={pBottom + 16} fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">R=1.0</text>
+                <text x={pLeft - 28} y={pTop + 10} fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">P=1</text>
+                <text x={pLeft - 28} y={pBottom} fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">0</text>
+                {/* Point label */}
+                <text x={Math.min(pRight - 80, prCurX + 10)} y={Math.max(pTop + 18, prCurY - 8)} fill="#fef3c7" fontSize="11" fontWeight="700" fontFamily="IBM Plex Mono">
+                  ({curRecall.toFixed(2)}, {curPrecision.toFixed(2)})
+                </text>
+              </svg>
+            </div>
+          </div>
+
+          {/* Real-time Metric Badges Ribbon */}
+          <div className="ml-metrics-pill-grid">
+            <div className="ml-metric-pill" style={{ borderLeft: '3px solid #38bdf8' }}>
+              <span>ROC-AUC</span>
+              <strong style={{ color: '#38bdf8' }}>0.955</strong>
+            </div>
+            <div className="ml-metric-pill" style={{ borderLeft: '3px solid #f59e0b' }}>
+              <span>PR-AUC (AP)</span>
+              <strong style={{ color: '#f59e0b' }}>{prAuc.toFixed(3)}</strong>
+            </div>
+            <div className="ml-metric-pill" style={{ borderLeft: '3px solid #10b981' }}>
+              <span>Precision</span>
+              <strong style={{ color: '#10b981' }}>{(curPrecision * 100).toFixed(1)}%</strong>
+            </div>
+            <div className="ml-metric-pill" style={{ borderLeft: '3px solid #6ee7b7' }}>
+              <span>Recall (TPR)</span>
+              <strong style={{ color: '#6ee7b7' }}>{(curRecall * 100).toFixed(1)}%</strong>
+            </div>
+            <div className="ml-metric-pill" style={{ borderLeft: '3px solid #a855f7' }}>
+              <span>F1-Score</span>
+              <strong style={{ color: '#a855f7' }}>{curF1.toFixed(3)}</strong>
+            </div>
+            <div className="ml-metric-pill" style={{ borderLeft: '3px solid #ec4899' }}>
+              <span>F2-Score (重召回)</span>
+              <strong style={{ color: '#ec4899' }}>{curF2.toFixed(3)}</strong>
+            </div>
+            <div className="ml-metric-pill" style={{ borderLeft: '3px solid #94a3b8' }}>
+              <span>Balanced Acc</span>
+              <strong style={{ color: '#cbd5e1' }}>{(curBalAcc * 100).toFixed(1)}%</strong>
+            </div>
+          </div>
+
+          {/* Educational Insight Box */}
+          <div className="ml-metrics-insight">
+            <p style={{ margin: 0 }}>
+              <strong>{t('关键机制：ROC-AUC 的排序不变性 vs. 虚假繁荣陷阱', 'Key Takeaway: ROC-AUC Rank Invariance vs. False Prosperity Trap')}</strong>：
+              {prevalence <= 0.01 ? (
+                t(
+                  `当正例先验降至 ${(prevalence * 100).toFixed(1)}% 时，负样本数高达 ${negCount} 个！即便模型产生大量误报（FP = ${curFP}），巨大的 TN 分母仍然严重稀释了 FPR (${(curFpr * 100).toFixed(1)}%)，ROC-AUC 依然虚高在 0.955；然而此时查准率 Precision 暴跌至 ${(curPrecision * 100).toFixed(1)}%，PR-AUC 缩水至 ${prAuc.toFixed(3)}。这就是极端不平衡下必须使用 PR-AUC 替代 ROC-AUC 的数学本质。`,
+                  `At ${(prevalence * 100).toFixed(1)}% prevalence, negative samples dominate (${negCount} items). Even with FP = ${curFP}, massive TN inflates the denominator, keeping FPR down at ${(curFpr * 100).toFixed(1)}% and preserving ROC-AUC at 0.955. Yet Precision plummets to ${(curPrecision * 100).toFixed(1)}% and PR-AUC shrinks to ${prAuc.toFixed(3)}. This directly illustrates the False Prosperity trap of ROC-AUC under extreme skew!`
+                )
+              ) : (
+                t(
+                  `在当前均衡设定下（正例占比 ${(prevalence * 100).toFixed(1)}%），ROC-AUC (0.955) 与 PR-AUC (${prAuc.toFixed(3)}) 高度同步。拖动“正类先验比例”切换到 1% 罕见风控，立即观察 PR 曲线如何由于巨大 TN 稀释误报而塌陷！`,
+                  `Under balanced prevalence (${(prevalence * 100).toFixed(1)}%), ROC-AUC (0.955) and PR-AUC (${prAuc.toFixed(3)}) are tightly aligned. Switch to 1% Rare Fraud above to watch the PR curve collapse as massive TN dilutes FPR!`
+                )
+              )}
+            </p>
+          </div>
+        </>
+      )}
+
+      {/* Mode 2: Calibration & Reliability Diagram */}
+      {activeTab === 'calibration' && (
+        <>
+          <div className="ml-metrics-control-bar">
+            <div className="ml-metrics-slider-wrap">
+              <span>{t('校准温度系数 (Temperature T):', 'Calibration Temperature (T):')}</span>
+              <strong style={{ color: '#c084fc', minWidth: '2.8rem' }}>{temperature.toFixed(2)}</strong>
+              <input
+                type="range"
+                min="0.40"
+                max="2.40"
+                step="0.05"
+                value={temperature}
+                onChange={(e) => setTemperature(Number(e.target.value))}
+                style={{ width: '160px', accentColor: '#c084fc' }}
+              />
+              <span style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+                {temperature < 0.85 ? t('(模型过度自信 Overconfident)', '(Overconfident)') : temperature > 1.15 ? t('(模型欠自信 Underconfident)', '(Underconfident)') : t('(近似完美校准 Calibrated)', '(Well Calibrated)')}
+              </span>
+            </div>
+          </div>
+
+          {/* 10-bin Reliability Diagram SVG */}
+          <div className="ml-chart-box" style={{ maxWidth: '640px', margin: '0 auto 0.85rem' }}>
+            <div className="ml-chart-header">
+              <span style={{ fontWeight: 700, color: '#c084fc' }}>Reliability Diagram (10 Confidence Bins vs. Empirical Accuracy)</span>
+              <span className="ml-badge-pill" style={{ background: 'rgba(192, 132, 252, 0.15)', color: '#c084fc' }}>
+                ECE = {(eceValue * 100).toFixed(2)}% | Brier = {brierScore.toFixed(3)}
+              </span>
+            </div>
+            <svg viewBox="0 0 540 250" className="ml-demo-svg" role="img" aria-label="Reliability Diagram">
+              {/* Axes */}
+              <line x1="45" y1="210" x2="510" y2="210" stroke="#334155" strokeWidth="1.5" />
+              <line x1="45" y1="210" x2="45" y2="25" stroke="#334155" strokeWidth="1.5" />
+              {/* Ideal calibration diagonal y = x */}
+              <line x1="45" y1="210" x2="510" y2="25" stroke="#64748b" strokeDasharray="3 3" strokeWidth="1.5" />
+
+              {/* Bins Rendering */}
+              {calibBins.map((b, idx) => {
+                const binW = 38;
+                const binX = 50 + idx * 46;
+                const confY = 210 - b.conf * 185;
+                const accY = 210 - b.acc * 185;
+                const gapH = Math.abs(confY - accY);
+                const gapTop = Math.min(confY, accY);
+
+                return (
+                  <g key={b.binIdx}>
+                    {/* Accuracy bar */}
+                    <rect
+                      x={binX}
+                      y={accY}
+                      width={binW}
+                      height={210 - accY}
+                      fill="rgba(56, 189, 248, 0.35)"
+                      stroke="#38bdf8"
+                      strokeWidth="1"
+                      rx="2"
+                    />
+                    {/* Gap highlight (Calibration error) */}
+                    {gapH > 2 && (
+                      <rect
+                        x={binX}
+                        y={gapTop}
+                        width={binW}
+                        height={gapH}
+                        fill="rgba(244, 63, 94, 0.45)"
+                        stroke="#f43f5e"
+                        strokeWidth="1"
+                        strokeDasharray="2 2"
+                        rx="1"
+                      />
+                    )}
+                    {/* Confidence target line marker */}
+                    <line x1={binX - 2} y1={confY} x2={binX + binW + 2} y2={confY} stroke="#c084fc" strokeWidth="2.5" />
+                    {/* Bin tick */}
+                    <text x={binX + binW / 2} y="224" fill="#94a3b8" fontSize="9" textAnchor="middle" fontFamily="IBM Plex Mono">
+                      {(b.conf).toFixed(1)}
+                    </text>
+                  </g>
+                );
+              })}
+
+              <text x="45" y="16" fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">Accuracy</text>
+              <text x="470" y="226" fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">Confidence</text>
+            </svg>
+          </div>
+
+          <div className="ml-metrics-insight">
+            <p style={{ margin: 0 }}>
+              <strong>{t('期望校准误差 (ECE) 与温度缩放原理', 'ECE & Temperature Scaling Insight')}</strong>：
+              {t(
+                `图中粉红虚线阴影区域代表置信度与真实准确率之间的校准差 |acc(B_m) - conf(B_m)|。当 T < 1 时模型对自身预测过度自信，输出 90% 概率往往只有 70% 真实命中率，ECE 显著扩大；在温度缩放（Temperature Scaling: p = σ(z / T)）调谐至 T ≈ 1 时，ECE 降至最低，为风控信贷定价提供高信度概率支撑。`,
+                `The pink dashed hatched zones quantify the calibration gap |acc(B_m) - conf(B_m)| per bin. When T < 1, the model is overconfident: predicting 90% probability with only 70% empirical hit rate, inflating ECE. Tuning T ≈ 1 via Temperature Scaling minimizes ECE, essential for risk-adjusted credit pricing.`
+              )}
+            </p>
+          </div>
+        </>
+      )}
+
+      {/* Mode 3: Top-k Truncation & Business Loss Surface */}
+      {activeTab === 'business' && (
+        <>
+          <div className="ml-metrics-control-bar">
+            <div className="ml-metrics-slider-wrap">
+              <span>{t('Top-k 审核容量 (Quota k):', 'Top-k Capacity (Quota k):')}</span>
+              <strong style={{ color: '#34d399', minWidth: '2.5rem' }}>{topK}</strong>
+              <input
+                type="range"
+                min="10"
+                max="250"
+                step="5"
+                value={topK}
+                onChange={(e) => setTopK(Number(e.target.value))}
+                style={{ width: '130px', accentColor: '#34d399' }}
+              />
+            </div>
+
+            <div className="ml-metrics-slider-wrap">
+              <span>{t('漏报单笔损失 C_FN:', 'Missed Anomaly Cost C_FN:')}</span>
+              <strong style={{ color: '#f43f5e', minWidth: '3.2rem' }}>${costFN}</strong>
+              <input
+                type="range"
+                min="100"
+                max="1000"
+                step="50"
+                value={costFN}
+                onChange={(e) => setCostFN(Number(e.target.value))}
+                style={{ width: '100px', accentColor: '#f43f5e' }}
+              />
+            </div>
+
+            <div className="ml-metrics-slider-wrap">
+              <span>{t('误报客诉成本 C_FP:', 'False Alarm Cost C_FP:')}</span>
+              <strong style={{ color: '#fbbf24', minWidth: '2.5rem' }}>${costFP}</strong>
+              <input
+                type="range"
+                min="5"
+                max="100"
+                step="5"
+                value={costFP}
+                onChange={(e) => setCostFP(Number(e.target.value))}
+                style={{ width: '90px', accentColor: '#fbbf24' }}
+              />
+            </div>
+          </div>
+
+          {/* Business Cost Curve SVG */}
+          <div className="ml-chart-box" style={{ maxWidth: '640px', margin: '0 auto 0.85rem' }}>
+            <div className="ml-chart-header">
+              <span style={{ fontWeight: 700, color: '#34d399' }}>Expected Business Cost Frontier vs. Inspection Capacity k</span>
+              <span className="ml-badge-pill" style={{ background: 'rgba(52, 211, 153, 0.15)', color: '#34d399' }}>
+                Optimal k* = {costCurveData.bestK} (${costCurveData.minCost.toLocaleString()})
+              </span>
+            </div>
+            <svg viewBox="0 0 540 220" className="ml-demo-svg" role="img" aria-label="Business Cost Curve">
+              {/* Axes */}
+              <line x1="45" y1="185" x2="510" y2="185" stroke="#334155" strokeWidth="1.5" />
+              <line x1="45" y1="185" x2="45" y2="20" stroke="#334155" strokeWidth="1.5" />
+
+              {/* Dynamic U-curve generation */}
+              {(() => {
+                const maxCost = Math.max(...costCurveData.pts.map(p => p.totalCost));
+                const minCost = costCurveData.minCost;
+                const costRange = Math.max(1, maxCost - minCost * 0.5);
+
+                const getX = (kVal) => 45 + ((kVal - 10) / 240) * 465;
+                const getY = (cost) => 185 - ((cost - minCost * 0.5) / costRange) * 155;
+
+                let d = `M ${getX(costCurveData.pts[0].kVal)} ${getY(costCurveData.pts[0].totalCost)}`;
+                costCurveData.pts.forEach(p => {
+                  d += ` L ${getX(p.kVal).toFixed(1)} ${getY(p.totalCost).toFixed(1)}`;
+                });
+
+                const curX = getX(topK);
+                const curY = getY(currentCost);
+                const optX = getX(costCurveData.bestK);
+                const optY = getY(costCurveData.minCost);
+
+                return (
+                  <>
+                    {/* Cost line */}
+                    <path d={d} fill="none" stroke="#34d399" strokeWidth="2.5" strokeLinecap="round" />
+                    {/* Optimal line */}
+                    <line x1={optX} y1="20" x2={optX} y2="185" stroke="#fbbf24" strokeDasharray="3 3" strokeWidth="1.5" />
+                    <circle cx={optX} cy={optY} r="4.5" fill="#fbbf24" />
+                    <text x={optX + 6} y="32" fill="#fbbf24" fontSize="10" fontFamily="IBM Plex Mono">
+                      k*={costCurveData.bestK}
+                    </text>
+
+                    {/* Current operating topK */}
+                    <line x1={curX} y1="20" x2={curX} y2="185" stroke="#38bdf8" strokeDasharray="2 2" strokeWidth="1.5" />
+                    <circle cx={curX} cy={curY} r="6.5" fill="none" stroke="#38bdf8" className="ml-pulse-beacon" />
+                    <circle cx={curX} cy={curY} r="4" fill="#38bdf8" />
+                    <text x={Math.min(440, curX + 8)} y={Math.max(35, curY - 10)} fill="#e0f2fe" fontSize="10.5" fontWeight="700" fontFamily="IBM Plex Mono">
+                      k={topK} (${currentCost.toLocaleString()})
+                    </text>
+                  </>
+                );
+              })()}
+              <text x="45" y="14" fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">Total Cost ($)</text>
+              <text x="470" y="200" fill="#94a3b8" fontSize="10" fontFamily="IBM Plex Mono">Quota k</text>
+            </svg>
+          </div>
+
+          <div className="ml-metrics-pill-grid">
+            <div className="ml-metric-pill" style={{ borderLeft: '3px solid #34d399' }}>
+              <span>Precision@{topK}</span>
+              <strong style={{ color: '#34d399' }}>{(currentPrecAtK * 100).toFixed(1)}%</strong>
+            </div>
+            <div className="ml-metric-pill" style={{ borderLeft: '3px solid #6ee7b7' }}>
+              <span>Recall@{topK}</span>
+              <strong style={{ color: '#6ee7b7' }}>{(currentRecallAtK * 100).toFixed(1)}%</strong>
+            </div>
+            <div className="ml-metric-pill" style={{ borderLeft: '3px solid #38bdf8' }}>
+              <span>当前预期损失</span>
+              <strong style={{ color: '#38bdf8' }}>${currentCost.toLocaleString()}</strong>
+            </div>
+            <div className="ml-metric-pill" style={{ borderLeft: '3px solid #fbbf24' }}>
+              <span>全局最优 k*</span>
+              <strong style={{ color: '#fbbf24' }}>k* = {costCurveData.bestK}</strong>
+            </div>
+          </div>
+
+          <div className="ml-metrics-insight">
+            <p style={{ margin: 0 }}>
+              <strong>{t('业务代价权衡：截断容量 k* 的凸极小值', 'Business Cost Trade-off Insight')}</strong>：
+              {t(
+                `在资源受限系统中，增大审核量 k 能挽回更多漏报损失（减少 FN 带来的单笔 $${costFN} 重罚），但会线性推高误报客诉成本（每个 FP 带来 $${costFP} 摩擦代价）。两条成本曲线叠加形成典型的 U 型凹谷，数学最优点落在 k* = ${costCurveData.bestK} 处，使预期综合业务损失降至最低 $${costCurveData.minCost.toLocaleString()}。`,
+                `In throughput-constrained systems, expanding inspection quota k salvages missed anomalies (averting $${costFN} FN losses) but linearly escalates false alarm friction ($${costFP} per FP). Combining both yields a classic convex U-curve with optimal operating quota k* = ${costCurveData.bestK}, minimizing total business loss.`
+              )}
+            </p>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 const RECORD_EXAMPLE_SPEEDS = [7, 4, 6, 2, 5, 1, 3];
 
 
@@ -22865,7 +23574,7 @@ function MartingaleRandomWalkVisual() {
 function MarkdownPre({ children, ...props }) {
   const child = Array.isArray(children) ? children[0] : children;
   const className = child?.props?.className ?? '';
-  const match = /language-(quiz|mcq|mermaid|topo-demo|bellman-demo|segment-tree-demo|interval-merge-demo|interval-insert-demo|interval-rooms-demo|interval-query-demo|pow-demo|sliding-window-demo|longest-substring-demo|sliding-window-patterns|monotonic-stack-demo|largest-rectangle-demo|binary-search-template-demo|linked-list-reversal-demo|fast-slow-pointer-demo|array-duplicate-demo|lru-cache-demo|tree-traversal-demo|avl-rotation-demo|build-tree-demo|median-two-heaps-demo|three-sum-demo|rain-water-demo|simple-sort-race-demo|efficient-sort-race-demo|high-dimensional-integral-demo|record-minimum-demo|message-queue-demo|business-algorithm-map|system-design-overview-visual|photo-sharing-architecture-visual|async-messaging-architecture-visual|virtualization-container-visual|grid-multi-source-bfs-demo|union-find-demo|quickselect-partition-demo|trie-core-demo|trie-wildcard-demo|palindrome-dp-demo|coin-change-demo|subset-sum-demo|anisotropy-cone-demo|backtracking-patterns|backtracking-tree-demo|permutations-demo|combination-sum-demo|backtracking-dedup-demo|n-queens-demo|greedy-patterns|kadane-demo|jump-game-demo|gas-station-demo|partition-labels-demo|vtable-dispatch-demo|false-sharing-demo|fork-cow-demo|epoll-vs-select-demo|shared-ptr-cycle-demo|martingale-rw-demo|random-walk-ruin-demo|brownian-motion-demo|two-d-walk-demo|ito-geometry-demo|reflection-principle-demo|delta-hedging-demo|game-theory-interactive-demo|fwl-geometry-demo)/.exec(className);
+  const match = /language-(quiz|mcq|mermaid|topo-demo|bellman-demo|segment-tree-demo|interval-merge-demo|interval-insert-demo|interval-rooms-demo|interval-query-demo|pow-demo|sliding-window-demo|longest-substring-demo|sliding-window-patterns|monotonic-stack-demo|largest-rectangle-demo|binary-search-template-demo|linked-list-reversal-demo|fast-slow-pointer-demo|array-duplicate-demo|lru-cache-demo|tree-traversal-demo|avl-rotation-demo|build-tree-demo|median-two-heaps-demo|three-sum-demo|rain-water-demo|simple-sort-race-demo|efficient-sort-race-demo|high-dimensional-integral-demo|record-minimum-demo|message-queue-demo|business-algorithm-map|system-design-overview-visual|photo-sharing-architecture-visual|async-messaging-architecture-visual|virtualization-container-visual|grid-multi-source-bfs-demo|union-find-demo|quickselect-partition-demo|trie-core-demo|trie-wildcard-demo|palindrome-dp-demo|coin-change-demo|subset-sum-demo|anisotropy-cone-demo|backtracking-patterns|backtracking-tree-demo|permutations-demo|combination-sum-demo|backtracking-dedup-demo|n-queens-demo|greedy-patterns|kadane-demo|jump-game-demo|gas-station-demo|partition-labels-demo|vtable-dispatch-demo|false-sharing-demo|fork-cow-demo|epoll-vs-select-demo|shared-ptr-cycle-demo|martingale-rw-demo|random-walk-ruin-demo|brownian-motion-demo|two-d-walk-demo|ito-geometry-demo|reflection-principle-demo|delta-hedging-demo|game-theory-interactive-demo|fwl-geometry-demo|ml-metrics-demo)/.exec(className);
 
   if (match?.[1] === 'mermaid') {
     return <MermaidDiagram chart={extractPlainText(child.props.children).replace(/\n$/, '')} />;
@@ -23125,6 +23834,10 @@ function MarkdownPre({ children, ...props }) {
 
   if (match?.[1] === 'fwl-geometry-demo') {
     return <FWLGeometryVisual />;
+  }
+
+  if (match?.[1] === 'ml-metrics-demo') {
+    return <MLMetricsInteractiveVisual />;
   }
 
   if (match) {
