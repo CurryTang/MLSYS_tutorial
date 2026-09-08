@@ -13,7 +13,7 @@ Core Mental Models for Regression Interviews:
 
 > 🧭 **Core Knowledge Landscape**
 > - **Module 1: OLS Geometry & Algebra**: Normal Equations | 5 Dimensions of Residual Orthogonality & ANOVA | Coefficients vs. Covariance | Reverse Regression Trap
-> - **Module 2: Gauss–Markov / BLUE**: The 5 Assumptions | The Normality Myth | Heteroskedasticity & Autocorrelation (White/Newey-West)
+> - **Module 2: Gauss–Markov, Statistical Inference & Core Lemma Sheet**: Estimator Properties | t/F Tests & Restricted Models | Prediction vs Confidence Intervals | LOOCV & Leverage | Measurement Errors & OVB
 > - **Module 3: Variable Selection & Shrinkage**: Best Subset | Ridge Regression | Lasso | Geometric Intuition & Comparison
 > - **Module 4: Kernel Smoothing & Local Regression**: Conditional Expectation & Essence of Kernels | Nadaraya-Watson | Boundary Bias & Local Linear | Curse of Dimensionality
 > - **Module 5: Classic Interview Question Bank (Green Book + HOTS + Top QR Loops)**: Correlation Bounds | Equicorrelated Matrix Lower Bound | Cholesky Simulation | CAPM & Reverse Regression | Affine Invariance | Omitted Variable Bias | Measurement Error | Multicollinearity & VIF | Optimal Futures Hedge Ratio | FWL Theorem & Factor Neutralization | Regression Without Intercept Trap | R² vs. Real-World IC
@@ -207,26 +207,133 @@ where $\tilde{X}_j$ is the residual from regressing $X_j$ onto all remaining pre
 
 ---
 
-## Module 2: Gauss–Markov Theorem & BLUE (ESL 3.2.2)
+## Module 2: Gauss–Markov Theorem, Statistical Inference & Core Problem-Solving Lemma Sheet
 
-The Gauss-Markov theorem states that under specific assumptions, the OLS estimator is the **Best Linear Unbiased Estimator (BLUE)**—meaning it has the minimum variance among all linear, unbiased estimators.
+The Gauss–Markov theorem along with statistical inference in Classical Normal Linear Models (CNLM) forms the foundational theoretical toolkit across quant interviews, econometrics exams, and PhD qualifiers. This module curates the essential lemmas, proofs, and algebraic identities frequently utilized in technical assessments.
 
-### 1. Gauss-Markov Assumptions
-1. **Linearity in parameters**: The true model is $y = X\beta + \varepsilon$.
-2. **Exogeneity**: The conditional mean of the errors is zero, $E[\varepsilon \mid X] = 0$.
-3. **Homoskedasticity**: The errors have constant variance, $\operatorname{Var}(\varepsilon_i \mid X) = \sigma^2$.
-4. **No serial correlation**: The errors are independent of each other.
-5. **No perfect multicollinearity**: The design matrix $X$ has full rank.
+---
 
-### 2. The Classic Interview Trap: The Normality Myth
-**"Does OLS require the error terms to be normally distributed?"**
-**Answer: No!**
-OLS is BLUE regardless of whether the errors are normal. The normality assumption is only required when conducting **exact finite-sample $t$-tests and $F$-tests**, or if you want the OLS estimator to exactly match Maximum Likelihood Estimation (MLE). Interviewers will frequently test you on this distinction.
+### 1. Gauss–Markov Assumptions & The Essence of BLUE
+The Gauss–Markov theorem states that under specific conditions, the OLS estimator is the **Best Linear Unbiased Estimator (BLUE)**—namely, among all linear unbiased estimators, OLS achieves the minimum variance (its covariance matrix difference is positive semi-definite).
 
-### 3. Consequences of Violations and Remedies
-When financial data (especially time series or cross-sectional) violates these assumptions:
-- **Heteroskedasticity / Autocorrelation**: The OLS coefficients remain **unbiased and consistent**, but the **standard errors are wrong** (they are no longer minimal). This often results in overly large $t$-statistics and spurious significance.
-- **Remedies**: Use robust standard errors. Use **White standard errors** for heteroskedasticity, and **Newey-West standard errors** when dealing with both heteroskedasticity and autocorrelation.
+1. **Linearity in Parameters**: The true model satisfies $y = X\beta + \varepsilon$;
+2. **Strict Exogeneity**: $\mathbb{E}[\varepsilon \mid X] = \mathbf{0}$;
+3. **Spherical Disturbances**:
+   - **Homoskedasticity**: $\operatorname{Var}(\varepsilon_i \mid X) = \sigma^2$;
+   - **No Autocorrelation**: $\operatorname{Cov}(\varepsilon_i, \varepsilon_j \mid X) = 0 \quad (i \ne j)$;
+   - In matrix form: $\operatorname{Var}(\varepsilon \mid X) = \sigma^2 I_N$;
+4. **No Full Multicollinearity**: $\operatorname{rank}(X) = k = p+1 \le N$.
+
+> **Classic Interview Trap: The Normality Myth**
+> **"Does OLS require normally distributed errors to be BLUE?"**
+> **Answer: NO!**
+> Normality is completely unnecessary for OLS to be BLUE. The theorem requires only first-moment (exogeneity) and second-moment (spherical errors) conditions. Normality is strictly required only for **exact finite-sample $t$-tests and $F$-tests**, and for proving that OLS achieves the Cramér–Rao Lower Bound (making it the Uniformly Minimum-Variance Unbiased Estimator, UMVUE).
+
+---
+
+### 2. Core Problem-Solving Lemma Sheet
+
+#### [Lemma 1] Fundamental Algebraic & Moment Properties of OLS
+- **Linearity**: $\hat\beta = (X^\top X)^{-1} X^\top y = C y$, where weight matrix $C = (X^\top X)^{-1} X^\top$ satisfies $C X = I_k$.
+- **Conditional Unbiasedness**:
+  $$ \mathbb{E}[\hat\beta \mid X] = \mathbb{E}[C(X\beta + \varepsilon) \mid X] = \beta + C \underbrace{\mathbb{E}[\varepsilon \mid X]}_{= \mathbf{0}} = \beta $$
+- **Conditional Covariance Matrix**:
+  $$ \operatorname{Var}(\hat\beta \mid X) = \operatorname{Var}(Cy \mid X) = C \operatorname{Var}(\varepsilon \mid X) C^\top = C (\sigma^2 I_N) C^\top = \sigma^2 (X^\top X)^{-1} $$
+  - Variance of the $j$-th coefficient: $\operatorname{Var}(\hat\beta_j \mid X) = \sigma^2 [(X^\top X)^{-1}]_{jj}$;
+  - Covariance between two coefficients: $\operatorname{Cov}(\hat\beta_j, \hat\beta_m \mid X) = \sigma^2 [(X^\top X)^{-1}]_{jm}$.
+- **Unbiased Residual Variance Estimator**:
+  $$ \hat\sigma^2 = s^2 = \frac{e^\top e}{N - k} = \frac{\sum_{i=1}^N e_i^2}{N - k} $$
+  where $N$ is sample size and $k = p+1$ is the number of estimated parameters (including intercept).
+  - **Derivation Proof (Quadratic Form Expectation Lemma)**:
+    Residuals express as $e = (I - H)y = (I - H)(X\beta + \varepsilon) = (I - H)\varepsilon$.
+    Residual sum of squares is the quadratic form $e^\top e = \varepsilon^\top (I - H) \varepsilon$.
+    Applying the expectation lemma $\mathbb{E}[\varepsilon^\top A \varepsilon] = \operatorname{tr}(A \operatorname{Var}(\varepsilon)) + \mathbb{E}[\varepsilon]^\top A \mathbb{E}[\varepsilon]$:
+    $$ \mathbb{E}[e^\top e \mid X] = \operatorname{tr}\left( (I - H) \sigma^2 I_N \right) + \mathbf{0} = \sigma^2 \operatorname{tr}(I - H) = \sigma^2 (N - \operatorname{tr}(H)) = \sigma^2 (N - k) $$
+    Dividing both sides by $N - k$ yields $\mathbb{E}[\hat\sigma^2 \mid X] = \sigma^2$.
+
+#### [Lemma 2] Statistical Inference Distributional Lemmas under Normality
+Assuming conditional normality $\varepsilon \mid X \sim \mathcal{N}(\mathbf{0}, \sigma^2 I_N)$:
+- **Independence Lemma (Core Corollary of Cochran's Theorem)**:
+  $$ \hat\beta \text{ and the sample residuals } e \text{ (and } \hat\sigma^2 \text{) are strictly statistically independent!} $$
+  **Algebraic Proof**: $\hat\beta = C y$ and $e = (I - H)y$. Their cross-covariance evaluates to:
+  $$ \operatorname{Cov}(\hat\beta, e \mid X) = C \operatorname{Var}(y \mid X) (I - H)^\top = \sigma^2 C (I - H) = \sigma^2 \left( (X^\top X)^{-1}X^\top - (X^\top X)^{-1}X^\top H \right) = \mathbf{0} $$
+  Under joint Gaussianity, zero covariance implies strict statistical independence: $\hat\beta \perp e$.
+- **Residual Sum of Squares Chi-Square Distribution**:
+  $$ \frac{e^\top e}{\sigma^2} = \frac{(N - k)\hat\sigma^2}{\sigma^2} \sim \chi^2(N - k) $$
+- **Single-Coefficient $t$-Test**:
+  Testing $H_0: \beta_j = \beta_{j,0}$ (typically testing significance $\beta_{j,0} = 0$):
+  $$ t = \frac{\hat\beta_j - \beta_{j,0}}{\operatorname{SE}(\hat\beta_j)} = \frac{\hat\beta_j - \beta_{j,0}}{\sqrt{\hat\sigma^2 [(X^\top X)^{-1}]_{jj}}} \sim t(N - k) $$
+- **Multiple Linear Restrictions $F$-Test**:
+  Testing joint hypothesis $H_0: R\beta = r$ ($q$ linear restrictions, $R$ is $q \times k$ with full row rank):
+  $$ F = \frac{(R\hat\beta - r)^\top [R(X^\top X)^{-1} R^\top]^{-1} (R\hat\beta - r) / q}{\hat\sigma^2} \sim F(q, N - k) $$
+  - **Problem-Solving Shortcut (Restricted $R$ vs. Unrestricted $UR$)**:
+    $$ F = \frac{(\operatorname{RSS}_R - \operatorname{RSS}_{UR}) / q}{\operatorname{RSS}_{UR} / (N - k)} = \frac{(R_{UR}^2 - R_R^2) / q}{(1 - R_{UR}^2) / (N - k)} $$
+  - **Overall Regression Significance Test** ($H_0: \beta_1 = \dots = \beta_p = 0$, with $q = p$):
+    $$ F = \frac{\mathrm{ESS} / p}{\mathrm{RSS} / (N - p - 1)} = \frac{R^2 / p}{(1 - R^2) / (N - p - 1)} \sim F(p, N - p - 1) $$
+  - **Equivalence of $t$ and $F$**: For a single restriction ($q=1$), $t^2 \equiv F$.
+
+#### [Lemma 3] Prediction Intervals vs. Confidence Intervals
+Given a new query point $x_0 \in \mathbb{R}^k$:
+- **Confidence Interval for Conditional Mean Response ($\mathbb{E}[y_0 \mid x_0] = x_0^\top \beta$)**:
+  Fitted point $\hat{y}_0 = x_0^\top \hat\beta$. Variance stems strictly from parameter estimation error:
+  $$ \operatorname{Var}(\hat{y}_0 \mid X) = x_0^\top \operatorname{Var}(\hat\beta \mid X) x_0 = \sigma^2 x_0^\top (X^\top X)^{-1} x_0 $$
+  $1-\alpha$ Confidence Interval: $\hat{y}_0 \pm t_{1-\alpha/2, N-k} \cdot \hat\sigma \sqrt{x_0^\top (X^\top X)^{-1} x_0}$.
+- **Prediction Interval for an Individual New Observation ($y_0 = x_0^\top \beta + \varepsilon_0$)**:
+  Prediction error $e_0 = y_0 - \hat{y}_0 = \varepsilon_0 - x_0^\top(\hat\beta - \beta)$. Because future disturbance $\varepsilon_0$ is independent of the training sample:
+  $$ \operatorname{Var}(e_0 \mid X) = \operatorname{Var}(\varepsilon_0) + \operatorname{Var}(\hat{y}_0 \mid X) = \sigma^2 \left[ 1 + x_0^\top (X^\top X)^{-1} x_0 \right] $$
+  $1-\alpha$ Prediction Interval: $\hat{y}_0 \pm t_{1-\alpha/2, N-k} \cdot \hat\sigma \sqrt{1 + x_0^\top (X^\top X)^{-1} x_0}$.
+> **Key Takeaway**: Prediction variance strictly exceeds confidence variance by $\sigma^2$ (the irreducible error variance). Hence, **prediction intervals are always strictly wider than confidence intervals**; even as $N \to \infty$, prediction interval width does not collapse to zero, remaining bounded at $\pm z_{\alpha/2}\sigma$.
+
+#### [Lemma 4] Leave-One-Out Cross-Validation & Leverage
+- **Hat Matrix Diagonal (Leverage $H_{ii}$)**:
+  $H_{ii} = x_i^\top (X^\top X)^{-1} x_i$ measures the outlier distance of point $i$ in predictor space.
+  Properties: $0 \le H_{ii} \le 1$, $\sum_{i=1}^N H_{ii} = k$, with average leverage $\bar{H} = k/N$.
+- **Leave-One-Out Residual Formula (via Sherman–Morrison Lemma)**:
+  Without retraining $N$ separate models, the out-of-fold prediction error when omitting sample $i$ is:
+  $$ e_{(-i)} = y_i - \hat{y}_{(-i)} = \frac{e_i}{1 - H_{ii}} $$
+  Yielding an exact one-step computation for LOOCV:
+  $$ \mathrm{LOOCV} = \frac{1}{N} \sum_{i=1}^N \left( \frac{e_i}{1 - H_{ii}} \right)^2 $$
+- **Sample Deletion Effect on Coefficients (Foundation of Cook's Distance)**:
+  $$ \hat\beta - \hat\beta_{(-i)} = \frac{(X^\top X)^{-1} x_i e_i}{1 - H_{ii}} $$
+
+#### [Lemma 5] Omitted Variable Bias & Irrelevant Regressors
+- **Omitted Variable Bias (OVB)**:
+  If the true data-generating process is $y = X_1 \beta_1 + X_2 \beta_2 + \varepsilon$, but $X_2$ is omitted:
+  $$ \mathbb{E}[\hat\beta_1^{\text{short}} \mid X] = \beta_1 + \underbrace{(X_1^\top X_1)^{-1} X_1^\top X_2}_{\hat\Gamma_{2 \sim 1}} \beta_2 $$
+  **Unbiasedness Condition**: The short regression is unbiased if and only if $\beta_2 = \mathbf{0}$ (omitted variables have zero true impact) or $X_1^\top X_2 = \mathbf{0}$ (omitted variables are orthogonal to included variables).
+- **Including Irrelevant Variables (Overfitting)**:
+  If the true model does not contain $X_2$ ($\beta_2 = \mathbf{0}$), but $X_2$ is erroneously included:
+  - $\hat\beta_1^{\text{long}}$ **remains unbiased** ($\mathbb{E}[\hat\beta_1^{\text{long}}] = \beta_1$);
+  - But variance inflates: $\operatorname{Var}(\hat\beta_1^{\text{long}}) \ge \operatorname{Var}(\hat\beta_1^{\text{short}})$, with equality holding if and only if $X_1 \perp X_2$.
+
+#### [Lemma 6] Measurement Error (Errors-in-Variables / Attenuation Bias)
+- **Regressor Measurement Error (Attenuation Bias)**:
+  True model $y = \beta x^* + \varepsilon$, with observed $x = x^* + u$ ($u \sim (0, \sigma_u^2)$ independent of $x^*, \varepsilon$):
+  $$ \operatorname{plim}_{N \to \infty} \hat\beta = \beta \cdot \frac{\sigma_{x^*}^2}{\sigma_{x^*}^2 + \sigma_u^2} < \beta $$
+  **Takeaway**: Noise in independent variables attenuates the coefficient estimate toward zero (systematic underestimation).
+- **Dependent Variable Measurement Error**:
+  If observed $y = y^* + v$ ($v$ independent of $x$), $\hat\beta$ **remains unbiased and consistent**, only inflating error variance to $\sigma^2 + \sigma_v^2$ and reducing statistical power.
+
+#### [Lemma 7] Scale & Affine Invariance
+- **Predictor Rescaling**: If $x_{\text{new}} = c \cdot x$, then $\hat\beta_{\text{new}} = \frac{1}{c} \hat\beta$;
+- **Target Rescaling**: If $y_{\text{new}} = d \cdot y$, then $\hat\beta_{\text{new}} = d \cdot \hat\beta$;
+- **Centering / Shifting**: Adding constants to $x$ or $y$ leaves the slope $\hat\beta$ **strictly invariant**, altering only the intercept $\hat\alpha$;
+- **Invariance**: Non-zero affine scaling and shifts leave **$t$-statistics, $F$-statistics, $R^2$, and $p$-values completely unchanged**.
+
+---
+
+### 3. Violations of Assumptions & Remedies (White / Newey–West / GLS)
+When empirical financial data violates Gauss–Markov conditions:
+- **Heteroskedasticity / Autocorrelation**:
+  OLS remains unbiased and consistent, but ceases to be BLUE. Standard errors computed via $\sigma^2(X^\top X)^{-1}$ are severely underestimated, generating spurious significance.
+- **Remedies**:
+  1. **White Heteroskedasticity-Consistent Standard Errors (HC0 / Sandwich Estimator)**:
+     $$ \operatorname{Var}_{\text{White}}(\hat\beta) = (X^\top X)^{-1} \left( \sum_{i=1}^N e_i^2 x_i x_i^\top \right) (X^\top X)^{-1} $$
+  2. **Newey–West Heteroskedasticity and Autocorrelation Consistent (HAC)**:
+     Incorporates a Bartlett lag-decay kernel to handle serial autocorrelation in financial time series.
+  3. **Generalized Least Squares (GLS / WLS, Aitken's Theorem)**:
+     If error covariance $\operatorname{Var}(\varepsilon \mid X) = \sigma^2 \boldsymbol{\Omega}$ is known, pre-multiplying by $P = \boldsymbol{\Omega}^{-1/2}$ yields the BLUE estimator:
+     $$ \hat\beta_{\text{GLS}} = (X^\top \boldsymbol{\Omega}^{-1} X)^{-1} X^\top \boldsymbol{\Omega}^{-1} y $$
 
 ---
 
