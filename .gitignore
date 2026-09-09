@@ -25,6 +25,7 @@ dist-ssr
 
 # Local planning artifacts
 docs/plans/
+scratch/
 
 # Notes publishing control: keep drafts local until ready
 notes/Mlsys/*

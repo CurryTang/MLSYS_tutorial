@@ -24205,6 +24205,18 @@ function normalizeObsidianMarkdown(markdownText) {
     return `*Embedded asset not found: ${alias || prettyLabel(target)}*`;
   });
 
+  normalized = normalized.replace(/!\[([^\]\n]*)\]\(([^)\n]+)\)/g, (match, alt, src) => {
+    const cleanSrc = src.trim();
+    if (/^(?:https?:|\/\/|data:)/i.test(cleanSrc)) {
+      return match;
+    }
+    const mediaUrl = resolveMediaUrl(cleanSrc);
+    if (mediaUrl) {
+      return `![${alt}](${mediaUrl})`;
+    }
+    return match;
+  });
+
   normalized = normalized.replace(/\[\[([^\]\n]+)\]\]/g, (_, body) => {
     const { target, alias } = splitObsidianTarget(body);
     if (!target) {
@@ -24840,6 +24852,11 @@ function App() {
                           {children}
                         </code>
                       ),
+                      img: ({ src, alt, ...props }) => {
+                        const cleanSrc = src?.trim() ?? '';
+                        const resolvedSrc = (cleanSrc && resolveMediaUrl(cleanSrc)) || cleanSrc;
+                        return <img src={resolvedSrc} alt={alt} loading="lazy" {...props} />;
+                      },
                     }}
                   >
                     {normalizedSelectedContent}
