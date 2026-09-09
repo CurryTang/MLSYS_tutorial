@@ -1,6 +1,6 @@
 # System Design 09 · Consistent Hashing
 
-Course Location: [[SystemDesign08 LLM Async RL Platform|08 Async LLM RL Platform]] → This Article → [[SystemDesign99 Glossary|99 High-Frequency Terms]]
+Course Location: [[SystemDesign06 Async Messaging Systems|06 Message Queue]] → this note → [[SystemDesign07 Photo Sharing Feed|07 Photo Sharing and Feed]]
 
 > [!info] Key Takeaway
 > Consistent hashing solves routing stability in dynamic clusters: when nodes are added or removed, only a small number of keys need to change their assigned nodes. It does not provide data consistency, nor does it automatically handle replication, migration, or failure recovery.
@@ -15,8 +15,7 @@ Course Location: [[SystemDesign08 LLM Async RL Platform|08 Async LLM RL Platform
 4. [[#IV. Engineering Implementation Requires More Than Just a Ring]]
 5. [[#V. Where Is It Used]]
 6. [[#VI. What It Does Not Solve]]
-7. [[#VII. How to Answer in an Interview]]
-8. [[#VIII. Self-Test Questions]]
+7. [[#VII. Self-Test Questions]]
 
 ---
 
@@ -213,15 +212,9 @@ When nodes change, most entities are still handled by the original worker, prese
 | Range queries | Hashing destroys the original order of keys |
 | Multi-key transactions | Related keys may fall on different nodes, requiring co-location strategies or distributed transactions |
 
-If you only draw a ring in an interview, you are usually missing four things: virtual nodes, replication, membership, and migration.
+In real engineering implementations, just drawing a ring is insufficient. You are usually missing four things: virtual nodes, replication, membership, and migration.
 
-## VII. How to Answer in an Interview
-
-You can use the following as a two-minute version:
-
-> Consistent hashing places nodes and keys in the same hash space, where a key is handled by the first node encountered clockwise. Its advantage over `hash(key) % N` is that when nodes are added or removed, it only affects adjacent intervals, so most keys do not need to change nodes. In engineering, virtual nodes are typically added to improve load distribution, supplemented by replication, membership configuration versions, failure detection, and data migration. It is suitable for distributed caching, KV sharding, and request routing that requires maintaining local state, but it does not solve hot keys, strong consistency, or replication issues on its own.
-
-## VIII. Self-Test Questions
+## VII. Self-Test Questions
 
 1. Why does `hash(key) % N` cause a large number of keys to change ownership during scaling?
 2. When a ring node is added, which intervals of keys need to be migrated?

@@ -1,0 +1,9 @@
+.llmtrainlab/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.venv/
+dist/
+build/
+.DS_Store

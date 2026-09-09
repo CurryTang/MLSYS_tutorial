@@ -1,0 +1,16 @@
+apiVersion: llmtrainlab.io/v1
+kind: LLMJob
+metadata:
+  name: llama-c
+  namespace: team-b
+spec:
+  team: team-b
+  priority: 10
+  workers: 4
+  gpusPerWorker: 1
+  gpuType: H100
+  steps: 200
+  checkpointEvery: 50
+  requireRdma: true
+  preferSameRack: true
+  qos: experiment

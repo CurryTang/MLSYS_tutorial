@@ -1,19 +1,31 @@
-# System Design 02 · Database Fundamentals: Paradigms
+# System Design 02 · Database
 
-Course Location: [[SystemDesign01B Virtualization Containers|01B Virtualization and Containers]] → This Section → [[SystemDesign03 Database Scaling|03 Database Scaling]]
+Course Location: [[SystemDesign01D Redis|01D Redis]] → This Section → [[SystemDesign04 Storage Systems|04 Storage Systems]]
 
-When choosing a database, consider two things first: which business invariants must be atomically satisfied, and what are the system's most critical access paths? The product name comes later.
+When choosing a database, consider two things first: which business invariants must be atomically satisfied, and what are the system's most critical access paths. The product name comes later.
 
 ```text
 transaction boundary -> correctness
-access pattern        -> data layout and indexes
+access pattern       -> data layout and indexes
 ```
 
-Claims like "SQL cannot scale" or "NoSQL has no transactions" are too simplistic. Modern products have overlapping capabilities; the differences lie in their default data models, transaction boundaries, and scaling costs.
+"SQL cannot scale" or "NoSQL has no transactions" are too simplistic. Modern products have overlapping capabilities; the differences lie in default models, transaction boundaries, and scaling costs.
+
+| API | Unit | Example |
+|---|---|---|
+| SQL | row / txn | Postgres, MySQL |
+| KV get/put | key | Dynamo, Redis-as-DB (usually wrong) |
+| Document | doc by id | Mongo |
+| Wide-column | partition + clustering | Cassandra |
+| Graph | vertex/edge walk | Neo4j |
 
 ---
 
-## 1 · RDBMS: Expressing Relationships and Constraints First
+
+## 1 · RDBMS vs NoSQL
+
+
+## RDBMS: Expressing Relationships and Constraints First
 
 The relational model organizes data into rows and tables, expressing invariants through primary keys, foreign keys, unique constraints, and transactions.
 
@@ -31,22 +43,13 @@ WHERE account_id = 2;
 COMMIT;
 ```
 
-The point of this code is not the SQL syntax, but that the two balance changes belong to the same commit boundary. If any step fails, the entire transfer must not leave behind a partial state.
+If any step fails, the entire transfer must not leave behind a partial state. 
+The costs are direct: cross-node transactions, joins, and global constraints are difficult to scale.
 
-RDBMS is suitable when:
 
-- Relationships between entities are dense;
-- Invariants frequently span across rows or tables;
-- Query patterns are diverse and subject to future change;
-- Mature secondary indexes, joins, and ad-hoc queries are required.
+## NoSQL: Organizing Data Around Access Patterns First
 
-The costs are also direct: cross-node transactions, joins, and global constraints are difficult to scale as the number of shards increases.
-
----
-
-## 2 · NoSQL: Organizing Data Around Access Patterns First
-
-NoSQL is not a single type of database. KV, document, wide-column, and graph models differ, but many systems share an emphasis on partition-local access.
+NoSQL emphasizes partition-local access.
 
 ```text
 GetUser(user_id)
@@ -54,7 +57,7 @@ ListOrders(user_id, created_at range)
 GetFeed(viewer_id, cursor)
 ```
 
-When modeling, first select the partition key and sort key for these reads. To ensure a single request hits one partition, data may be denormalized:
+To ensure a single request hits one partition, data may be denormalized:
 
 ```json
 {
@@ -64,20 +67,23 @@ When modeling, first select the partition key and sort key for these reads. To e
 }
 ```
 
-When a city is renamed, multiple documents may need to be updated. Reads become simpler, but the costs of writes and consistency increase.
+Reads become simpler, but writes and consistency costs increase.
+If the partition key is chosen incorrectly, hot keys, scans, and cross-partition transactions will emerge.
 
-Common advantages of NoSQL:
 
-- Simple single-key / single-partition paths;
-- Data can be horizontally distributed by partition;
-- Schema is more flexible for sparse or evolving fields;
-- Latency and throughput are easier to plan around fixed access patterns.
+## Scenarios
 
-It is not a tool to avoid modeling. If the partition key is chosen incorrectly, hot keys, scans, and cross-partition transactions will emerge.
+| Scenario | Recommendation | Reason |
+|---|---|---|
+| Orders / Ledger | RDBMS | Dense relationships, strong invariants |
+| Profile by `user_id` | KV / Document | Fetched by ID, flexible schema |
+| Feed Timeline | Sorted KV | Partitioned by viewer, time-sorted |
+| Logs and Events | Log system | High-throughput append, not OLTP |
 
 ---
 
-## 3 · Transactions are the Boundaries of Business Invariants
+
+## 2 · Transactions, Locks, 2PC
 
 ACID can be remembered as follows:
 
@@ -97,11 +103,18 @@ username must be unique
 inventory cannot fall below zero
 ```
 
-If these conditions must be satisfied atomically across multiple entities, a relational database or a distributed SQL system supporting such transactions is often less of a headache. If the process can be broken down into a state machine and accept eventual consistency, an event-driven workflow may also be appropriate.
+Enforcing invariants requires concurrency control:
+- **Pessimistic lock**: Blocks concurrent reads/writes; introduces queuing and deadlocks.
+- **Optimistic lock**: Uses versioning, validates on commit. Efficient when conflicts are rare.
+- **Unique constraint**: Prevents duplication via primary keys, acting as a highly practical idempotency tool. Key choice and in-flight duplicates: [[SystemDesign01 Stateless Service|01]].
 
-### Do not mix database transactions with business workflows
+When spanning independent nodes:
+- **2PC (Two-Phase Commit)**: Uses coordinator and participants. If the coordinator dies after prepare, participants block. Never span untrusted networks or HTTP-to-Stripe calls across 2PC.
+- **Saga / Compensation**: Reverts applied steps by executing compensating operations when databases cannot be shared.
 
-A single-database transaction usually finishes within milliseconds. An order process spanning a payment provider, inventory, and shipping may last for minutes; you cannot hold a database connection open that long.
+
+## Local vs Workflow
+A single-database transaction usually finishes within milliseconds.
 
 ```text
 local transaction
@@ -111,13 +124,14 @@ local transaction
   -> compensation when needed
 ```
 
-Such processes maintain business consistency through idempotency, state machines, outboxes, and compensation. For message details, see [[SystemDesign06 Async Messaging Systems|06 Async Messaging Systems]].
+See [[SystemDesign06 Async Messaging Systems|06 Async Messaging Systems]].
 
 ---
 
-## 4 · What Strong and Eventual Consistency Mean
 
-Consistency must be bound to specific operations.
+## 3 · Consistency per API
+
+Consistency must be bound to specific operations. Idempotency in [[SystemDesign01 Stateless Service|01]] keeps invariants true under retry. This axis is: after a successful write, which read sees it.
 
 ```text
 User updates profile to v2
@@ -125,132 +139,218 @@ User immediately reads profile
 ```
 
 Possible contracts:
+- **Linearizable read**: Acts as if there is only one latest copy.
+- **Read-your-writes**: The user can read their own writes.
+- **Monotonic read**: Once v2 is seen, it will not revert to v1.
+- **Eventual consistency**: Replicas eventually converge.
 
-- Linearizable read: Acts as if there is only one latest copy;
-- Read-your-writes: The user can at least read their own v2;
-- Monotonic read: Once v2 is seen, it will not revert to v1;
-- Eventual consistency: Replicas eventually converge when there are no new writes.
-
-A single system can mix these. Read the primary for order confirmation pages, read replicas for public product pages, and allow stale data for recommendation features. Rather than declaring a system "strongly consistent," it is more useful to clearly define the contract for each API.
-
-For replication lag, failover, and RPO/RTO, see [[SystemDesign05 Reliability Replication|05 Reliability and Replication]].
+Mix these in the same system: read primary for order confirmation, read replica for public product pages.
 
 ---
 
-## 5 · Six Questions to Ask During Selection
 
-### 1. What is the basic unit of read/write?
+## 4 · Scale reads: replica
+
+The primary receives writes, and replicas replicate the primary's data.
 
 ```text
-single key?
-document?
-partition + range?
-graph traversal?
-multi-row relation?
+Client write -> Primary
+Client read  -> Replica 1 / Replica 2
 ```
 
-### 2. Can the most important queries be satisfied directly by primary keys or indexes?
+All modifications go to the primary.
 
-If every feed requires a full table scan followed by filtering, changing the database name won't save it. Write out the queries and indexes first.
 
-### 3. How wide is the transaction scope?
+## Core Mechanism
 
-Costs increase progressively from single-row, single-document, and single-partition to cross-partition. Keep strong invariants within the same transaction boundary whenever possible.
+```text
+Client -> Primary: write request
+Primary -> Primary: execute mutation
+Primary -> Binlog: append change event
+Replica -> Binlog: pull changes after known position
+Replica -> Relay Log: write relay log
+Replica -> Replica: replay relay log
+```
 
-### 4. How is data partitioned?
+Read/write splitting distributes read traffic. 
+This prevents slow queries and backups from dragging down the primary.
 
-The partition key determines locality, parallelism, and hotspots. A low-cardinality country code is often not uniform enough; hash(user_id) is more balanced but makes regional scanning more difficult.
 
-### 5. Which reads allow stale data?
+## Replication Lag
+Asynchronous replication causes stale reads:
 
-Stale reads can utilize replicas, caches, and materialized views. Permissions, balances, and inventory deductions usually require more caution.
+```text
+User changes name -> Write to Primary succeeds
+User reads immediately -> Routed to lagging Replica
+Page shows old name
+```
 
-### 6. Where is the operational complexity placed?
+You trade strong consistency for read capacity. Read-your-writes requires pinning reads to the primary.
 
-The relational model places complexity in the database engine and query planner; the access-pattern-first model places more complexity in the application write path, denormalization, and data repair. There are no free options.
+Common handling strategies:
+
+| Scenario | Strategy |
+| --- | --- |
+| Read own writes immediately | Read-your-writes: Force read from primary for a short time |
+| Brief stale data acceptable | Read from replica |
+| Critical path requiring consistency | Read from primary after write, or use synchronous replication |
+| Replica lag is severe | Remove lagging replica from read pool |
+
+
+
+## Concurrency and DB QPS
+**User QPS != DB QPS** (one API request may hit the DB many times).
+Estimate concurrency using Little's Law: 
+```text
+concurrency ≈ QPS × latency
+```
+Replicas scale read capacity, not write capacity.
 
 ---
 
-## 6 · Design Centers of Common Products
 
-| System Type | Design Center | Common Use Case |
+## 5 · Scale writes/capacity: shard
+
+Replication saves multiple copies; partitioning saves different data.
+
+```text
+Replication: Every machine has a complete copy
+Sharding: Every machine only saves a portion of the data
+```
+
+
+## Basic Idea
+
+```text
+user_id % 4 = 0  ->  Shard 0
+user_id % 4 = 1  ->  Shard 1
+user_id % 4 = 2  ->  Shard 2
+user_id % 4 = 3  ->  Shard 3
+```
+
+Each machine is responsible for a portion of users, distributing capacity and write pressure.
+
+
+## Sharding Key
+A good sharding key must be:
+1. Frequently included in queries (else broadcast to all shards).
+2. Uniformly distributed (hot keys ≠ uniform keys).
+3. Minimize cross-shard joins and transactions.
+
+```text
+Query -> Shard 0 / Shard 1 / Shard 2 / Shard 3
+All Shards -> Merge / Sort / Aggregate -> Response
+```
+Cross-shard operations are incredibly expensive.
+
+
+## Multi-Primary
+Multi-primary replication gives multiple write endpoints (active-active) but does not double write capacity because all nodes must replicate all writes eventually.
+
+---
+
+
+## 6 · Together: Shard + Replica
+
+Primary-replica replication is often performed within each shard:
+
+```text
+Query Router
+  -> Shard 0 Primary -> Replica A / Replica B
+  -> Shard 1 Primary -> Replica C / Replica D
+  -> Shard 2 Primary -> Replica E / Replica F
+```
+
+- Capacity and write scaling from sharding;
+- Read scaling, backups, and HA from replication.
+
+---
+
+
+## 7 · Survive a failure
+
+
+## Failure Domains
+```text
+process
+  < machine
+  < rack / power domain
+  < availability zone
+  < region
+```
+Determine which level of failure the system must survive.
+
+
+## Failover and Fencing
+```text
+1. Failure detector suspects primary is unavailable (Timeout ≠ death)
+2. Threshold reached
+3. Select a fresh replica
+4. Fence the old primary
+5. Promote new primary, update routing
+6. Restore traffic
+```
+
+The goal of fencing is to ensure the old node cannot write. You must fence the old primary (using epoch / lease / STONITH) before routing. If both write, split brain occurs.
+
+
+## Modes
+- **Active-Passive**:
+
+| Standby | What it does normally | Switchover Speed | Cost |
+|---|---|---|---|
+| Cold | Only backups and deployment templates | Minutes to hours | Low |
+| Warm | Instance running, data syncing, capacity may be smaller | Tens of seconds to minutes | Medium |
+| Hot | Full capacity online, data near real-time sync | Seconds | High |
+
+- **Active-Active**: Same-row writes are the hard part; single-writer ownership is preferred.
+- **Quorum (N/W/R)**: `W + R > N` ensures intersection, but does not provide linearizability by itself.
+
+
+## Replicas are not Backups
+Replicas rapidly copy deletions. Backups (snapshots / WAL) are to go back in time.
+- **RPO** (Recovery Point Objective): Acceptable data loss window.
+- **RTO** (Recovery Time Objective): How quickly service must be restored.
+
+Multi-AZ is the first step. Multi-region requires new failure/latency targets.
+
+---
+
+
+## 8 · Short Choice Table
+
+| Requirement | Start With | Cost |
 |---|---|---|
-| PostgreSQL / MySQL | relation, constraint, transaction | order, account, metadata |
-| Dynamo-style KV / document | partition key, predictable access path | profile, session, serving KV |
-| Cassandra-style wide column | partition + clustering order, high write throughput | time series, event, timeline |
-| MongoDB-style document | aggregated document, flexible fields | content, catalog, profile |
-| Spanner-style distributed SQL | distributed transaction + SQL | global metadata, strongly consistent business data |
-| Graph database | vertex / edge traversal | fraud graph, relationship exploration |
-
-This table is only a starting point. Ultimately, you must check specific product versions, transaction scopes, indexes, region topologies, backups, and team operational capabilities.
+| Read-heavy | Primary + read replicas | Lag, read-your-writes |
+| Write-heavy | Shard | Cross-shard queries |
+| Single-row invariant | KV / Document | Lack of relations |
+| Cross-row invariant | RDBMS | Write bottlenecks |
+| Global low-latency write | Partition ownership / Active-active | Conflicts, fencing |
 
 ---
 
-## 7 · Typical Judgments
 
-### Orders and Payments
+## 9 · Sources
 
-Start with an RDBMS. Order status, amounts, idempotency keys, and accounting constraints require reliable transactions. Once the scale grows, offload search, analytics, and event streams.
+- [PostgreSQL Documentation](https://www.postgresql.org/docs/)
+- [MySQL Replication](https://dev.mysql.com/doc/refman/8.0/en/replication.html)
+- [MongoDB Sharding](https://www.mongodb.com/docs/manual/sharding/)
+- [Dynamo: Amazon's Highly Available Key-value Store](https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf)
+- [Cassandra - A Decentralized Structured Storage System](https://www.cs.cornell.edu/projects/ladis2009/papers/lakshman-ladis2009.pdf)
+- [Spanner: Google's Globally-Distributed Database](https://static.googleusercontent.com/media/research.google.com/en//archive/spanner-osdi2012.pdf)
+- [Vitess: Database Clustering System for MySQL](https://vitess.io/)
 
-### User Profile
 
-If reads are primarily by user_id, a document/KV store is natural; if the profile is densely related to permissions, organizations, and billing, an RDBMS might be simpler.
 
-### Feed Timeline
 
-Partitioning by viewer_id and sorting by rank_key or time is suitable for wide-column / sorted KV stores. The timeline is a derived index; post metadata can still reside in a relational or document store.
 
-### Logs and Events
 
-High-throughput appends, time-based retention, and replays are more like a log system and should not be forced into an OLTP table. Move to a search or analytical store when querying is required.
 
-### Financial Ledgers
 
-Prioritize immutable entries, double-entry balancing, unique transaction IDs, and auditing. Do not sacrifice transaction semantics just because write volume is high.
 
----
 
-## 8 · Data Can Be Split, But Don't Split Too Early
 
-A mature system is often polyglot persistence:
 
-```text
-RDBMS          authoritative order metadata
-Redis          hot cache
-Object store   blobs
-Event log      change propagation
-Search index   text retrieval
-Warehouse      analytics
-```
 
-This does not mean you need six systems on day one. Every additional store adds a new set of schemas, backups, permissions, monitoring, and data repair processes. Start with the simplest source of truth, and split only when access patterns or scale truly diverge.
 
----
 
-## 9 · Interview Checklist
-
-```text
-Correctness
-- Which invariants must be atomically satisfied?
-- Is the transaction single-key, single-partition, or cross-entity?
-
-Access
-- What is the top read/write path?
-- What are the indexes and partition keys?
-- Are there any scans, hot keys, or cross-partition queries?
-
-Consistency
-- Which APIs require read-your-writes?
-- Which derived data allows staleness, and for how long?
-
-Operations
-- How is data backed up and restored?
-- How are schema / index changes deployed?
-- Can the team operate the new store being introduced?
-
-Growth
-- Should we add indexes, caches, or replicas first, or is sharding already required?
-- For sharding details, see 03 Database Scaling.
-```
-
-A one-sentence summary: Use transaction boundaries to protect correctness, then use access patterns to determine data layout. The database brand is a choice made after these two questions.

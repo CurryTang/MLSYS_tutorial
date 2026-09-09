@@ -1,0 +1,15 @@
+apiVersion: llmtrainlab.io/v1
+kind: LLMJob
+metadata:
+  name: llama-urgent
+  namespace: team-c
+spec:
+  team: team-c
+  priority: 99
+  workers: 8
+  gpusPerWorker: 1
+  gpuType: H100
+  steps: 40
+  checkpointEvery: 10
+  requireRdma: true
+  qos: inference

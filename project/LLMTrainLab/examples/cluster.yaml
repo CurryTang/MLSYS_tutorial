@@ -1,0 +1,42 @@
+# Default heterogeneous lab cluster.
+# Canonical 8-slot demo overrides this with --slots 8 of a single flavor.
+
+nodes:
+  - name: node-a
+    gpu_type: A100
+    gpus: 4
+    zone: az-a
+    rack: rack-1
+    network: ethernet
+    interconnect: nvlink
+  - name: node-b
+    gpu_type: H100
+    gpus: 8
+    zone: az-a
+    rack: rack-1
+    network: rdma
+    interconnect: nvlink
+  - name: node-c
+    gpu_type: L40S
+    gpus: 2
+    zone: az-b
+    rack: rack-2
+    network: ethernet
+    interconnect: pcie
+
+teams:
+  team-a:
+    namespace: team-a
+    guaranteed_gpus: 6
+    burst_gpus: 10
+    priority: 80
+  team-b:
+    namespace: team-b
+    guaranteed_gpus: 2
+    burst_gpus: 4
+    priority: 20
+  team-c:
+    namespace: team-c
+    guaranteed_gpus: 4
+    burst_gpus: 8
+    priority: 100

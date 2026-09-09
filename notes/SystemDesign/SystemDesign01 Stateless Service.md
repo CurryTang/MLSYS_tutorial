@@ -1,6 +1,6 @@
 # System Design 01 · 无状态服务
 
-课程位置：[[SystemDesign00 Overview|00 方法总览]] → 本篇 → [[SystemDesign01B Virtualization Containers|01B 虚拟化与容器]]
+课程位置：[[SystemDesign00 Overview|00 怎么读]] → 本篇 → [[SystemDesign01B Virtualization Containers|01B 虚拟化与容器]]
 
 Stateless 不是“系统没有状态”。它指服务进程不独占任何不可丢失的状态。实例收到输入，读取外部状态，完成计算，再把结果写回共享系统或返回客户端。
 
@@ -79,7 +79,7 @@ opaque session_id
   -> user and permission context
 ```
 
-也可以使用短期签名 token，让实例本地验证身份。不过权限即时变更、强制登出和封禁仍可能需要查 version 或 revoke state。JWT 不是自动无状态的万能答案。
+也可以使用短期签名 token，让实例本地验证身份。不过权限即时变更、强制登出和封禁仍可能需要查 version 或 revoke state。JWT 并非自动无状态的完美方案。
 
 ### 文件外置
 
@@ -108,21 +108,78 @@ Worker
   -> persist result
 ```
 
-API 不记任务，worker 也不永久拥有任务。Queue 的 ack、重投和幂等统一见 [[SystemDesign06 Async Messaging Systems|06 异步消息系统]]。
+API 不记任务，worker 也不永久拥有任务。Queue 的 ack、重投见 [[SystemDesign06 Async Messaging Systems|06 异步消息系统]]。重试能安全，是因为下面的幂等设计，不是因为换了队列。
 
 ---
 
-## 4 · API 和 worker 怎样保持可替换
+## 4 · 幂等与一致性
 
-### API 使用 idempotency key
+无状态让超时和故障变成重试。重试两次若变成两笔订单，系统就不一致。幂等是设计手段；一致性是要保住的不变量。
 
-客户端超时后会重试。创建类 API 应把幂等边界落到共享存储：
+两件事先分开：
 
-```sql
-UNIQUE(user_id, idempotency_key)
+| | 问的是 | 不在这层解决 |
+|---|---|---|
+| 幂等 | 同一意图执行 N 次，可见结果是否仍是一次 | HTTP 状态码碰巧相同 |
+| 一致性（不变量） | 提交之后哪条业务规则仍成立 | 副本迟了几毫秒，见 [[SystemDesign02 Database Paradigms|02]] |
+
+```text
+payment captured at most once
+at most one order per (sale_id, user_id)
+inventory never < 0
 ```
 
-两个实例同时收到同一请求时，数据库唯一约束比“先查一下 Redis”更可靠。重复请求返回原 operation 的结果或状态。
+先写下这些句子，再选键和事务边界。不要写“系统要强一致”就停。
+
+### 幂等怎么设计
+
+自然幂等：`GET`、按 id 的 `PUT`/`DELETE`、`SET key value`。  
+不自然：`POST` 创建、`INCR`、转账、扣库存。这类必须外加键。
+
+```text
+1. 客户端生成 request_id（同一点击、同一超时重试，同一个 id）
+2. 共享存储插入 (user_id, request_id)，UNIQUE
+3. 同一事务里做业务写（建单、扣款）
+4. 再来一次：唯一键冲突 → 返回已存结果，不再写第二笔
+```
+
+```sql
+INSERT INTO idempotency (
+  user_id, request_id, status, response
+) VALUES (?, ?, 'pending', NULL);
+
+-- UNIQUE 冲突：读已有行
+-- completed → 原 response
+-- pending   → 等，或 409
+```
+
+进行中的第二发不能当“没有这回事”。只查 Redis 再决定插入，两个实例会一起通过。约束在 source of truth 上，和业务写同一事务。
+
+键选业务意图，不选 body hash：
+
+| 键 | 挡住什么 | 挡不住什么 |
+|---|---|---|
+| `request_id` | 超时重试、LB 重放 | 用户两个设备各点一次 |
+| `UNIQUE(sale_id, user_id)` | 每用户每场一单 | 同一次点击的网络重试（应用层仍要 `request_id`） |
+| payload hash | 几乎什么都挡错 | 两笔独立同金额订单被当成一次 |
+
+Redis `SET NX` / soldout 是 fast reject，不是这张表。见 [[SystemDesign01D Redis|01D]]、[[SystemDesign10 Flash Sale|10]]。
+
+### 一致性怎么设计
+
+1. 写下不变量，写到哪条 API、哪次读必须看见。  
+2. 能进同一行或同一事务的，放进一个 commit。跨库不要 2PC 到 HTTP。  
+3. 标出允许陈旧的面：商品页、cache、Redis tokens。订单确认页读 primary。  
+4. 重试路径走同一不变量：幂等键 + unique + 事务。否则 at-least-once 会写出第二笔。  
+5. 条件写补并发：`UPDATE ... WHERE version = n` 或 `balance >= 100`。失败则重读，不盲重放。
+
+副本何时可见是 [[SystemDesign02 Database Paradigms|02]] 的 read contract。队列侧 exactly-once 是效果，不是 broker 承诺，见 [[SystemDesign06 Async Messaging Systems|06]]。
+
+---
+
+## 5 · API 和 worker 怎样保持可替换
+
+创建类 API 的幂等边界在上一节。这里只补进程怎么死、怎么被换。
 
 ### Worker 使用 lease
 
@@ -152,7 +209,7 @@ compiled template
 
 ---
 
-## 5 · 部署时还有四个细节
+## 6 · 部署时还有四个细节
 
 ### Readiness 和 liveness 分开
 
@@ -186,7 +243,7 @@ API 常看 CPU、concurrency、p99 和 request queue；worker 更适合看 queue
 
 ---
 
-## 6 · “无状态”会把压力移到哪里
+## 7 · “无状态”会把压力移到哪里
 
 外置状态让计算层简单，却增加了共享依赖：
 
@@ -210,7 +267,7 @@ durable external state = correctness
 
 ---
 
-## 7 · LLM serving 的状态分层
+## 8 · LLM serving 的状态分层
 
 LLM serving 比普通 API 多了昂贵的 GPU-local state，但原则没变：
 
@@ -228,29 +285,8 @@ Paged KV cache、prefix cache、disaggregated prefill/decode 和 offload 都是�
 
 ---
 
-## 8 · 面试检查清单
+## 9 · 缓存与会话的专属组件
 
-```text
-Process loss
-- 杀掉一个实例会永久丢什么？
+Redis 是最常用来存储这些可重建状态和共享协作状态（如 session、分布式锁）的组件。详情见专篇 [[SystemDesign01D Redis|01D Redis]]。
 
-Routing
-- 请求能否落到任意健康实例？
-- affinity 是优化还是 correctness requirement？
-
-State
-- source of truth 在哪里？
-- local cache 能否重建？
-- file 和 long-running job 是否离开本机？
-
-Lifecycle
-- readiness / liveness 是否分开？
-- shutdown 是否等待 in-flight work？
-- retry 是否有幂等保护？
-
-Scaling
-- API 和 worker 用什么指标扩容？
-- 外部状态系统会不会先成为瓶颈？
-```
-
-一句话收尾：服务实例可以有内存状态，但不能独占不可恢复的业务状态。这样它才真的可替换。
+一句话收尾：服务实例可以有内存状态，但不能独占不可恢复的业务事实。状态应该外置到正确的系统中，这才是系统真正可替换、可扩展的基础。

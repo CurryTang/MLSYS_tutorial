@@ -1,6 +1,6 @@
 # System Design 99 · 高频术语整合
 
-课程位置：[[SystemDesign09 Consistent Hashing|09 一致性哈希]] → 本篇；课程入口见 [[SystemDesign00 Overview|00 方法总览]]。
+课程位置：[[SystemDesign10 Flash Sale|10 秒杀]] → 本篇；入口 [[SystemDesign00 Overview|00 怎么读]]。
 
 这页放在 System Design 的最后，作为查词和写 design doc 时的速查表。重点不是把词背下来，而是知道一个词在解决什么问题、什么时候值得引入、代价是什么。
 
@@ -95,6 +95,7 @@ concurrency ~= QPS * average latency in seconds
 | replay | 重放 | 重新处理历史消息或事件 | Kafka allows replay from an offset. |
 | offset | 消费位点 | 消费者处理到消息流的哪个位置 | Store offsets only after processing succeeds. |
 | checkpoint | 检查点 | 保存进度或状态，便于恢复 | Stream jobs checkpoint state and offsets. |
+| policy lag | 策略延迟 | 经验回放数据与当前模型版本的差异 | Monitor policy lag to avoid training on excessively stale data.
 
 ## 六、分布式事务
 
@@ -104,6 +105,7 @@ concurrency ~= QPS * average latency in seconds
 | Saga pattern | Saga 模式 | 大事务拆成多个本地事务加补偿 | Use Saga for order-payment-inventory workflows. |
 | compensating transaction | 补偿事务 | 某步失败后执行反向修正 | If inventory reservation fails after payment, issue a refund. |
 | outbox pattern | Outbox 模式 | 本地事务写业务表和 outbox 表，再异步发消息 | Outbox avoids the DB-write-succeeded-but-message-lost problem. |
+| fencing token | 防护令牌 | 防止假死旧主节点写入脏数据 | Use a fencing token to reject writes from a zombie leader.
 | CDC / Change Data Capture | 变更数据捕获 | 捕获 binlog 或 change log 推给下游 | CDC keeps search indexes and analytics stores in sync. |
 
 ## 七、缓存
@@ -222,6 +224,7 @@ concurrency ~= QPS * average latency in seconds
 | 术语 | 中文 | 用来说明什么 | 自然用法 |
 | --- | --- | --- | --- |
 | API gateway | API 网关 | 统一入口，做鉴权、限流、路由 | Put authentication and rate limiting at the gateway. |
+| request_id | 请求 ID | 贯穿全链路的唯一标识，用于去重和追踪 | Include request_id in logs and use it as an idempotency key.
 | pagination | 分页 | 大结果集分批返回 | Always paginate large list APIs. |
 | cursor-based pagination | 游标分页 | 用 cursor 继续取下一页 | Cursor pagination is better for feeds than offset pagination. |
 | versioning | API 版本管理 | v1/v2 兼容升级 | API versioning prevents breaking old clients. |
@@ -250,7 +253,29 @@ concurrency ~= QPS * average latency in seconds
 | over-engineering | 过度设计 | 为不存在的问题引入复杂系统 | Avoid over-engineering before measuring the bottleneck. |
 | premature optimization | 过早优化 | 在瓶颈出现前做复杂优化 | Start simple and optimize after measuring. |
 
-## 十六、几组常一起出现的表达
+## 十六、Kubernetes 与 LLM 训练控制面
+
+配套正文见 [[SystemDesign01C Kubernetes|01C Kubernetes]]，本地实验见 `project/LLMTrainLab/`。
+
+| 术语 | 中文 | 用来说明什么 | 自然用法 |
+| --- | --- | --- | --- |
+| Pod | 调度最小单元 | 一次 bind 的一组容器，一次性 | A training rank is one Pod; do not put two ranks in the same Pod. |
+| Deployment | 无状态滚动 | 可替换副本，不适合 NCCL 组 | Use a Deployment for inference replicas, not for the training gang. |
+| Job | 跑完就停 | 默认仍是逐 Pod 重启 | A Job with parallelism=4 is not gang scheduling. |
+| Service / Headless | 稳定 DNS | 给 rank 0 做 rendezvous | Give rank 0 a headless Service name instead of baking in an IP. |
+| Namespace | 虚拟集群边界 | 名字、默认配额、RBAC | Isolate teams in Namespaces, then put GPU quota on top. |
+| request / limit | 记账 vs 上限 | GPU 通常 request=limit | GPU extended resources are not oversubscribed. |
+| Device Plugin | 扩展资源 | kubelet 登记 nvidia.com/gpu | The scheduler sees integer GPU slots from the Device Plugin. |
+| gang scheduling | 成组调度 | 全上或全不上 | Without gang scheduling, seven workers hold GPUs while the eighth is Pending. |
+| Kueue | 批任务队列 | admit、配额、公平、抢占 | Kueue decides whether the workload may enter; the scheduler places Pods. |
+| RestartAll | 整组恢复 | 一个 rank 挂了拆掉 communicator | On worker failure, RestartAll and load the last intact checkpoint. |
+| checkpoint | 训练源真相 | RPO 由间隔决定 | Kubernetes can recreate Pods; it cannot recreate uncheckpointed steps. |
+| policy lag | 策略延迟 | 经验回放数据与当前模型版本的差异 | Monitor policy lag to avoid training on excessively stale data. |
+| layered architecture | 分层架构 | 按职责和拓扑切开系统 | Draw responsibility layers before placing them on topology. |
+| responsibility layering | 职责分层 | 每层允许做什么 | Keep stock writes out of the edge layer. |
+| topology layering | 拓扑分层 | 谁和谁一起故障 | Pin a training gang to one NVLink domain. |
+
+## 十七、几组常一起出现的表达
 
 ### 削峰填谷
 
@@ -294,7 +319,7 @@ Since the queue provides at-least-once delivery, consumers must be idempotent an
 Apply rate limiting at the edge, backpressure between services, circuit breakers for unhealthy dependencies, and graceful degradation for non-critical features.
 ```
 
-## 十七、使用这些词时先问的问题
+## 十八、使用这些词时先问的问题
 
 ```text
 这个机制解决的是读瓶颈、写瓶颈、容量瓶颈、延迟问题，还是可用性问题？

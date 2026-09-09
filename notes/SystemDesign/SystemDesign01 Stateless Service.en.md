@@ -1,6 +1,6 @@
 # System Design 01 · Stateless Services
 
-Course Location: [[SystemDesign00 Overview|00 Overview]] → This Section → [[SystemDesign01B Virtualization Containers|01B Virtualization and Containers]]
+Course Location: [[SystemDesign00 Overview|00 How to read]] → this note → [[SystemDesign01B Virtualization Containers|01B Virtualization and Containers]]
 
 "Stateless" does not mean "the system has no state." It means that a service process does not exclusively own any non-recoverable state. An instance receives input, reads external state, completes computation, and then writes the result back to a shared system or returns it to the client.
 
@@ -108,21 +108,78 @@ Worker
   -> persist result
 ```
 
-The API does not track the task, and the worker does not own the task permanently. For queue acknowledgments, retries, and idempotency, see [[SystemDesign06 Async Messaging Systems|06 Async Messaging Systems]].
+The API does not track the task, and the worker does not own the task permanently. Queue ack and redelivery: [[SystemDesign06 Async Messaging Systems|06]]. Retries are safe because of the idempotency design below, not because a queue was added.
 
 ---
 
-## 4 · Keeping APIs and Workers Replaceable
+## 4 · Idempotency and consistency
 
-### APIs Use Idempotency Keys
+Statelessness turns timeouts and crashes into retries. If two retries become two orders, the system is inconsistent. Idempotency is the mechanism. Consistency is the invariant you keep.
 
-Clients will retry after timeouts. For creation-style APIs, the idempotency boundary should be placed in shared storage:
+Keep the two questions apart:
 
-```sql
-UNIQUE(user_id, idempotency_key)
+| | Asks | Not this layer |
+|---|---|---|
+| Idempotency | Same intent, N executions, still one visible result | HTTP status happening to match |
+| Consistency (invariants) | Which business rule still holds after commit | Replica lag of a few milliseconds; see [[SystemDesign02 Database Paradigms|02]] |
+
+```text
+payment captured at most once
+at most one order per (sale_id, user_id)
+inventory never < 0
 ```
 
-When two instances receive the same request simultaneously, a database unique constraint is more reliable than "checking Redis first." Duplicate requests return the result or status of the original operation.
+Write those sentences first, then pick keys and transaction boundaries. Do not stop at “the system should be strongly consistent.”
+
+### Designing idempotency
+
+Naturally idempotent: `GET`, `PUT`/`DELETE` by id, `SET key value`.  
+Not: `POST` create, `INCR`, transfer, stock decrement. Those need a key.
+
+```text
+1. Client generates request_id (same click, same timeout retry, same id)
+2. Insert (user_id, request_id) into shared storage, UNIQUE
+3. Do the business write in the same transaction (create order, capture payment)
+4. Replay: unique conflict → return the stored result, do not write a second time
+```
+
+```sql
+INSERT INTO idempotency (
+  user_id, request_id, status, response
+) VALUES (?, ?, 'pending', NULL);
+
+-- UNIQUE conflict: read the existing row
+-- completed → original response
+-- pending   → wait, or 409
+```
+
+A second in-flight request is not “nothing happened.” Check Redis then insert, and two instances both pass. The constraint lives on the source of truth, in the same transaction as the write.
+
+Key the intent, not the body hash:
+
+| Key | Stops | Does not stop |
+|---|---|---|
+| `request_id` | Timeout retry, LB replay | Two devices, two clicks |
+| `UNIQUE(sale_id, user_id)` | One order per user per sale | Network retry of the same click (still need `request_id`) |
+| payload hash | Almost everything, wrongly | Two independent orders with the same amount |
+
+Redis `SET NX` / soldout is fast reject, not this table. See [[SystemDesign01D Redis|01D]], [[SystemDesign10 Flash Sale|10]].
+
+### Designing consistency
+
+1. Write the invariant. Name which API and which read must see it.  
+2. If it fits in one row or one transaction, one commit. Do not 2PC out to HTTP.  
+3. Mark what may be stale: product page, cache, Redis tokens. Order confirmation reads primary.  
+4. The retry path uses the same invariant: idempotency key + unique + transaction. Otherwise at-least-once writes a second fact.  
+5. Conditional writes for concurrency: `UPDATE ... WHERE version = n` or `balance >= 100`. On failure, re-read; do not blindly replay.
+
+When a replica becomes visible is the read contract in [[SystemDesign02 Database Paradigms|02]]. Exactly-once on a queue is an effect, not a broker promise; see [[SystemDesign06 Async Messaging Systems|06]].
+
+---
+
+## 5 · Keeping APIs and Workers Replaceable
+
+Idempotency for create APIs is the previous section. This section is how a process dies and is replaced.
 
 ### Workers Use Leases
 
@@ -152,7 +209,7 @@ These can be reloaded from the source of truth after an instance restarts. Updat
 
 ---
 
-## 5 · Four Deployment Details
+## 6 · Four Deployment Details
 
 ### Separate Readiness and Liveness
 
@@ -186,7 +243,7 @@ Images and configurations should be versioned. Secrets should be injected via a 
 
 ---
 
-## 6 · Where Does "Statelessness" Shift the Pressure?
+## 7 · Where Does "Statelessness" Shift the Pressure?
 
 Externalizing state simplifies the compute layer but increases shared dependencies:
 
@@ -210,7 +267,7 @@ By separating the two, the system remains fast when affinity is hit and remains 
 
 ---
 
-## 7 · State Layering in LLM Serving
+## 8 · State Layering in LLM Serving
 
 LLM serving involves expensive GPU-local state compared to standard APIs, but the principles remain the same:
 
@@ -228,29 +285,8 @@ Paged KV cache, prefix cache, disaggregated prefill/decode, and offloading are a
 
 ---
 
-## 8 · Interview Checklist
+## 9 · Dedicated Components for Cache and Session
 
-```text
-Process loss
-- What is permanently lost if an instance is killed?
+Redis is the most common component used to store these rebuildable states and shared coordination states (such as sessions and distributed locks). For details, see the dedicated note [[SystemDesign01D Redis|01D Redis]].
 
-Routing
-- Can requests be routed to any healthy instance?
-- Is affinity an optimization or a correctness requirement?
-
-State
-- Where is the source of truth?
-- Can local caches be rebuilt?
-- Are files and long-running jobs offloaded from the local machine?
-
-Lifecycle
-- Are readiness and liveness separated?
-- Does shutdown wait for in-flight work?
-- Are retries protected by idempotency?
-
-Scaling
-- What metrics are used to scale APIs and workers?
-- Will the external state system become a bottleneck?
-```
-
-In summary: Service instances can have in-memory state, but they must not exclusively own non-recoverable business state. Only then are they truly replaceable.
+In summary: Service instances can have in-memory state, but they must not exclusively own non-recoverable business facts. State should be externalized to the correct systems—this is the true foundation for a replaceable and scalable system.

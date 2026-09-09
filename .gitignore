@@ -27,6 +27,13 @@ dist-ssr
 docs/plans/
 scratch/
 
+# LLMTrainLab local simulator state / venv
+project/**/.venv/
+project/**/.llmtrainlab/
+project/**/.pytest_cache/
+project/**/*.egg-info/
+**/__pycache__/
+
 # Notes publishing control: keep drafts local until ready
 notes/Mlsys/*
 !notes/Mlsys/MLSYS Overview.md

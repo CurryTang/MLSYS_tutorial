@@ -1,6 +1,6 @@
 # System Design 09 · 一致性哈希
 
-课程位置：[[SystemDesign08 LLM Async RL Platform|08 异步 LLM RL 平台]] → 本篇 → [[SystemDesign99 Glossary|99 高频术语]]
+课程位置：[[SystemDesign06 Async Messaging Systems|06 消息队列]] → 本篇 → [[SystemDesign07 Photo Sharing Feed|07 图片分享与 Feed]]
 
 > [!info] 先记一句
 > 一致性哈希解决的是动态集群里的路由稳定性：机器增加或退出时，只让少量 key 更换负责节点。它不提供数据一致性，也不会自动完成复制、迁移或故障恢复。
@@ -15,7 +15,6 @@
 4. [[#四、工程实现不能只有一个环]]
 5. [[#五、它用在哪里]]
 6. [[#六、它没有解决什么]]
-7. [[#七、面试时怎么回答]]
 ---
 
 ## 一、它在解决什么问题
@@ -210,20 +209,7 @@ stream_id  -> 某个消费 worker
 | 范围查询 | 哈希会破坏原始 key 的顺序 |
 | 多 key 事务 | 相关 key 可能落在不同节点，需要共置策略或分布式事务 |
 
-面试中如果只画一个环就结束，通常还差四件事：virtual nodes、replication、membership 和 migration。
-
-## 七、面试时怎么回答
-
-可以用下面这段作为两分钟版本：
-
-> 一致性哈希把节点和 key 放到同一个哈希空间，key 由顺时针的第一个节点负责。它相对 `hash(key) % N` 的优势是节点增加或退出时只影响相邻区间，因此大多数 key 不用换节点。工程上通常要加入虚拟节点改善负载分布，再补上副本、成员配置版本、故障检测和数据迁移。它适合分布式缓存、KV 分片以及需要保持本地状态的请求路由，但不能单独解决热 key、强一致性和复制问题。
-
-1. 为什么 `hash(key) % N` 在扩容时会让大量 key 改变归属？
-2. 增加一个环节点时，哪些区间的 key 需要迁移？
-3. 虚拟节点解决了什么问题，又增加了什么开销？
-4. 为什么一致性哈希不能保证 strong consistency？
-5. 热 key 为什么可能在 key 数量均匀时仍然压垮一个节点？
-6. Redis Cluster 为什么不属于经典的一致性哈希环？
+在实际工程实现中，如果只画一个环是不够的，通常还需要解决四件事：virtual nodes、replication、membership 和 migration。
 
 ## 延伸阅读
 

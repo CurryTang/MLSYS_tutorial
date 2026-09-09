@@ -1,6 +1,6 @@
 # System Design 99 · Glossary of High-Frequency Terms
 
-Course location: [[SystemDesign09 Consistent Hashing|09 Consistent Hashing]] → This article; for the course entry point, see [[SystemDesign00 Overview|00 Overview]].
+Course location: [[SystemDesign10 Flash Sale|10 Flash Sale]] → this note; series map: [[SystemDesign00 Overview|00 How to read]].
 
 This page is placed at the end of the System Design course as a quick-reference guide for looking up terms and writing design documents. The goal is not to memorize these terms, but to understand what problem each term solves, when it is worth introducing, and what the trade-offs are.
 
@@ -104,6 +104,7 @@ If the QPS is 10,000 and the average latency is 100 ms, there are approximately 
 | Saga pattern | Saga Pattern | Breaking large transactions into local transactions with compensation | Use Saga for order-payment-inventory workflows. |
 | compensating transaction | Compensating Transaction | Corrective action taken after a step fails | If inventory reservation fails after payment, issue a refund. |
 | outbox pattern | Outbox Pattern | Writing to a local DB and an outbox table, then sending messages asynchronously | Outbox avoids the DB-write-succeeded-but-message-lost problem. |
+| fencing token | Fencing Token | Prevents stale writes from a zombie primary | Use a fencing token to reject writes from a zombie leader.
 | CDC / Change Data Capture | Change Data Capture | Capturing binlogs or change logs to push to downstream | CDC keeps search indexes and analytics stores in sync. |
 
 ## VII. Caching
@@ -222,6 +223,7 @@ If the QPS is 10,000 and the average latency is 100 ms, there are approximately 
 | Term | Chinese | Used to describe | Natural Usage |
 | --- | --- | --- | --- |
 | API gateway | API Gateway | Unified entry point for auth, rate limiting, and routing | Put authentication and rate limiting at the gateway. |
+| request_id | Request ID | Unique identifier across the stack for deduplication and tracing | Include request_id in logs and use it as an idempotency key.
 | pagination | Pagination | Returning large result sets in batches | Always paginate large list APIs. |
 | cursor-based pagination | Cursor-based Pagination | Using a cursor to fetch the next page | Cursor pagination is better for feeds than offset pagination. |
 | versioning | API Versioning | Managing v1/v2 compatibility | API versioning prevents breaking old clients. |
@@ -250,7 +252,29 @@ If the QPS is 10,000 and the average latency is 100 ms, there are approximately 
 | over-engineering | Over-engineering | Introducing complex systems for non-existent problems | Avoid over-engineering before measuring the bottleneck. |
 | premature optimization | Premature Optimization | Optimizing before a bottleneck is identified | Start simple and optimize after measuring. |
 
-## XVI. Common Expressions
+## XVI. Kubernetes and the LLM training control plane
+
+See [[SystemDesign01C Kubernetes|01C Kubernetes]] for the full note, and `project/LLMTrainLab/` for the local lab.
+
+| Term | Chinese | Used to describe | Natural Usage |
+| --- | --- | --- | --- |
+| Pod | smallest scheduling unit | One bind for a container group; disposable | A training rank is one Pod; do not put two ranks in the same Pod. |
+| Deployment | stateless rollout | Replaceable replicas; wrong for an NCCL group | Use a Deployment for inference replicas, not for the training gang. |
+| Job | run-to-completion | Still restarts Pods independently by default | A Job with parallelism=4 is not gang scheduling. |
+| Service / Headless | stable DNS | Rank-0 rendezvous | Give rank 0 a headless Service name instead of baking in an IP. |
+| Namespace | virtual cluster boundary | Names, default quota, RBAC | Isolate teams in Namespaces, then put GPU quota on top. |
+| request / limit | ledger vs cap | GPUs usually need request=limit | GPU extended resources are not oversubscribed. |
+| Device Plugin | extended resources | kubelet registers nvidia.com/gpu | The scheduler sees integer GPU slots from the Device Plugin. |
+| gang scheduling | all-or-nothing placement | No partial occupancy | Without gang scheduling, seven workers hold GPUs while the eighth is Pending. |
+| Kueue | batch job queue | Admit, quota, fairness, preemption | Kueue decides whether the workload may enter; the scheduler places Pods. |
+| RestartAll | group recovery | Tear down the communicator if one rank dies | On worker failure, RestartAll and load the last intact checkpoint. |
+| checkpoint | source of truth for training | RPO is the checkpoint interval | Kubernetes can recreate Pods; it cannot recreate uncheckpointed steps. |
+| policy lag | policy lag | The difference between experience replay data and current model version | Monitor policy lag to avoid training on excessively stale data. |
+| layered architecture | 分层架构 | Cut a system by duty and by placement | Draw responsibility layers before placing them on topology. |
+| responsibility layering | 职责分层 | What each layer may do | Keep stock writes out of the edge layer. |
+| topology layering | 拓扑分层 | What fails together | Pin a training gang to one NVLink domain. |
+
+## XVII. Common Expressions
 
 ### Load Leveling
 
@@ -294,7 +318,7 @@ Since the queue provides at-least-once delivery, consumers must be idempotent an
 Apply rate limiting at the edge, backpressure between services, circuit breakers for unhealthy dependencies, and graceful degradation for non-critical features.
 ```
 
-## XVII. Questions to Ask When Using These Terms
+## XVIII. Questions to Ask When Using These Terms
 
 ```text
 Does this mechanism solve a read bottleneck, write bottleneck, capacity bottleneck, latency issue, or availability issue?

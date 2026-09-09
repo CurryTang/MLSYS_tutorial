@@ -645,916 +645,6 @@ $$
 `
   : '';
 
-const systemDesignDbScalingContent = String.raw`# System Design 03 · 数据库扩展三件套
-
-课程位置：[[SystemDesign02 Database Paradigms|02 数据库基本范式]] → 本篇 → [[SystemDesign04 Storage Systems|04 存储系统]]
-
-这篇只从数据库扩展角度讨论三件事：读压力如何分给 replica，写入和容量如何分片，以及两者怎样组合。故障检测、fencing、热备、跨区 RPO/RTO 统一放在 [[SystemDesign05 Reliability Replication|05 可靠性与复制]]，这里不重复讲容灾流程。
-
-## 0. 基础概念：QPS、IOPS、吞吐和延迟
-
-做数据库扩展题之前，先把几个指标说清楚。很多面试回答的问题不是“方案错了”，而是没有先估算系统到底卡在 CPU、网络、磁盘、数据库连接数，还是单机容量。
-
-### 0.1 QPS / RPS / TPS
-
-QPS 是 queries per second，通常表示每秒查询数。RPS 是 requests per second，通常表示服务每秒请求数。TPS 是 transactions per second，常用于数据库事务或支付交易。
-
-它们经常接近，但不完全一样：
-
-| 指标 | 常见含义 | 例子 |
-| --- | --- | --- |
-| RPS | 服务入口请求数 | API Gateway 每秒收到 10k 个 HTTP request |
-| QPS | 查询请求数 | Search service 每秒处理 20k 次 query |
-| TPS | 成功事务数 | Payment service 每秒完成 500 笔交易 |
-| DB QPS | 数据库查询次数 | 一个 API 请求打 5 次 DB，则 DB QPS 可能是 API RPS 的 5 倍 |
-
-一个常见坑：
-
-~~~text
-用户 QPS != 数据库 QPS
-
-1 个 API request
-  -> 读 user profile
-  -> 读 feature flags
-  -> 查订单列表
-  -> 写 audit log
-
-入口 RPS = 1
-DB operations = 4
-DB QPS 约等于 4
-~~~
-
-### 0.2 Throughput、Latency 和 Concurrency
-
-Throughput 是单位时间完成多少工作；latency 是单个请求花多久；concurrency 是同一时刻有多少请求在系统内。
-
-三者可以用 Little's Law 做粗估：
-
-$$
-\text{concurrency} \approx \text{QPS} \times \text{latency}
-$$
-
-注意 latency 要换成秒。
-
-例子：
-
-~~~text
-QPS = 10,000 requests/s
-平均 latency = 100 ms = 0.1 s
-
-系统内平均并发请求数约为:
-10,000 * 0.1 = 1,000
-~~~
-
-这说明即使每秒 1 万请求，如果每个请求在系统里停留 100ms，系统同时要承载大约 1000 个 in-flight requests。
-
-记忆图：
-
-~~~mermaid
-flowchart LR
-  A["QPS: 每秒进来多少"] --> D["Concurrency: 同时在系统里多少"]
-  B["Latency: 每个请求待多久"] --> D
-  D --> C["线程 / 连接 / 队列 / 内存压力"]
-~~~
-
-### 0.3 平均 QPS 和峰值 QPS
-
-日活、月活、请求总量通常只能给平均 QPS。系统设计时要估峰值。
-
-一天有：
-
-$$
-24\times 60\times 60 = 86400 \approx 10^5
-$$
-
-所以：
-
-$$
-\text{avg QPS} \approx \frac{\text{daily requests}}{10^5}
-$$
-
-峰值通常可以粗略乘一个系数：
-
-~~~text
-peak QPS = avg QPS * peak factor
-
-普通业务: peak factor 3~5
-明显潮汐业务: peak factor 5~10
-秒杀/热点事件: 可能 10~100+
-~~~
-
-例子：
-
-~~~text
-每天 1 亿次请求
-avg QPS ≈ 100,000,000 / 100,000 = 1,000
-
-如果 peak factor = 5
-peak QPS ≈ 5,000
-~~~
-
-面试里更重要的是说明假设，而不是死背某个倍数。
-
-### 0.4 IOPS 和磁盘带宽
-
-IOPS 是 input/output operations per second，表示存储系统每秒能处理多少次 I/O 操作。它主要用于估算随机读写压力。
-
-Bandwidth / throughput 表示每秒能传多少数据，常用于大块顺序读写。
-
-| 指标 | 关注点 | 典型瓶颈 |
-| --- | --- | --- |
-| IOPS | 每秒多少次读写操作 | 小块随机读写、索引 lookup、KV get |
-| Bandwidth | 每秒多少 MB/GB | 扫描大文件、备份、日志传输 |
-| Latency | 单次 I/O 等多久 | tail latency、同步写路径 |
-
-一个粗略估算：
-
-$$
-\text{required IOPS}
-\approx
-\text{QPS} \times \text{I/O ops per request}
-$$
-
-如果每个请求需要 3 次随机读、1 次随机写：
-
-~~~text
-API peak QPS = 5,000
-I/O per request = 4
-
-required IOPS ≈ 20,000
-~~~
-
-如果每个请求还要读取 20KB 数据，那么网络或磁盘带宽约为：
-
-$$
-\text{bandwidth} \approx \text{QPS} \times \text{bytes per request}
-$$
-
-~~~text
-5,000 QPS * 20 KB ≈ 100 MB/s
-~~~
-
-这两个估算回答的是不同问题：
-
-~~~text
-小对象随机读很多:
-  看 IOPS
-
-大对象连续读很多:
-  看 bandwidth
-~~~
-
-### 0.5 常见容量估算模板
-
-#### 存储容量
-
-~~~text
-daily data = daily writes * average record size
-retention storage = daily data * retention days * replication factor
-~~~
-
-例子：
-
-~~~text
-每天 1 亿条 event
-每条 500 bytes
-保留 30 天
-3 副本
-
-raw daily data = 100,000,000 * 500B = 50GB/day
-total storage ≈ 50GB * 30 * 3 = 4.5TB
-~~~
-
-#### 数据库读写拆分
-
-~~~text
-read QPS = total QPS * read ratio
-write QPS = total QPS * write ratio
-replica count ≈ read QPS / safe read QPS per replica
-~~~
-
-例子：
-
-~~~text
-peak QPS = 20,000
-读写比 = 90% read, 10% write
-
-read QPS = 18,000
-write QPS = 2,000
-
-如果单个 replica 安全承载 4,000 read QPS
-至少需要 5 个 read replicas
-~~~
-
-#### Cache 命中后端压力
-
-~~~text
-backend QPS = total QPS * (1 - cache hit rate)
-~~~
-
-例子：
-
-~~~text
-total QPS = 100,000
-cache hit rate = 95%
-
-backend QPS = 100,000 * 5% = 5,000
-~~~
-
-这就是为什么高 QPS 系统里，cache hit rate 从 95% 掉到 90% 会很严重：后端压力直接翻倍。
-
-#### 队列和 worker 数
-
-如果任务平均处理时间是 $T$ 秒，每个 worker 一次处理一个任务，那么单 worker 吞吐约为：
-
-$$
-\text{worker throughput} \approx \frac{1}{T}
-$$
-
-所需 worker 数：
-
-$$
-\text{workers} \approx \text{arrival QPS} \times T
-$$
-
-例子：
-
-~~~text
-每秒进入 200 个任务
-每个任务平均处理 0.5 秒
-
-需要并发 worker ≈ 200 * 0.5 = 100
-~~~
-
-### 0.6 面试里怎么用这些数字
-
-系统设计里，估算不是为了精确，而是为了决定架构方向。
-
-~~~mermaid
-flowchart TD
-  A["估 QPS / storage / bandwidth / IOPS"] --> B{"单机能否承受"}
-  B -->|读压力大| C["replica / cache / read pool"]
-  B -->|写压力大| D["partition / queue / batch"]
-  B -->|容量大| E["sharding / cold storage / retention"]
-  B -->|延迟高| F["index / cache / async / locality"]
-  B -->|峰值高| G["autoscale / rate limit / backpressure"]
-~~~
-
-一个比较稳的回答顺序：
-
-~~~text
-1. 先估入口 QPS 和峰值 QPS。
-2. 再估每个请求会打多少 DB / cache / storage。
-3. 把入口 QPS 转成后端 QPS、IOPS 和 bandwidth。
-4. 判断读瓶颈、写瓶颈、容量瓶颈还是延迟瓶颈。
-5. 再选择复制、分片、缓存、队列或异步化。
-~~~
-
----
-
-## 0.7 先判断压力来自哪里
-
-数据库扩展题不要一上来就说“加缓存”或“上分片”。先判断系统瓶颈：
-
-~~~mermaid
-flowchart TD
-  A["数据库压力"] --> B{"主要压力是什么"}
-  B -->|读请求太多| C["主从复制 + 读写分离"]
-  B -->|主库不可用风险| D["主主 / 主备 / 自动故障切换"]
-  B -->|写请求太多| E["数据分区 / Sharding"]
-  B -->|数据量太大| E
-  C --> F["代价: replication lag / stale read"]
-  D --> G["代价: 冲突处理 / failover 复杂"]
-  E --> H["代价: 跨分片查询 / rebalancing / hot shard"]
-~~~
-
-可以先记住一句：
-
-| 模式 | 解决什么 | 不解决什么 |
-| --- | --- | --- |
-| 主从复制 | 读扩展、为故障接管保留副本 | 不扩展主库写入能力，也不代替 backup |
-| 主主复制 | 多个写入口或更灵活的接管 | 不让写入能力线性翻倍，还会引入冲突 |
-| 数据分区 | 容量扩展、写入扩展、索引变小 | 增加查询路由和跨分片复杂度 |
-
----
-
-## 1. 主从复制：这里先解决读扩展
-
-主从复制的基本结构是：
-
-~~~text
-Primary / Master  ->  Replica / Slave
-~~~
-
-主库接收写入，从库复制主库数据。所有会修改数据的操作都进入主库：
-
-~~~text
-INSERT
-UPDATE
-DELETE
-CREATE TABLE
-ALTER TABLE
-~~~
-
-从库通常不直接接收业务写入，而是跟随主库的变更日志更新本地数据。
-
-### 1.1 复制链路怎么工作
-
-以 MySQL 为例，主从复制的核心是 binlog。主库执行数据修改后，会把变更写进 binary log；从库持续拉取主库 binlog 的增量，写入 relay log，再在本地重放这些操作。
-
-~~~mermaid
-sequenceDiagram
-  participant C as Client
-  participant P as Primary
-  participant B as Binlog
-  participant R as Replica
-  participant L as Relay Log
-
-  C->>P: write request
-  P->>P: execute mutation
-  P->>B: append change event
-  R->>B: pull changes after known position
-  R->>L: write relay log
-  R->>R: replay relay log
-~~~
-
-本质上是三步：
-
-~~~text
-主库记录变更；
-从库拉取变更；
-从库本地重放变更。
-~~~
-
-### 1.2 主从复制的用途
-
-主从复制最常见的用途有四个。
-
-第一，读写分离。写请求走主库，读请求分摊到多个从库：
-
-~~~text
-Write  -> Primary
-Read   -> Replica 1 / Replica 2 / Replica 3
-~~~
-
-例如：
-
-| 请求 | 路由 |
-| --- | --- |
-| 用户浏览商品 | Replica |
-| 用户查看订单列表 | Replica |
-| 用户修改地址 | Primary |
-| 用户下单付款 | Primary |
-
-这适合读多写少系统。需要强调：主从复制扩展的是读能力，不是写能力。
-
-第二，查询隔离。不同从库可以承担不同类型的读任务：
-
-~~~text
-Replica 1: 线上普通查询
-Replica 2: 报表查询
-Replica 3: 备份任务
-~~~
-
-这样慢查询、报表、备份不直接拖垮主库。
-
-第三，零停机备份。主库继续服务线上请求，从库执行备份任务。
-
-第四，从库故障转移。某个从库挂了，可以从读流量池摘掉，请求转向其他副本。
-
-### 1.3 核心代价：复制延迟
-
-主从复制通常是异步的。主库完成写入后可以先返回成功，不必等待所有从库都重放完成。
-
-这会带来 stale read：
-
-~~~text
-用户把昵称 Alice 改成 Bob
-  -> 写入 Primary 成功
-  -> 用户立刻刷新页面
-  -> 读请求被路由到 Replica
-  -> Replica 还没同步
-  -> 页面仍显示 Alice
-~~~
-
-所以主从复制的核心 trade-off 是：
-
-~~~text
-提高读取能力和可用性；
-但读副本可能短暂落后。
-~~~
-
-常见处理方式：
-
-| 场景 | 策略 |
-| --- | --- |
-| 刚写完立刻读自己的数据 | read-your-writes：短时间强制读主库 |
-| 可接受短暂旧数据 | 读从库 |
-| 强一致关键路径 | 写主库后读主库，或使用同步复制/多数派协议 |
-| 副本落后严重 | 从读池摘掉落后 replica |
-
----
-
-## 2. 主主复制：理解写拓扑，不把它当写入翻倍
-
-主从复制里，主库是唯一写入口。主库挂了以后，需要选新主库、切流量、处理旧主库恢复后的状态。主主复制把两个节点都做成可写节点：
-
-~~~text
-Primary A  <->  Primary B
-~~~
-
-A 的写入复制到 B，B 的写入也复制到 A。这通常用于双机热备。
-
-~~~mermaid
-flowchart LR
-  C["Client"] --> A["Primary A"]
-  C --> B["Primary B"]
-  A -->|replicate changes| B
-  B -->|replicate changes| A
-~~~
-
-### 2.1 如何避免复制循环
-
-如果 A 的写入复制到 B，B 又原样复制回 A，就会无限循环。MySQL 复制里每台服务器有 server-id，变更日志会记录事件来源。
-
-因此：
-
-~~~text
-A 产生事件 e
-  -> B 收到 e
-  -> B 看到 e 来自 A
-  -> B 不再把 e 当作自己的新事件复制回 A
-~~~
-
-### 2.2 为什么它不等于写扩展
-
-主主复制看起来有两个主库，但并不意味着写入能力翻倍。原因是两个节点最终都要保存完整数据集，也都要执行对方复制来的写入。
-
-写到 A：
-
-~~~text
-Client -> A
-A 执行写入
-A 写 binlog
-B 拉取并重放
-~~~
-
-写到 B：
-
-~~~text
-Client -> B
-B 执行写入
-B 写 binlog
-A 拉取并重放
-~~~
-
-最终 A 和 B 都要承担完整数据、完整索引、完整存储和复制写入。因此主主复制更适合被理解为高可用方案，而不是水平写扩展方案。
-
-### 2.3 主主复制的代价
-
-主主复制会引入：
-
-~~~text
-双边都保存完整数据；
-双边都执行所有写入；
-复制增加磁盘和网络 I/O；
-两边同时写同一行可能冲突；
-failover 和旧主恢复更复杂。
-~~~
-
-如果业务真的需要写扩展，通常要进入数据分区，而不是只靠两个 master。
-
----
-
-## 3. 数据分区：用 Sharding 扩展容量和写入
-
-复制保存多份相同数据；分区保存不同数据。
-
-~~~text
-Replication: 每台机器有完整副本
-Sharding: 每台机器只保存一部分数据
-~~~
-
-如果单库数据太大，或者单个主库写入压力太高，就需要分片。
-
-### 3.1 基本思想
-
-假设用户表按 user_id 分为 4 个 shard：
-
-~~~text
-user_id % 4 = 0  ->  Shard 0
-user_id % 4 = 1  ->  Shard 1
-user_id % 4 = 2  ->  Shard 2
-user_id % 4 = 3  ->  Shard 3
-~~~
-
-访问 user_id = 123：
-
-~~~text
-123 % 4 = 3
-访问 Shard 3
-~~~
-
-这样每台机器只负责一部分用户，容量和写入压力都会被分散。
-
-### 3.2 Sharding key 是设计核心
-
-好的 sharding key 需要满足三件事。
-
-第一，查询时经常带这个 key。
-
-如果大部分查询是：
-
-~~~sql
-SELECT * FROM orders WHERE user_id = ?
-~~~
-
-那么 user_id 很自然。如果 sharding key 在查询里很少出现，就只能广播到所有 shard。
-
-第二，分布要均匀。
-
-按国家分片可能导致 US shard 过热；hash(user_id) 通常更均匀。
-
-第三，减少跨分片查询。
-
-理想查询：
-
-~~~text
-定位 shard -> 查询 -> 返回
-~~~
-
-跨分片查询：
-
-~~~mermaid
-flowchart TD
-  Q["Query"] --> S0["Shard 0"]
-  Q --> S1["Shard 1"]
-  Q --> S2["Shard 2"]
-  Q --> S3["Shard 3"]
-  S0 --> M["Merge / Sort / Aggregate"]
-  S1 --> M
-  S2 --> M
-  S3 --> M
-  M --> R["Response"]
-~~~
-
-跨分片 join、跨分片事务、全局排序都会明显变复杂。
-
-### 3.3 分片的收益和代价
-
-收益：
-
-~~~text
-数据量分散到多台机器；
-写入压力分散到多个 shard；
-每个节点维护更小索引；
-单机存储和内存压力下降；
-可以通过增加 shard 扩容。
-~~~
-
-代价：
-
-~~~text
-跨分片查询复杂；
-跨分片事务复杂；
-全局唯一 ID 需要设计；
-扩容和数据迁移困难；
-应用层要处理路由、重试和部分失败。
-~~~
-
-一句话：
-
-~~~text
-复制让相同数据有更多副本；
-分片让不同机器承担不同数据。
-~~~
-
----
-
-## 4. 复制和分片通常一起用
-
-真实系统里经常是每个 shard 内部再做主从复制：
-
-~~~mermaid
-flowchart TD
-  Router["Query Router"] --> S0P["Shard 0 Primary"]
-  Router --> S1P["Shard 1 Primary"]
-  Router --> S2P["Shard 2 Primary"]
-
-  S0P --> S0R1["Shard 0 Replica"]
-  S0P --> S0R2["Shard 0 Replica"]
-  S1P --> S1R1["Shard 1 Replica"]
-  S1P --> S1R2["Shard 1 Replica"]
-  S2P --> S2R1["Shard 2 Replica"]
-  S2P --> S2R2["Shard 2 Replica"]
-~~~
-
-这样同时获得：
-
-~~~text
-分片带来的容量和写入扩展；
-复制带来的读扩展、备份和高可用。
-~~~
-
-总结：
-
-~~~text
-复制解决多读、多副本、高可用；
-分片解决大数据量、高写入、单机容量瓶颈。
-~~~
-
----
-
-## 5. Feature Store 里的对应设计
-
-Feature Store 可以理解为给模型服务提供在线特征的分布式状态系统。
-
-在线预测时，模型不只需要当前请求字段，还需要历史上下文，例如：
-
-| 场景 | 需要的特征 |
-| --- | --- |
-| 风控 | 用户过去 5 分钟交易次数、设备关联用户数、商户拒付率 |
-| 推荐 | 用户最近点击、物品曝光点击统计、用户物品交互历史 |
-| 广告 | 用户兴趣、广告主预算状态、实时点击率 |
-
-这些特征不能在请求时临时扫描日志计算，通常要提前 materialize 到 Online Feature Store。
-
-### 5.1 Feature Store 中的复制
-
-类比数据库：
-
-| 数据库 | Feature Store |
-| --- | --- |
-| Primary 接收写入 | feature primary 接收特征更新 |
-| Replica 复制数据 | feature replica 复制特征状态 |
-| 应用读副本 | model serving 读副本 |
-
-写入路径：
-
-~~~text
-feature computation / materialization -> feature primary
-~~~
-
-读取路径：
-
-~~~text
-model serving / feature service -> feature replicas
-~~~
-
-这就是特征系统里的读写分离：特征计算负责写，模型服务负责读。
-
-### 5.2 Feature Store 中的 stale feature
-
-数据库里有 stale read，Feature Store 里有 stale feature。
-
-~~~text
-用户刚连续支付失败 5 次；
-风险特征应该升高；
-feature primary 已更新；
-replica 尚未同步；
-模型从 replica 读到旧特征；
-风险被低估。
-~~~
-
-因此需要监控 freshness：
-
-~~~text
-特征最后更新时间；
-特征落后多久；
-是否超过模型可接受延迟；
-哪些 replica 已经落后。
-~~~
-
-不同特征 freshness 要求不同：
-
-| 特征类型 | 常见 freshness |
-| --- | --- |
-| 风控短窗口特征 | 秒级到几十秒 |
-| 推荐行为特征 | 分钟级 |
-| 商户长期统计 | 小时级 |
-| 用户画像 | 天级 |
-
-### 5.3 Feature Store 中的数据分区
-
-Feature Store 的 sharding key 通常是 entity key：
-
-~~~text
-user_id
-item_id
-merchant_id
-device_id
-tenant_id
-session_id
-~~~
-
-例如：
-
-| Feature group | Sharding key |
-| --- | --- |
-| user_features | user_id |
-| item_features | item_id |
-| merchant_features | merchant_id |
-| device_features | device_id |
-| user_item_features | hash(user_id, item_id) |
-
-一次风控请求可能需要：
-
-~~~text
-user_features:user_id=123
-merchant_features:merchant_id=888
-device_features:device_id=abc
-user_merchant_features:user_id=123,merchant_id=888
-~~~
-
-Feature Service 必须能根据请求里的 key 直接定位 shard，不能每次都广播所有节点。
-
-### 5.4 Feature Store 分片的代价
-
-第一，跨 entity 特征不适合在线临时聚合。
-
-例如：
-
-~~~text
-某城市过去 1 小时所有用户的平均交易金额；
-某品类最近 30 分钟整体点击率；
-全站最近 10 分钟支付失败率。
-~~~
-
-这些通常要通过 batch 或 streaming job 提前算好，再写回 Online Feature Store。
-
-第二，hot key 会导致负载不均衡：
-
-~~~text
-超级热门商品；
-大型商户；
-超大企业客户；
-高活跃用户。
-~~~
-
-hot key 的本质是：分片规则可能平均，但访问流量不平均。一个热门商品、一个大商户、一个超活跃用户可能把某个 shard 或 replica 打满。
-
-处理方式可以先分成读路径和更新路径。
-
-读路径上，常见办法是：
-
-~~~text
-增加 replica；
-加缓存；
-热点 key 特殊拆分；
-热门 item feature 预加载到模型服务本地；
-对多次读取做 batch 和合并。
-~~~
-
-更新路径上，面试里可以讲 push 模式和 pull 模式。
-
-| 模式 | 怎么做 | 适合场景 | 代价 |
-| --- | --- | --- | --- |
-| Push / active update | 上游 feature computation 产出新值后，主动把 hot feature 推到 cache / serving replica / local cache | 热点少、更新频率可控、freshness 要求高 | 写放大；需要 fanout、版本号和失败重试 |
-| Pull / lazy update | serving 侧读到缺失或过期 feature 时，再去 feature store / source of truth 拉取并刷新本地缓存 | 热点变化快、长尾 key 多、允许短暂 stale | 第一次 miss 慢；需要 TTL、singleflight、防止 cache stampede |
-
-可以这样理解：
-
-~~~mermaid
-flowchart LR
-  A["Feature Update"] --> B{"更新模式"}
-  B -->|Push active| C["主动刷新 hot cache / replica"]
-  B -->|Pull lazy| D["请求 miss / TTL 过期时再刷新"]
-  C --> E["低读延迟 + 更高写放大"]
-  D --> F["低写放大 + miss 时延迟更高"]
-~~~
-
-在推荐系统里，热门 item feature 往往适合 push 到 serving local cache；用户长尾特征更适合 pull + TTL，因为主动推所有用户特征会造成大量无效写入。
-
-第三，多类特征来自不同 shard，更新时间可能不同。模型拿到的通常是近似一致的特征快照，而不是严格同一时刻的全局状态。
-
-### 5.5 更新日志和 checkpoint
-
-MySQL 主从复制依赖 binlog position。Feature Store 也有类似的增量同步位置：
-
-~~~text
-streaming job 处理到 Kafka offset X；
-batch materialization 处理到某个时间分区；
-feature group v7 同步到 checkpoint Y。
-~~~
-
-更新链路可以横向记：
-
-~~~mermaid
-flowchart LR
-  A["Raw Events"] --> B["Feature Computation"]
-  B --> C["Feature Update Log / Checkpoint"]
-  C --> D["Online Feature Store Primary"]
-  D --> E["Online Feature Store Replicas"]
-  E --> F["Model Serving"]
-~~~
-
-这个 update log / checkpoint 在概念上类似数据库里的 binlog position：不是每次全量同步，而是记录处理进度，持续增量更新。
-
----
-
-## 6. 面试回答模板
-
-如果题目问“数据库怎么扩展”，可以按这个顺序回答：
-
-~~~text
-1. 先判断瓶颈：读多、写多、数据大、还是可用性问题。
-2. 读多：主从复制 + 读写分离，但要处理 replication lag。
-3. 主库故障恢复：主备或主主，重点是 failover，不是写扩展。
-4. 写多或数据大：按业务访问模式选择 sharding key。
-5. 分片后要讨论跨分片查询、事务、全局 ID、迁移和热点。
-6. 真实系统通常是 shard 内复制，复制和分片组合使用。
-~~~
-
-展开回答时可以按这几个层次讲：
-
-| 层次 | 要说清楚什么 | 常见追问 |
-| --- | --- | --- |
-| 负载估算 | 入口 QPS、读写比、峰值系数、单请求 DB/Cache 次数 | 平均 QPS 和峰值 QPS 差多少？ |
-| 复制 | 主从复制扩读，主备/主主解决 failover | replication lag 怎么处理？ |
-| 分片 | sharding key 贴近主查询路径，避免广播查询 | hot shard、跨分片 join、全局 ID 怎么办？ |
-| 一致性 | 哪些读可以 stale，哪些必须 read-your-writes | 下单、支付、库存这类路径能不能读从库？ |
-| 运维 | rebalancing、backup、schema migration、observability | 扩 shard 时怎么迁移数据？ |
-
-如果题目是 Feature Store / Online KV / Embedding Store：
-
-~~~text
-1. 把它看成服务模型的分布式状态系统。
-2. entity key 决定分片。
-3. replica 承担低延迟读和高可用。
-4. freshness 等价于 ML 系统里的 replication lag。
-5. hot key 要拆读路径和更新路径：cache/replica/push/pull。
-6. update log / checkpoint 决定增量同步和故障恢复能力。
-~~~
-
-面试里不要只说“加缓存”。更好的表述是：
-
-~~~text
-我会先估读写压力和数据规模。
-如果主要是读压力，用 replica 和 cache；
-如果主要是写压力或容量压力，用 sharding；
-如果是可用性问题，用 failover 和复制；
-如果是 Feature Store，还要额外讨论 freshness、hot key、update log 和 checkpoint。
-~~~
-
-### 6.1 选择题：读扩展应该先想到什么？
-
-~~~quiz
-title: Database Scaling Check 1
-question: 一个服务读请求很多、写请求相对少，最直接的数据库扩展手段是什么？
-answer: B
-A. 主主复制，因为两个主库可以把所有写入吞吐翻倍
-B. 主从复制加读写分离，让多个 replica 承担读请求
-C. 立刻按随机 key 分片，不考虑查询路径
-D. 把所有请求都改成异步队列
-explanation: 读多写少时，主从复制和读写分离通常是第一步；它扩展读能力，但不扩展单主写能力。
-~~~
-
-### 6.2 选择题：Feature Store 的 hot key 怎么分析？
-
-~~~quiz
-title: Feature Store Check 1
-question: 一个热门 item 的 feature 被大量请求读取，同时该 feature 更新不算频繁。哪种说法更合理？
-answer: C
-A. 只能把这个 item 按 item_id 重新 hash 到另一个 shard
-B. 必须每次请求都从 source of truth 读取，避免 stale
-C. 可以把热门 item feature push 到 serving local cache 或更多 replica，降低读路径压力
-D. hot key 只影响写入，不影响读取
-explanation: 热门 item 的问题主要是读流量集中。若 freshness 要求较高且热点集合较小，push/active update 到本地 cache 或 replica 很合适。
-~~~
-
-### 6.3 选择题：update log / checkpoint 解决什么？
-
-~~~quiz
-title: Feature Store Check 2
-question: Feature Store 里的 update log / checkpoint 最核心的作用是什么？
-answer: B
-A. 让每次同步都重新扫描全量历史数据
-B. 记录处理进度，支持增量更新、故障恢复和判断副本落后程度
-C. 替代 sharding key，让查询不用路由
-D. 保证所有 feature 在严格同一时刻更新
-explanation: update log / checkpoint 类似 binlog position 或 Kafka offset，核心是记录已经处理到哪里，从而持续增量同步和恢复。
-~~~
-
-## 7. 最短记忆版
-
-~~~text
-主从复制:
-  读扩展 + 备份 + 容灾
-  代价是 stale read
-
-主主复制:
-  高可用 + 快速切换
-  不是写入翻倍
-
-分片:
-  容量扩展 + 写扩展
-  代价是跨分片复杂
-
-Feature Store:
-  传统数据库扩展思想在 ML online state 上的复用
-~~~
-`;
-
 const mlsysNoteDefinitions = [
   createTutorialDefinition('MLSYS1 · GPU 体系结构入门', 'MLSYS1.md', 'MLSYS1.en.md', {
     titleEn: 'MLSYS1 · GPU Architecture Basics',
@@ -2438,76 +1528,76 @@ const mlCodingNotes = mlCodingNoteDefinitions.map((definition) => ({
 
 const systemDesignNoteDefinitions = [
   createTutorialDefinition(
-    'System Design 00 · 方法总览',
+    'System Design 00 · 怎么读',
     'SystemDesign00 Overview.md',
     'SystemDesign00 Overview.en.md',
-    { directory: 'SystemDesign', titleEn: 'System Design 00 · Overview & Methodology', category: 'Overview', difficulty: 'Intro' },
+    { directory: 'SystemDesign', titleEn: 'System Design 00 · How to read', category: 'Overview', difficulty: 'Intro' },
   ),
   createTutorialDefinition(
-    'System Design 01 · 无状态设计范式',
+    'System Design 01 · 无状态服务',
     'SystemDesign01 Stateless Service.md',
     'SystemDesign01 Stateless Service.en.md',
-    { directory: 'SystemDesign', titleEn: 'System Design 01 · Stateless Service Patterns', category: 'Design Pattern', difficulty: 'Medium' },
+    { directory: 'SystemDesign', titleEn: 'System Design 01 · Stateless Service', category: 'Component', difficulty: 'Medium' },
   ),
   createTutorialDefinition(
     'System Design 01B · 虚拟化与容器',
     'SystemDesign01B Virtualization Containers.md',
     'SystemDesign01B Virtualization Containers.en.md',
-    { directory: 'SystemDesign', titleEn: 'System Design 01B · Virtualization & Containers', category: 'Compute Isolation', difficulty: 'Medium' },
+    { directory: 'SystemDesign', titleEn: 'System Design 01B · Virtualization & Containers', category: 'Component', difficulty: 'Medium' },
   ),
   createTutorialDefinition(
-    'System Design 02 · 数据库基本范式',
+    'System Design 01C · Kubernetes',
+    'SystemDesign01C Kubernetes.md',
+    'SystemDesign01C Kubernetes.en.md',
+    { directory: 'SystemDesign', titleEn: 'System Design 01C · Kubernetes', category: 'Component', difficulty: 'Hard' },
+  ),
+  createTutorialDefinition(
+    'System Design 01D · Redis',
+    'SystemDesign01D Redis.md',
+    'SystemDesign01D Redis.en.md',
+    { directory: 'SystemDesign', titleEn: 'System Design 01D · Redis', category: 'Component', difficulty: 'Medium' },
+  ),
+  createTutorialDefinition(
+    'System Design 02 · 数据库',
     'SystemDesign02 Database Paradigms.md',
     'SystemDesign02 Database Paradigms.en.md',
-    { directory: 'SystemDesign', titleEn: 'System Design 02 · Database Paradigms', category: 'Database', difficulty: 'Medium' },
+    { directory: 'SystemDesign', titleEn: 'System Design 02 · Database', category: 'Component', difficulty: 'Medium' },
   ),
-  {
-    id: 'SystemDesign03 Database Scaling.md',
-    title: 'System Design 03 · 数据库扩展三件套',
-    titleEn: 'System Design 03 · Database Scaling Trio',
-    fileName: 'SystemDesign03 Database Scaling.md',
-    zhFileName: 'SystemDesign03 Database Scaling.md',
-    enFileName: 'SystemDesign03 Database Scaling.en.md',
-    directory: 'SystemDesign',
-    category: 'Design Pattern',
-    difficulty: 'Medium',
-    content: systemDesignDbScalingContent,
-  },
   createTutorialDefinition(
-    'System Design 04 · 存储系统',
+    'System Design 04 · 存储',
     'SystemDesign04 Storage Systems.md',
     'SystemDesign04 Storage Systems.en.md',
-    { directory: 'SystemDesign', titleEn: 'System Design 04 · Storage Systems', category: 'Storage', difficulty: 'Medium' },
+    { directory: 'SystemDesign', titleEn: 'System Design 04 · Storage', category: 'Component', difficulty: 'Medium' },
   ),
   createTutorialDefinition(
-    'System Design 05 · 可靠性与复制',
-    'SystemDesign05 Reliability Replication.md',
-    'SystemDesign05 Reliability Replication.en.md',
-    { directory: 'SystemDesign', titleEn: 'System Design 05 · Reliability & Replication', category: 'Reliability', difficulty: 'Medium' },
-  ),
-  createTutorialDefinition(
-    'System Design 06 · 异步消息系统',
+    'System Design 06 · 消息队列',
     'SystemDesign06 Async Messaging Systems.md',
     'SystemDesign06 Async Messaging Systems.en.md',
-    { directory: 'SystemDesign', titleEn: 'System Design 06 · Async Messaging Systems', category: 'Messaging', difficulty: 'Hard' },
-  ),
-  createTutorialDefinition(
-    'System Design 07 · 图片分享与 Feed',
-    'SystemDesign07 Photo Sharing Feed.md',
-    'SystemDesign07 Photo Sharing Feed.en.md',
-    { directory: 'SystemDesign', titleEn: 'System Design 07 · Photo Sharing & Feed', category: 'Case Study', difficulty: 'Hard' },
-  ),
-  createTutorialDefinition(
-    'System Design 08 · 异步 LLM RL 训练平台',
-    'SystemDesign08 LLM Async RL Platform.md',
-    'SystemDesign08 LLM Async RL Platform.en.md',
-    { directory: 'SystemDesign', titleEn: 'System Design 08 · Async LLM RL Training Platform', category: 'ML Infrastructure', difficulty: 'Hard' },
+    { directory: 'SystemDesign', titleEn: 'System Design 06 · Message Queue', category: 'Component', difficulty: 'Medium' },
   ),
   createTutorialDefinition(
     'System Design 09 · 一致性哈希',
     'SystemDesign09 Consistent Hashing.md',
     'SystemDesign09 Consistent Hashing.en.md',
-    { directory: 'SystemDesign', titleEn: 'System Design 09 · Consistent Hashing', category: 'Distributed Systems', difficulty: 'Medium' },
+    { directory: 'SystemDesign', titleEn: 'System Design 09 · Consistent Hashing', category: 'Component', difficulty: 'Medium' },
+  ),
+  createTutorialDefinition(
+    'System Design 07 · 图片分享与 Feed',
+    'SystemDesign07 Photo Sharing Feed.md',
+    'SystemDesign07 Photo Sharing Feed.en.md',
+    { directory: 'SystemDesign', titleEn: 'System Design 07 · Photo Sharing & Feed', category: 'Case', difficulty: 'Hard' },
+  ),
+  createTutorialDefinition(
+    'System Design 08 · 异步 LLM RL',
+    'SystemDesign08 LLM Async RL Platform.md',
+    'SystemDesign08 LLM Async RL Platform.en.md',
+    { directory: 'SystemDesign', titleEn: 'System Design 08 · Async LLM RL', category: 'Case', difficulty: 'Hard' },
+  ),
+  createTutorialDefinition(
+    'System Design 10 · 秒杀',
+    'SystemDesign10 Flash Sale.md',
+    'SystemDesign10 Flash Sale.en.md',
+    { directory: 'SystemDesign', titleEn: 'System Design 10 · Flash Sale', category: 'Case', difficulty: 'Hard' },
   ),
   // Keep the glossary as the final System Design note even when new chapters are inserted.
   createTutorialDefinition(
@@ -7395,6 +6485,82 @@ function PhotoSharingArchitectureVisual() {
   );
 }
 
+function FlashSaleArchitectureVisual() {
+  const { t } = useUiCopy();
+  const [mode, setMode] = useState('buy');
+  const titles = {
+    view: t('查看活动：Gateway → Sale Service → DB', 'View sale: Gateway → Sale Service → DB'),
+    buy: t('下单：MQ ack 后返回 202，不预占库存', 'Buy: 202 after MQ ack; stock is not reserved'),
+    result: t('查单：长轮询 Redis；miss 走 API', 'Result: long-poll Redis; miss hits the API'),
+  };
+
+  return (
+    <section className="arch-visual flash-arch" aria-label={t('秒杀系统架构图', 'Flash sale architecture')}>
+      <header className="arch-header split">
+        <div>
+          <p className="eyebrow">{t('秒杀', 'Flash sale')}</p>
+          <h2>{titles[mode]}</h2>
+          <p>{t('一场活动一个 SKU。读走 cache，买走队列，库存只在 DB 事务里动。', 'One sale, one SKU. Cache the reads. Queue the buys. Stock moves only in a DB transaction.')}</p>
+        </div>
+        <div className="arch-tabs" role="group" aria-label={t('选择秒杀链路', 'Choose a flash-sale path')}>
+          <button type="button" className={mode === 'view' ? 'active' : ''} onClick={() => setMode('view')}>{t('查看活动', 'View sale')}</button>
+          <button type="button" className={mode === 'buy' ? 'active' : ''} onClick={() => setMode('buy')}>{t('下单', 'Buy')}</button>
+          <button type="button" className={mode === 'result' ? 'active' : ''} onClick={() => setMode('result')}>{t('查结果', 'Result')}</button>
+        </div>
+      </header>
+
+      <div className="flash-stage" data-mode={mode}>
+        {mode === 'view' && (
+          <div className="arch-flow photo-control-row">
+            <div className="arch-node neutral"><small>CLIENT</small><strong>App</strong><span>view sale</span></div>
+            <span className="arch-connector sync">→</span>
+            <div className="arch-node edge"><small>EDGE</small><strong>API Gateway</strong><span>auth</span></div>
+            <span className="arch-connector sync">→</span>
+            <div className="arch-node service"><small>READ</small><strong>Sale Service</strong><span>price + stock</span></div>
+            <span className="arch-connector data">→</span>
+            <div className="arch-node store"><small>STATE</small><strong>Database</strong><span>sale + order</span></div>
+          </div>
+        )}
+
+        {mode === 'buy' && (
+          <>
+            <div className="arch-flow photo-control-row">
+              <div className="arch-node neutral"><small>CLIENT</small><strong>App</strong><span>buy + request_id</span></div>
+              <span className="arch-connector sync">→</span>
+              <div className="arch-node edge"><small>EDGE</small><strong>API Gateway</strong><span>auth + rate limit</span></div>
+              <span className="arch-connector sync">→</span>
+              <div className="arch-node service"><small>WRITE</small><strong>Purchase Service</strong><span>enqueue</span></div>
+              <span className="arch-connector async">→</span>
+              <div className="arch-node queue"><small>LOG</small><strong>Kafka</strong><span>durable ack → 202</span></div>
+            </div>
+            <div className="flash-buy-grid">
+              <div className="arch-node compact worker"><small>CONSUME</small><strong>Worker</strong><span>dequeue</span></div>
+              <span className="read-arrow">→</span>
+              <div className="arch-node compact store"><small>TXN</small><strong>Database</strong><span>stock-1 + order + unique user</span></div>
+              <span className="read-arrow">→</span>
+              <div className="arch-node compact blob"><small>READ MODEL</small><strong>Redis</strong><span>cache result</span></div>
+            </div>
+            <p className="flash-callout">{t('202 不预占库存。MQ 不增加 DB 写容量。', '202 does not reserve stock. MQ does not add DB write capacity.')}</p>
+          </>
+        )}
+
+        {mode === 'result' && (
+          <>
+            <div className="arch-flow photo-control-row">
+              <div className="arch-node neutral"><small>CLIENT</small><strong>App</strong><span>long poll</span></div>
+              <span className="arch-connector data">→</span>
+              <div className="arch-node blob"><small>READ MODEL</small><strong>Redis</strong><span>order status</span></div>
+              <span className="arch-connector sync">→</span>
+              <div className="arch-node store"><small>FALLBACK</small><strong>API → DB</strong><span>cache miss / reconnect</span></div>
+            </div>
+            <p className="flash-callout">{t('Redis 是读模型，不是库存真相。通知丢了就查 API。', 'Redis is a read model, not stock truth. Missed notify → query the API.')}</p>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
 const ASYNC_PATTERNS = {
   queue: {
     label: 'Task Queue',
@@ -7556,6 +6722,598 @@ function VirtualizationContainerVisual() {
         <small>{isVm
           ? t('边界更强 · 启动更重', 'stronger boundary · heavier startup')
           : t('密度更高 · 共享内核风险', 'higher density · shared-kernel risk')}</small>
+      </footer>
+    </section>
+  );
+}
+
+const K8S_HIERARCHY_LAYERS = [
+  {
+    id: 'container',
+    tag: 'Container',
+    title: '镜像里的进程',
+    titleEn: 'Process inside an image',
+    body: '不是独立 API 对象。共享 host kernel，靠 namespace / cgroup / 镜像层隔离。训练脚本、sidecar、init 都是容器。',
+    bodyEn: 'Not a standalone API object. Shares the host kernel; isolation is namespaces, cgroups, and image layers. The training script, sidecars, and init are all containers.',
+    remember: '打包与隔离，不能单独调度。',
+    rememberEn: 'Packaging and isolation; not scheduled on its own.',
+  },
+  {
+    id: 'pod',
+    tag: 'Pod',
+    title: '最小调度单元',
+    titleEn: 'Smallest scheduling unit',
+    body: '一次 bind 整组容器：同节点、同网络 namespace、同命运。一个 rank 一张 GPU 时，一个 Pod 一个 Worker。Pod 被删就消失，IP 会变。',
+    bodyEn: 'One bind for the whole container group: same node, same network namespace, same fate. One rank, one GPU, one Pod. Delete it and it is gone; the IP changes.',
+    remember: '一次性；失败后由控制器重建。',
+    rememberEn: 'Disposable; a controller recreates it after failure.',
+  },
+  {
+    id: 'replicaset',
+    tag: 'ReplicaSet',
+    title: '只保证副本数',
+    titleEn: 'Replica count only',
+    body: 'selector 匹配的 Pod 数量等于 spec.replicas。不管滚动、不管 rank 身份。生产里几乎总是被 Deployment 拥有。',
+    bodyEn: 'Keeps selector-matched Pods equal to spec.replicas. No rolling strategy, no rank identity. In production a Deployment almost always owns it.',
+    remember: '计数器，不是发布策略。',
+    rememberEn: 'A counter, not a rollout policy.',
+  },
+  {
+    id: 'deployment',
+    tag: 'Deployment',
+    title: '无状态滚动发布',
+    titleEn: 'Stateless rolling release',
+    body: '管理 ReplicaSet：起新的、等 ready、缩旧的、可回滚。适合 API 和 replica inference。分布式训练不要用：它会单独重启一个 rank。',
+    bodyEn: 'Manages ReplicaSets: start new, wait ready, shrink old, roll back. Fits APIs and replica inference. Do not use it for distributed training: it restarts one rank in isolation.',
+    remember: '可替换副本；不是 Worker group。',
+    rememberEn: 'Replaceable replicas; not a worker group.',
+  },
+  {
+    id: 'service',
+    tag: 'Service',
+    title: '稳定名字，不绑死 IP',
+    titleEn: 'Stable name, not a frozen IP',
+    body: '用 label 选中 Pod，提供 ClusterIP / DNS。训练里给 rank 0 做 rendezvous，或用 Headless 直接解析到 Pod IP。NCCL 数据面不要走负载均衡。',
+    bodyEn: 'Selects Pods by label and offers ClusterIP / DNS. Training uses it for rank-0 rendezvous, or headless DNS to Pod IPs. Do not load-balance the NCCL data path.',
+    remember: '控制面入口；不是 all-reduce 网。',
+    rememberEn: 'Control-plane entry; not the all-reduce fabric.',
+  },
+  {
+    id: 'namespace',
+    tag: 'Namespace',
+    title: '虚拟集群边界',
+    titleEn: 'Virtual cluster boundary',
+    body: '分隔名字、默认配额、RBAC 作用域。team-a / team-b 分 Namespace 后再加 GPU quota 和队列。它不是完整安全沙箱。',
+    bodyEn: 'Separates names, default quota, and RBAC scope. Split team-a / team-b into Namespaces, then add GPU quota and queues. It is not a full security sandbox.',
+    remember: '多租户的第一刀，不是最后一道墙。',
+    rememberEn: 'The first multi-tenant cut, not the last wall.',
+  },
+];
+
+function KubernetesHierarchyVisual() {
+  const { isEnglish, t } = useUiCopy();
+  const [active, setActive] = useState(0);
+  const [playing, setPlaying] = useState(true);
+  const layer = K8S_HIERARCHY_LAYERS[active];
+
+  useEffect(() => {
+    if (!playing) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      setActive((current) => (current + 1) % K8S_HIERARCHY_LAYERS.length);
+    }, 2200);
+    return () => window.clearInterval(timer);
+  }, [playing]);
+
+  return (
+    <section className="k8s-visual k8s-hierarchy" aria-label={t('Kubernetes 对象层级从容器到 Namespace', 'Kubernetes object hierarchy from container to Namespace')}>
+      <header className="k8s-visual-header">
+        <div>
+          <p className="eyebrow">{t('对象模型', 'Object model')}</p>
+          <h2>{t('从容器一层层包到 Namespace', 'Wrap a container out to a Namespace')}</h2>
+          <p>{t('点层级或按播放，看每一层真正负责什么。嵌套是记忆图；实现靠 label 和 ownerReference。', 'Click a layer or play to see what each object owns. Nesting is a memory aid; the implementation is labels and ownerReferences.')}</p>
+        </div>
+        <div className="k8s-visual-controls">
+          <button type="button" className={playing ? 'active' : ''} onClick={() => setPlaying((value) => !value)}>
+            {playing ? t('暂停', 'Pause') : t('播放', 'Play')}
+          </button>
+        </div>
+      </header>
+
+      <div className="k8s-layer-tabs" role="tablist" aria-label={t('选择对象层级', 'Choose an object layer')}>
+        {K8S_HIERARCHY_LAYERS.map((item, index) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            aria-selected={active === index}
+            className={active === index ? 'active' : ''}
+            onClick={() => {
+              setPlaying(false);
+              setActive(index);
+            }}
+          >
+            <small>0{index + 1}</small>
+            {item.tag}
+          </button>
+        ))}
+      </div>
+
+      <div className="k8s-nest-stage" data-active={layer.id}>
+        {K8S_HIERARCHY_LAYERS.reduceRight((child, item, index) => {
+          if (index > active) {
+            return child;
+          }
+          return (
+            <div
+              key={item.id}
+              className={`k8s-nest-layer is-${item.id} ${index === active ? 'current' : 'visible'}`}
+            >
+              <span>{item.tag}</span>
+              {index === 0 ? (
+                <div className="k8s-nest-process">
+                  <b>train.py</b>
+                  <small>PID 1 in container</small>
+                </div>
+              ) : child}
+            </div>
+          );
+        }, null)}
+      </div>
+
+      <footer className="k8s-visual-footer">
+        <span>{t('这一层', 'This layer')}</span>
+        <strong>{isEnglish ? layer.titleEn : layer.title}</strong>
+        <p>{isEnglish ? layer.bodyEn : layer.body}</p>
+        <small>{isEnglish ? layer.rememberEn : layer.remember}</small>
+      </footer>
+    </section>
+  );
+}
+
+const K8S_LIFECYCLE_STEPS = [
+  {
+    id: 'submit',
+    phase: 'Submitted',
+    title: '提交 LLMJob',
+    titleEn: 'Submit LLMJob',
+    body: 'CR 写入 apiserver。还没有 Pod，更没有 GPU。',
+    bodyEn: 'The CR is stored in apiserver. No Pod yet, and no GPU.',
+  },
+  {
+    id: 'queue',
+    phase: 'Queued',
+    title: '进入队列 / Admission',
+    titleEn: 'Queue / admission',
+    body: '查配额、优先级、公平份额。Kueue 这一层决定现在能不能进集群。',
+    bodyEn: 'Quota, priority, and fair share are checked. This is Kueue’s layer: may this workload enter now?',
+  },
+  {
+    id: 'gang',
+    phase: 'Admitted',
+    title: 'Gang 一次性占坑',
+    titleEn: 'Gang reservation',
+    body: '4 个 GPU slot 同时可分配才往下。否则整组留在队列，避免 3 个 Running、1 个 Pending。',
+    bodyEn: 'Proceed only if four GPU slots can be allocated together. Otherwise the whole group stays queued, never 3 Running and 1 Pending.',
+  },
+  {
+    id: 'pending',
+    phase: 'Pending',
+    title: '创建 Pod，等待绑定',
+    titleEn: 'Create Pods, wait for bind',
+    body: 'scheduler Filter → Score → Bind。kubelet 还没拉镜像。',
+    bodyEn: 'scheduler Filter → Score → Bind. kubelet has not pulled the image yet.',
+  },
+  {
+    id: 'creating',
+    phase: 'ContainerCreating',
+    title: '拉镜像、挂盘、Allocate GPU',
+    titleEn: 'Pull, mount, Allocate GPU',
+    body: 'Device Plugin 把设备注入容器。这一步失败通常是驱动、配额或磁盘，不是算法。',
+    bodyEn: 'The Device Plugin injects devices. Failures here are usually driver, quota, or disk — not the algorithm.',
+  },
+  {
+    id: 'running',
+    phase: 'Running',
+    title: '进程起来了，训练还没开始',
+    titleEn: 'Process is up; training has not started',
+    body: 'RANK / WORLD_SIZE / MASTER_ADDR 注入。NCCL 初始化可能比第一个 step 还久。',
+    bodyEn: 'RANK / WORLD_SIZE / MASTER_ADDR are injected. NCCL init can outlast the first training step.',
+  },
+  {
+    id: 'barrier',
+    phase: 'Rendezvous',
+    title: '所有 Worker ready 才 step',
+    titleEn: 'No step until every worker is ready',
+    body: 'startup barrier。有人没到，其余人空转占着 GPU。这就是为什么要 gang。',
+    bodyEn: 'Startup barrier. If one worker is missing, the others spin while holding GPUs. That is why gang exists.',
+  },
+  {
+    id: 'train',
+    phase: 'Training',
+    title: 'step + heartbeat + checkpoint',
+    titleEn: 'Steps, heartbeats, checkpoints',
+    body: '心跳给 Job controller 看，不要用过短 liveness 杀单个 rank。checkpoint 才是可恢复状态。',
+    bodyEn: 'Heartbeats belong to the Job controller; a short liveness probe should not kill a single rank. The checkpoint is the recoverable state.',
+  },
+  {
+    id: 'fail',
+    phase: 'Failed',
+    title: '一个 Worker 挂了',
+    titleEn: 'One worker dies',
+    body: 'communicator 已坏。正确动作是停掉整组，而不是让 kubelet 重启这一个容器。',
+    bodyEn: 'The communicator is already dead. Stop the whole group; do not let kubelet restart this one container.',
+  },
+  {
+    id: 'recover',
+    phase: 'Recovering',
+    title: 'RestartAll + load checkpoint',
+    titleEn: 'RestartAll + load checkpoint',
+    body: '重建 Worker group，读最近完整 ckpt，重新 barrier。丢失的是上次 ckpt 之后的 step。',
+    bodyEn: 'Recreate the worker group, load the last complete checkpoint, barrier again. Progress after the last ckpt is lost.',
+  },
+];
+
+function KubernetesLifecycleVisual() {
+  const { isEnglish, t } = useUiCopy();
+  const [step, setStep] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const current = K8S_LIFECYCLE_STEPS[step];
+
+  useEffect(() => {
+    if (!playing) {
+      return undefined;
+    }
+    const timer = window.setInterval(() => {
+      setStep((value) => {
+        if (value >= K8S_LIFECYCLE_STEPS.length - 1) {
+          return 0;
+        }
+        return value + 1;
+      });
+    }, 1600);
+    return () => window.clearInterval(timer);
+  }, [playing]);
+
+  return (
+    <section className="k8s-visual k8s-lifecycle" aria-label={t('LLM 训练 Job 在 Kubernetes 上的生命周期', 'LLM training job lifecycle on Kubernetes')}>
+      <header className="k8s-visual-header">
+        <div>
+          <p className="eyebrow">{t('生命周期', 'Lifecycle')}</p>
+          <h2>{t('从提交到故障恢复', 'From submit to failure recovery')}</h2>
+          <p>{t('Pod Running 不等于训练开始。真正的边界是 gang admit、rendezvous 和 checkpoint。', 'Pod Running is not the start of training. The real boundaries are gang admit, rendezvous, and checkpoint.')}</p>
+        </div>
+        <div className="k8s-visual-controls">
+          <button type="button" className={playing ? 'active' : ''} onClick={() => setPlaying((value) => !value)}>
+            {playing ? t('暂停', 'Pause') : t('播放', 'Play')}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setPlaying(false);
+              setStep((value) => Math.min(K8S_LIFECYCLE_STEPS.length - 1, value + 1));
+            }}
+          >
+            {t('下一步', 'Next')}
+          </button>
+        </div>
+      </header>
+
+      <ol className="k8s-life-rail" aria-label={t('生命周期步骤', 'Lifecycle steps')}>
+        {K8S_LIFECYCLE_STEPS.map((item, index) => (
+          <li key={item.id}>
+            <button
+              type="button"
+              className={index === step ? 'active' : index < step ? 'done' : ''}
+              onClick={() => {
+                setPlaying(false);
+                setStep(index);
+              }}
+            >
+              <b>{item.phase}</b>
+            </button>
+          </li>
+        ))}
+      </ol>
+
+      <input
+        type="range"
+        min="0"
+        max={K8S_LIFECYCLE_STEPS.length - 1}
+        value={step}
+        aria-label={t('选择生命周期步骤', 'Choose a lifecycle step')}
+        onChange={(event) => {
+          setPlaying(false);
+          setStep(Number(event.target.value));
+        }}
+      />
+
+      <div className={`k8s-life-stage phase-${current.id}`} aria-live="polite">
+        <div className="k8s-life-workers">
+          {[0, 1, 2, 3].map((rank) => {
+            const dead = current.id === 'fail' && rank === 2;
+            const waiting = current.id === 'barrier' && rank === 3;
+            const hidden = ['submit', 'queue', 'gang'].includes(current.id);
+            return (
+              <div
+                key={rank}
+                className={`k8s-life-worker ${hidden ? 'ghost' : ''} ${dead ? 'dead' : ''} ${waiting ? 'wait' : ''}`}
+              >
+                <span>rank {rank}</span>
+                <strong>{dead ? 'DEAD' : waiting ? 'WAIT' : hidden ? '—' : current.phase}</strong>
+              </div>
+            );
+          })}
+        </div>
+        <aside>
+          <small>{current.phase}</small>
+          <strong>{isEnglish ? current.titleEn : current.title}</strong>
+          <p>{isEnglish ? current.bodyEn : current.body}</p>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+function KubernetesGangVisual() {
+  const { t } = useUiCopy();
+  const [mode, setMode] = useState('naive');
+  const isNaive = mode === 'naive';
+
+  return (
+    <section className="k8s-visual k8s-gang" aria-label={t('逐 Pod 调度与 Gang Scheduling 对比', 'Per-Pod scheduling versus gang scheduling')}>
+      <header className="k8s-visual-header">
+        <div>
+          <p className="eyebrow">{t('Gang scheduling', 'Gang scheduling')}</p>
+          <h2>{isNaive
+            ? t('默认调度：先占到的人先跑', 'Default scheduler: whoever binds, runs')
+            : t('Gang：凑齐 4 张 GPU 才启动', 'Gang: start only when 4 GPUs are reserved')}</h2>
+          <p>{isNaive
+            ? t('3 个 Worker 已经绑上 GPU，第 4 个永远 Pending。这 3 张卡没有训练进度。', 'Three workers already hold GPUs; the fourth stays Pending. Those three cards make no training progress.')
+            : t('资源不够时整组留在队列。资源够则一次性启动，避免部分分配死锁。', 'If capacity is short, the whole group stays queued. If it fits, all four start together — no partial-allocation deadlock.')}</p>
+        </div>
+        <div className="isolation-tabs" role="group" aria-label={t('选择调度语义', 'Choose scheduling semantics')}>
+          <button type="button" className={isNaive ? 'active' : ''} onClick={() => setMode('naive')}>Per-Pod</button>
+          <button type="button" className={!isNaive ? 'active' : ''} onClick={() => setMode('gang')}>Gang</button>
+        </div>
+      </header>
+
+      <div className={`k8s-gang-board ${isNaive ? 'naive' : 'gang'}`}>
+        <div className="k8s-gpu-row" aria-label="GPU slots">
+          {['H100-0', 'H100-1', 'H100-2', 'held-by-other'].map((slot, index) => (
+            <div key={slot} className={`k8s-gpu-slot ${index === 3 ? 'busy' : isNaive ? 'taken' : 'reserved'}`}>
+              <span>{slot === 'held-by-other' ? 'busy' : slot}</span>
+              <strong>{index === 3 ? 'team-c infer' : isNaive ? `rank ${index}` : t('预留', 'reserved')}</strong>
+            </div>
+          ))}
+        </div>
+        <div className="k8s-gang-workers">
+          {[0, 1, 2, 3].map((rank) => (
+            <div
+              key={rank}
+              className={`k8s-gang-worker ${isNaive ? (rank < 3 ? 'running' : 'pending') : 'queued'}`}
+            >
+              <span>worker-{rank}</span>
+              <strong>{isNaive ? (rank < 3 ? 'Running' : 'Pending') : 'Queued'}</strong>
+              <small>{isNaive
+                ? (rank < 3 ? 'holds 1 GPU' : 'waiting forever')
+                : t('等待整组成交', 'waiting for the full gang')}</small>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <footer className="k8s-visual-footer">
+        <span>{t('记忆', 'Remember')}</span>
+        <strong>{isNaive
+          ? t('部分占用是分布式训练最贵的调度错误。', 'Partial occupancy is the most expensive scheduling bug in distributed training.')
+          : t('全上或全不上；凑不齐就释放，不要干等。', 'All or nothing; if the gang cannot form, release — do not wait.')}</strong>
+      </footer>
+    </section>
+  );
+}
+
+const K8S_DUTY_LAYERS = [
+  {
+    id: 'edge',
+    tag: '接入层',
+    tagEn: 'Edge',
+    who: 'LB / Gateway / Ingress',
+    allow: '鉴权、限流、路由、TLS',
+    allowEn: 'Auth, rate limit, routing, TLS',
+    deny: '不写库存，不跑训练 step',
+    denyEn: 'No stock writes, no training steps',
+  },
+  {
+    id: 'compute',
+    tag: '计算层',
+    tagEn: 'Compute',
+    who: 'Stateless Service / Deployment',
+    allow: '编排、校验、发写、入队',
+    allowEn: 'Orchestrate, validate, write, enqueue',
+    deny: '进程里不放不可丢的状态',
+    denyEn: 'No durable facts in the process',
+  },
+  {
+    id: 'data',
+    tag: '数据层',
+    tagEn: 'Data',
+    who: 'DB / Redis / PVC / etcd',
+    allow: '事实、缓存、集群状态',
+    allowEn: 'Facts, cache, cluster state',
+    deny: '不处理用户 HTTP 业务规则',
+    denyEn: 'No user HTTP business rules',
+  },
+  {
+    id: 'async',
+    tag: '异步层',
+    tagEn: 'Async',
+    who: 'MQ / Job / Worker',
+    allow: '削峰、重试、checkpoint',
+    allowEn: 'Burst, retry, checkpoint',
+    deny: '不挡在同步 p99 路径上',
+    denyEn: 'Not on the sync p99 path',
+  },
+];
+
+const K8S_CONTROL_DUTY = [
+  { id: 'api', who: 'apiserver / etcd', job: '存期望与观测', jobEn: 'desired and observed state' },
+  { id: 'sched', who: 'Kueue / scheduler', job: '准入与放置', jobEn: 'admission and placement' },
+  { id: 'kubelet', who: 'kubelet / runtime', job: '在节点上执行', jobEn: 'execute on the node' },
+  { id: 'plane', who: 'Pod / NCCL / GPU', job: '数据面；token 不经 apiserver', jobEn: 'data plane; tokens skip apiserver' },
+];
+
+const K8S_TOPO_LAYERS = [
+  {
+    id: 'region',
+    tag: 'Region',
+    fail: '整个地域不可用',
+    failEn: 'The whole region is gone',
+    place: '多 region 是独立集群，不是一个 Deployment',
+    placeEn: 'Regions are separate clusters, not one Deployment',
+  },
+  {
+    id: 'zone',
+    tag: 'AZ / zone',
+    fail: '一个可用区断电',
+    failEn: 'One availability zone loses power',
+    place: '无状态副本 topologySpread；DB 跨 AZ 复制',
+    placeEn: 'Spread stateless replicas; replicate the DB across AZs',
+  },
+  {
+    id: 'rack',
+    tag: 'Rack / NVLink',
+    fail: '交换机或 NVSwitch 挂',
+    failEn: 'The switch or NVSwitch dies',
+    place: '训练 gang 聚在这里；推理才打散',
+    placeEn: 'Colocate a training gang here; spread only for inference',
+  },
+  {
+    id: 'node',
+    tag: 'Node',
+    fail: 'kubelet / 机器挂',
+    failEn: 'kubelet or the machine dies',
+    place: 'Pod 被驱逐，controller 重建',
+    placeEn: 'Pods are evicted; a controller recreates them',
+  },
+  {
+    id: 'pod',
+    tag: 'Pod / GPU',
+    fail: '容器退出',
+    failEn: 'The container exits',
+    place: 'NCCL 组一起死，不要单 rank 重启',
+    placeEn: 'The NCCL group dies together; do not restart one rank',
+  },
+];
+
+function KubernetesLayeredArchVisual() {
+  const { isEnglish, t } = useUiCopy();
+  const [axis, setAxis] = useState('duty');
+  const [dutyIndex, setDutyIndex] = useState(0);
+  const [topoIndex, setTopoIndex] = useState(2);
+  const isDuty = axis === 'duty';
+  const duty = K8S_DUTY_LAYERS[dutyIndex];
+  const topo = K8S_TOPO_LAYERS[topoIndex];
+
+  return (
+    <section className="k8s-visual k8s-layered" aria-label={t('职责分层与拓扑分层', 'Responsibility layers and topology layers')}>
+      <header className="k8s-visual-header">
+        <div>
+          <p className="eyebrow">{t('分层架构', 'Layered architecture')}</p>
+          <h2>{isDuty
+            ? t('职责分层：每层允许做什么', 'Responsibility: what each layer may do')
+            : t('拓扑分层：谁和谁一起死', 'Topology: what fails together')}</h2>
+          <p>{isDuty
+            ? t('点一层看允许和不允许。右边是 k8s 自己的职责切分。', 'Select a layer for allowed and forbidden work. The right column is Kubernetes’ own duty split.')
+            : t('点一层看故障范围和调度含义。训练 gang 聚在 rack / NVLink，不要按无状态服务打散。', 'Select a layer for its failure domain and placement rule. Colocate a training gang on a rack / NVLink; do not spread it like a stateless service.')}</p>
+        </div>
+        <div className="isolation-tabs" role="group" aria-label={t('选择分层轴', 'Choose a layering axis')}>
+          <button type="button" className={isDuty ? 'active' : ''} onClick={() => setAxis('duty')}>
+            {t('职责分层', 'Responsibility')}
+          </button>
+          <button type="button" className={!isDuty ? 'active' : ''} onClick={() => setAxis('topo')}>
+            {t('拓扑分层', 'Topology')}
+          </button>
+        </div>
+      </header>
+
+      {isDuty ? (
+        <div className="k8s-layered-board">
+          <div className="k8s-duty-col" role="tablist" aria-label={t('业务职责层', 'Business responsibility layers')}>
+            {K8S_DUTY_LAYERS.map((item, index) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={dutyIndex === index}
+                className={`k8s-duty-row is-${item.id} ${dutyIndex === index ? 'active' : ''}`}
+                onClick={() => setDutyIndex(index)}
+              >
+                <small>0{index + 1}</small>
+                <strong>{isEnglish ? item.tagEn : item.tag}</strong>
+                <span>{item.who}</span>
+              </button>
+            ))}
+          </div>
+          <div className="k8s-duty-k8s" aria-label={t('Kubernetes 职责层', 'Kubernetes responsibility layers')}>
+            <small>{t('k8s 自己', 'Kubernetes itself')}</small>
+            {K8S_CONTROL_DUTY.map((item) => (
+              <div key={item.id} className="k8s-duty-k8s-row">
+                <strong>{item.who}</strong>
+                <span>{isEnglish ? item.jobEn : item.job}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : (
+        <>
+          <div className="k8s-layer-tabs" role="tablist" aria-label={t('选择拓扑层', 'Choose a topology layer')}>
+            {K8S_TOPO_LAYERS.map((item, index) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={topoIndex === index}
+                className={topoIndex === index ? 'active' : ''}
+                onClick={() => setTopoIndex(index)}
+              >
+                {item.tag}
+              </button>
+            ))}
+          </div>
+          <div className="k8s-topo-stage">
+            {K8S_TOPO_LAYERS.reduceRight((child, item, index) => (
+              <div
+                key={item.id}
+                className={`k8s-topo-nest is-${item.id} ${index === topoIndex ? 'current' : ''}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setTopoIndex(index);
+                }}
+              >
+                <span>{item.tag}</span>
+                {index === K8S_TOPO_LAYERS.length - 1 ? (
+                  <div className="k8s-nest-process">
+                    <b>rank 0–3</b>
+                    <small>same NVLink domain</small>
+                  </div>
+                ) : child}
+              </div>
+            ), null)}
+          </div>
+        </>
+      )}
+
+      <footer className="k8s-visual-footer">
+        <span>{isDuty ? t('这一层', 'This layer') : t('这一层故障域', 'This failure domain')}</span>
+        <strong>{isDuty ? (isEnglish ? duty.tagEn : duty.tag) : topo.tag}</strong>
+        <p>{isDuty
+          ? `${t('允许', 'Allowed')}：${isEnglish ? duty.allowEn : duty.allow}。${t('不允许', 'Not allowed')}：${isEnglish ? duty.denyEn : duty.deny}。`
+          : `${t('一起挂', 'Fails together')}：${isEnglish ? topo.failEn : topo.fail}。${t('怎么放', 'Placement')}：${isEnglish ? topo.placeEn : topo.place}。`}</p>
+        <small>{isDuty
+          ? t('同层水平扩；跨层走 HTTP / PVC / CRD。', 'Scale a layer horizontally; cross layers with HTTP / PVC / CRD.')
+          : t('先画职责，再把每一层标到拓扑上。', 'Draw responsibility first, then pin each layer onto topology.')}</small>
       </footer>
     </section>
   );
@@ -24358,7 +24116,7 @@ function MartingaleRandomWalkVisual() {
 function MarkdownPre({ children, ...props }) {
   const child = Array.isArray(children) ? children[0] : children;
   const className = child?.props?.className ?? '';
-  const match = /language-(quiz|mcq|mermaid|topo-demo|bellman-demo|segment-tree-demo|interval-merge-demo|interval-insert-demo|interval-rooms-demo|interval-query-demo|pow-demo|sliding-window-demo|longest-substring-demo|sliding-window-patterns|monotonic-stack-demo|largest-rectangle-demo|binary-search-template-demo|linked-list-reversal-demo|fast-slow-pointer-demo|array-duplicate-demo|lru-cache-demo|tree-traversal-demo|avl-rotation-demo|build-tree-demo|median-two-heaps-demo|three-sum-demo|rain-water-demo|simple-sort-race-demo|efficient-sort-race-demo|high-dimensional-integral-demo|record-minimum-demo|message-queue-demo|business-algorithm-map|system-design-overview-visual|photo-sharing-architecture-visual|async-messaging-architecture-visual|virtualization-container-visual|grid-multi-source-bfs-demo|union-find-demo|quickselect-partition-demo|trie-core-demo|trie-wildcard-demo|palindrome-dp-demo|coin-change-demo|subset-sum-demo|anisotropy-cone-demo|backtracking-patterns|backtracking-tree-demo|permutations-demo|combination-sum-demo|backtracking-dedup-demo|n-queens-demo|greedy-patterns|kadane-demo|jump-game-demo|gas-station-demo|partition-labels-demo|vtable-dispatch-demo|false-sharing-demo|fork-cow-demo|epoll-vs-select-demo|shared-ptr-cycle-demo|martingale-rw-demo|random-walk-ruin-demo|brownian-motion-demo|two-d-walk-demo|ito-geometry-demo|reflection-principle-demo|delta-hedging-demo|game-theory-interactive-demo|fwl-geometry-demo|ml-metrics-demo|cart-partition-demo)/.exec(className);
+  const match = /language-(quiz|mcq|mermaid|topo-demo|bellman-demo|segment-tree-demo|interval-merge-demo|interval-insert-demo|interval-rooms-demo|interval-query-demo|pow-demo|sliding-window-demo|longest-substring-demo|sliding-window-patterns|monotonic-stack-demo|largest-rectangle-demo|binary-search-template-demo|linked-list-reversal-demo|fast-slow-pointer-demo|array-duplicate-demo|lru-cache-demo|tree-traversal-demo|avl-rotation-demo|build-tree-demo|median-two-heaps-demo|three-sum-demo|rain-water-demo|simple-sort-race-demo|efficient-sort-race-demo|high-dimensional-integral-demo|record-minimum-demo|message-queue-demo|business-algorithm-map|system-design-overview-visual|photo-sharing-architecture-visual|flash-sale-architecture-visual|async-messaging-architecture-visual|virtualization-container-visual|k8s-hierarchy-visual|k8s-lifecycle-visual|k8s-gang-visual|k8s-layered-arch-visual|grid-multi-source-bfs-demo|union-find-demo|quickselect-partition-demo|trie-core-demo|trie-wildcard-demo|palindrome-dp-demo|coin-change-demo|subset-sum-demo|anisotropy-cone-demo|backtracking-patterns|backtracking-tree-demo|permutations-demo|combination-sum-demo|backtracking-dedup-demo|n-queens-demo|greedy-patterns|kadane-demo|jump-game-demo|gas-station-demo|partition-labels-demo|vtable-dispatch-demo|false-sharing-demo|fork-cow-demo|epoll-vs-select-demo|shared-ptr-cycle-demo|martingale-rw-demo|random-walk-ruin-demo|brownian-motion-demo|two-d-walk-demo|ito-geometry-demo|reflection-principle-demo|delta-hedging-demo|game-theory-interactive-demo|fwl-geometry-demo|ml-metrics-demo|cart-partition-demo)/.exec(className);
 
   if (match?.[1] === 'mermaid') {
     return <MermaidDiagram chart={extractPlainText(child.props.children).replace(/\n$/, '')} />;
@@ -24560,12 +24318,32 @@ function MarkdownPre({ children, ...props }) {
     return <PhotoSharingArchitectureVisual />;
   }
 
+  if (match?.[1] === 'flash-sale-architecture-visual') {
+    return <FlashSaleArchitectureVisual />;
+  }
+
   if (match?.[1] === 'async-messaging-architecture-visual') {
     return <AsyncMessagingArchitectureVisual />;
   }
 
   if (match?.[1] === 'virtualization-container-visual') {
     return <VirtualizationContainerVisual />;
+  }
+
+  if (match?.[1] === 'k8s-hierarchy-visual') {
+    return <KubernetesHierarchyVisual />;
+  }
+
+  if (match?.[1] === 'k8s-lifecycle-visual') {
+    return <KubernetesLifecycleVisual />;
+  }
+
+  if (match?.[1] === 'k8s-gang-visual') {
+    return <KubernetesGangVisual />;
+  }
+
+  if (match?.[1] === 'k8s-layered-arch-visual') {
+    return <KubernetesLayeredArchVisual />;
   }
 
   if (match?.[1] === 'vtable-dispatch-demo') {
@@ -24864,6 +24642,8 @@ function tokenizeCode(code, language) {
 
 const legacyRoutes = {
   'SystemDesign05 Interview Flow.md': 'SystemDesign00 Overview.md',
+  'SystemDesign03 Database Scaling.md': 'SystemDesign02 Database Paradigms.md',
+  'SystemDesign05 Reliability Replication.md': 'SystemDesign02 Database Paradigms.md',
   'SystemDesign06 Photo Sharing Feed.md': 'SystemDesign07 Photo Sharing Feed.md',
   'SystemDesign07 Async Messaging Systems.md': 'SystemDesign06 Async Messaging Systems.md',
   'CoreSkills08 Design Segment Tree.md': 'CoreSkills08 Insertion Sort.md',

@@ -1,6 +1,6 @@
 # System Design 01B · Virtualization and Containers
 
-Course Location: [[SystemDesign01 Stateless Service|01 Stateless Service]] → This Section → [[SystemDesign02 Database Paradigms|02 Database Paradigms]]
+Course Location: [[SystemDesign01 Stateless Service|01 Stateless Service]] → This Section → [[SystemDesign01C Kubernetes|01C Kubernetes]]
 
 Remember the most important distinction first: A VM virtualizes a machine, while a container isolates a set of processes. The guest inside a VM has its own kernel; a container continues to use the host kernel.
 
@@ -34,7 +34,7 @@ Type 1: Hypervisor controls hardware directly
 Type 2: Hypervisor runs as a program on the host OS
 ```
 
-Reality is not that neat. KVM is the virtualization capability of the Linux kernel, while QEMU is a user-space VMM; together, they leverage the general-purpose host kernel while providing an execution path close to Type 1. In an interview, explaining component responsibilities is more useful than arguing about which category it belongs to.
+Reality is not that neat. KVM is the virtualization capability of the Linux kernel, while QEMU is a user-space VMM; together, they leverage the general-purpose host kernel while providing an execution path close to Type 1. Explaining component responsibilities is more useful than arguing about which category it belongs to.
 
 ---
 
@@ -233,7 +233,7 @@ Security boundaries should match the level of tenant trust. Sharing a kernel amo
 
 ---
 
-## 8 · Interview Cheat Sheet
+## 8 · Quick Review
 
 ```text
 VM
@@ -255,7 +255,7 @@ Docker
 = image/build/distribution/runtime UX around containers
 ```
 
-The most common focus in system design: containers provide standard deployment units and resource boundaries; orchestrators handle placement, health, scaling, and rollouts; external data systems store non-volatile state.
+The most common focus in system design: containers provide standard deployment units and resource boundaries; orchestrators handle placement, health, scaling, and rollouts; external data systems store non-volatile state. The next note, [[SystemDesign01C Kubernetes|01C Kubernetes]], takes the orchestration layer into LLM training: gangs, queues, checkpoints, and topology.
 
 ---
 

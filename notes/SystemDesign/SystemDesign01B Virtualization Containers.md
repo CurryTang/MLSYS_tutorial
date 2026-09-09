@@ -1,6 +1,6 @@
 # System Design 01B · 虚拟化与容器
 
-课程位置：[[SystemDesign01 Stateless Service|01 无状态服务]] → 本篇 → [[SystemDesign02 Database Paradigms|02 数据库基本范式]]
+课程位置：[[SystemDesign01 Stateless Service|01 无状态服务]] → 本篇 → [[SystemDesign01C Kubernetes|01C Kubernetes]]
 
 先记住最重要的区别：VM 虚拟出一台机器，container 隔离一组进程。VM 里的 guest 有自己的 kernel；container 仍在使用 host kernel。
 
@@ -34,7 +34,7 @@ Type 1: hypervisor 直接控制硬件
 Type 2: hypervisor 作为 host OS 上的程序运行
 ```
 
-现实没有这么整齐。KVM 是 Linux kernel 的虚拟化能力，QEMU 是 user-space VMM；两者合起来既利用通用 host kernel，又能提供接近 Type 1 的执行路径。面试里解释组件职责，比争论它属于哪一类更有用。
+现实没有这么整齐。KVM 是 Linux kernel 的虚拟化能力，QEMU 是 user-space VMM；两者合起来既利用通用 host kernel，又能提供接近 Type 1 的执行路径。解释组件职责，比争论它属于哪一类更有用。
 
 ---
 
@@ -233,7 +233,7 @@ Immutable image 配合版本化部署，可以先启动新 replica，通过 read
 
 ---
 
-## 8 · 面试记忆版
+## 8 · 快速复习
 
 ```text
 VM
@@ -255,7 +255,7 @@ Docker
 = image/build/distribution/runtime UX around containers
 ```
 
-System design 里最常见的落点：container 提供标准部署单元和资源边界；orchestrator 负责 placement、health、scaling 与 rollout；外部数据系统保存不可丢失状态。
+System design 里最常见的落点：container 提供标准部署单元和资源边界；orchestrator 负责 placement、health、scaling 与 rollout；外部数据系统保存不可丢失状态。下一篇 [[SystemDesign01C Kubernetes|01C Kubernetes]] 把编排层展开到 LLM 训练：gang、队列、checkpoint 和拓扑。
 
 ---
 

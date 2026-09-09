@@ -1,6 +1,6 @@
 # System Design 04 · Storage Systems: File, Block, Object, Blob, and HDFS
 
-Course Location: [[SystemDesign03 Database Scaling|03 Database Scaling]] → This Article → [[SystemDesign05 Reliability Replication|05 Reliability and Replication]]
+Course Location: [[SystemDesign02 Database Paradigms|02 Database]] → this note → [[SystemDesign06 Async Messaging Systems|06 Message Queue]]
 
 > [!info] Core Question
 > The differences between storage systems do not lie in "where the files are stored," but in access units, metadata location, read/write patterns, consistency semantics, and scalability. Determine how data is read and written first, then choose the storage format.

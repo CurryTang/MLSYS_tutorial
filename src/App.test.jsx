@@ -46,16 +46,22 @@ describe('App', () => {
             ? `${english ? '# Business algorithm system map' : '# 第一部分：系统总览与数据基础'}\n\n\`\`\`business-algorithm-map\n\`\`\``
             : english
               ? '# English tutorial\n\nThis is the English version.'
+            : requestUrl.includes('SystemDesign03')
+              ? '# System Design 03 · 数据库扩展\n\n分片与副本。'
             : requestUrl.includes('SystemDesign05')
               ? '# System Design 05 · 可靠性、复制与故障切换'
             : requestUrl.includes('SystemDesign06')
-              ? '# System Design 06 · 异步处理、消息系统与 Event Bus'
+              ? '# System Design 06 · 消息队列'
             : requestUrl.includes('SystemDesign07')
               ? '# System Design 07 · 设计图片分享与 Home Feed'
             : requestUrl.includes('SystemDesign08')
-              ? '# System Design 08 · 异步 LLM RL 训练平台\n\n这个例子只有约 60 sample admission QPS。'
+              ? '# System Design 08 · 异步 LLM RL 平台\n\nSample Admission QPS ~60 /s。'
             : requestUrl.includes('SystemDesign09')
               ? '# System Design 09 · 一致性哈希\n\n节点变化时只迁移相邻区间。'
+            : requestUrl.includes('SystemDesign10')
+              ? '# System Design 10 · Flash Sale (秒杀)'
+            : requestUrl.includes('SystemDesign01D')
+              ? '# System Design 01D · Redis'
             : requestUrl.includes('CoreSkills09')
               ? '## 双源推进可行性：Interleaving String\n\n$$dp[i][j] = (dp[i-1][j] \\land s_1[i-1] == s_3[i+j-1]) \\lor (dp[i][j-1] \\land s_2[j-1] == s_3[i+j-1])$$\n'
             : chineseContent,
@@ -587,42 +593,34 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'System Design' }));
 
     expect(await screen.findByRole('heading', { name: /System Design 0/i })).toBeInTheDocument();
-    expect(screen.getByText('本板块共 12 篇笔记')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /System Design 01 · 无状态设计范式/i })).toBeInTheDocument();
+    expect(screen.getByText('本板块共 13 篇笔记')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /System Design 01 · 无状态服务/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /System Design 01B · 虚拟化与容器/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /System Design 02 · 数据库基本范式/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /System Design 03 · 数据库扩展三件套/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /System Design 04 · 存储系统/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /System Design 05 · 可靠性与复制/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /System Design 06 · 异步消息系统/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /System Design 01C · Kubernetes/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /System Design 01D · Redis/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /System Design 02 · 数据库/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /System Design 03 · /i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /System Design 04 · 存储/i })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /System Design 05 · /i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /System Design 06 · 消息队列/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /System Design 07 · 图片分享与 Feed/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /System Design 08 · 异步 LLM RL 训练平台/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /System Design 08 · 异步 LLM RL/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /System Design 09 · 一致性哈希/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /System Design 10 · 秒杀/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /System Design 99 · 高频术语整合/i })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /System Design 02 · 数据库基本范式/i }));
+    fireEvent.click(screen.getByRole('button', { name: /System Design 02 · 数据库/i }));
 
-    expect(await screen.findByRole('heading', { name: /数据库基本范式/ })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /数据库/ })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /System Design 03 · 数据库扩展三件套/i }));
-
-    expect(await screen.findByRole('heading', { name: /Feature Store 分片的代价/ })).toBeInTheDocument();
-    expect(screen.getByText(/Push \/ active update/)).toBeInTheDocument();
-    expect(screen.getByText('Database Scaling Check 1')).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole('button', { name: /System Design 04 · 存储系统/i }));
+    fireEvent.click(screen.getByRole('button', { name: /System Design 04 · 存储/i }));
 
     expect(await screen.findByRole('heading', { name: /中文教程/ })).toBeInTheDocument();
     expect(screen.getAllByText('SystemDesign04 Storage Systems.md')).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole('button', { name: /System Design 05 · 可靠性与复制/i }));
+    fireEvent.click(screen.getByRole('button', { name: /System Design 06 · 消息队列/i }));
 
-    expect(await screen.findByRole('heading', { name: /可靠性、复制与故障切换/ })).toBeInTheDocument();
-    expect(screen.getAllByText('SystemDesign05 Reliability Replication.md')).toHaveLength(2);
-
-    fireEvent.click(screen.getByRole('button', { name: /System Design 06 · 异步消息系统/i }));
-
-    expect(await screen.findByRole('heading', { name: /异步处理、消息系统与 Event Bus/ })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /消息队列/ })).toBeInTheDocument();
     expect(screen.getAllByText('SystemDesign06 Async Messaging Systems.md')).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: /System Design 07 · 图片分享与 Feed/i }));
@@ -630,10 +628,10 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: /设计图片分享与 Home Feed/ })).toBeInTheDocument();
     expect(screen.getAllByText('SystemDesign07 Photo Sharing Feed.md')).toHaveLength(2);
 
-    fireEvent.click(screen.getByRole('button', { name: /System Design 08 · 异步 LLM RL 训练平台/i }));
+    fireEvent.click(screen.getByRole('button', { name: /System Design 08 · 异步 LLM RL/i }));
 
-    expect(await screen.findByRole('heading', { name: /System Design 08 · 异步 LLM RL 训练平台/ })).toBeInTheDocument();
-    expect(screen.getByText(/60 sample admission QPS/)).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /System Design 08 · 异步 LLM RL/ })).toBeInTheDocument();
+    expect(screen.getByText(/Sample Admission QPS ~60 \/s/)).toBeInTheDocument();
     expect(screen.getAllByText('SystemDesign08 LLM Async RL Platform.md')).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: /System Design 09 · 一致性哈希/i }));
@@ -641,6 +639,11 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { name: /System Design 09 · 一致性哈希/ })).toBeInTheDocument();
     expect(screen.getByText(/节点变化时只迁移相邻区间/)).toBeInTheDocument();
     expect(screen.getAllByText('SystemDesign09 Consistent Hashing.md')).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole('button', { name: /System Design 10 · 秒杀/i }));
+
+    expect(await screen.findByRole('heading', { name: /秒杀/ })).toBeInTheDocument();
+    expect(screen.getAllByText('SystemDesign10 Flash Sale.md')).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: /System Design 99 · 高频术语整合/i }));
 
@@ -740,7 +743,7 @@ describe('App', () => {
     render(<App />);
 
     fireEvent.click(screen.getByRole('button', { name: 'System Design' }));
-    fireEvent.click(screen.getByRole('button', { name: /System Design 06 · 异步消息系统/i }));
+    fireEvent.click(screen.getByRole('button', { name: /System Design 06 · 消息队列/i }));
 
     const visual = await screen.findByRole('region', { name: '消息队列数据与投递生命周期演示' });
     expect(within(visual).getByText('Producer 构造应用消息')).toBeInTheDocument();
@@ -783,12 +786,53 @@ describe('App', () => {
     expect(within(visual).getByText('隔离进程视图和资源，kernel 仍然共享。')).toBeInTheDocument();
   });
 
+  it('animates Kubernetes object hierarchy and gang scheduling', async () => {
+    globalThis.fetch.mockImplementation(async (input) => {
+      const requestUrl = String(input);
+      return {
+        ok: true,
+        text: async () => requestUrl.includes('SystemDesign01C')
+          ? '# Kubernetes\n\n```k8s-hierarchy-visual\n```\n\n```k8s-gang-visual\n```\n\n```k8s-layered-arch-visual\n```'
+          : '# System Design tutorial',
+      };
+    });
+
+    render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'System Design' }));
+    fireEvent.click(await screen.findByRole('button', { name: /System Design 01C · Kubernetes/i }));
+
+    const hierarchy = await screen.findByRole('region', { name: 'Kubernetes 对象层级从容器到 Namespace' });
+    expect(within(hierarchy).getByText('从容器一层层包到 Namespace')).toBeInTheDocument();
+    expect(within(hierarchy).getByText('train.py')).toBeInTheDocument();
+
+    fireEvent.click(within(hierarchy).getByRole('tab', { name: /Namespace/i }));
+    expect(within(hierarchy).getByText('虚拟集群边界')).toBeInTheDocument();
+    expect(within(hierarchy).getByText('多租户的第一刀，不是最后一道墙。')).toBeInTheDocument();
+
+    const gang = screen.getByRole('region', { name: '逐 Pod 调度与 Gang Scheduling 对比' });
+    expect(within(gang).getByText('默认调度：先占到的人先跑')).toBeInTheDocument();
+    expect(within(gang).getByText('waiting forever')).toBeInTheDocument();
+
+    fireEvent.click(within(gang).getByRole('button', { name: 'Gang' }));
+    expect(within(gang).getByText('Gang：凑齐 4 张 GPU 才启动')).toBeInTheDocument();
+    expect(within(gang).getAllByText('Queued')).toHaveLength(4);
+
+    const layered = screen.getByRole('region', { name: '职责分层与拓扑分层' });
+    expect(within(layered).getByText('职责分层：每层允许做什么')).toBeInTheDocument();
+    fireEvent.click(within(layered).getByRole('tab', { name: /数据层/ }));
+    expect(within(layered).getByText(/不处理用户 HTTP 业务规则/)).toBeInTheDocument();
+    fireEvent.click(within(layered).getByRole('button', { name: '拓扑分层' }));
+    expect(within(layered).getByText('拓扑分层：谁和谁一起死')).toBeInTheDocument();
+    fireEvent.click(within(layered).getByRole('tab', { name: 'AZ / zone' }));
+    expect(within(layered).getByText(/无状态副本 topologySpread/)).toBeInTheDocument();
+  });
+
   it('redirects renamed System Design note routes to the new chapter numbers', async () => {
     window.history.replaceState(null, '', '/#SystemDesign07%20Async%20Messaging%20Systems.md');
 
     render(<App />);
 
-    expect(await screen.findByRole('heading', { name: /异步处理、消息系统与 Event Bus/ })).toBeInTheDocument();
+    expect(await screen.findByRole('heading', { name: /消息队列/ })).toBeInTheDocument();
     expect(screen.getAllByText('SystemDesign06 Async Messaging Systems.md')).toHaveLength(2);
 
     await waitFor(() => {
@@ -820,6 +864,8 @@ describe('App', () => {
         content = '# Async Messaging\n\n```async-messaging-architecture-visual\n```';
       } else if (requestUrl.includes('SystemDesign07')) {
         content = '# Photo Sharing\n\n```photo-sharing-architecture-visual\n```';
+      } else if (requestUrl.includes('SystemDesign10')) {
+        content = '# Flash Sale\n\n```flash-sale-architecture-visual\n```';
       }
 
       return { ok: true, text: async () => content };
@@ -839,11 +885,19 @@ describe('App', () => {
     expect(within(photo).getByText('先取 post_id，再批量补齐内容')).toBeInTheDocument();
     expect(within(photo).getByText('读取时校验')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /System Design 06 · 异步消息系统/i }));
+    fireEvent.click(screen.getByRole('button', { name: /System Design 06 · 消息队列/i }));
     const asyncDiagram = await screen.findByRole('region', { name: '异步消息模式架构图' });
     fireEvent.click(within(asyncDiagram).getByRole('button', { name: 'Kafka groups' }));
     expect(within(asyncDiagram).getByText('系统是实现，group 决定语义')).toBeInTheDocument();
     expect(within(asyncDiagram).getByText('group: analytics')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /System Design 10 · 秒杀/i }));
+    const flash = await screen.findByRole('region', { name: '秒杀系统架构图' });
+    expect(within(flash).getByText(/202 不预占库存/)).toBeInTheDocument();
+    fireEvent.click(within(flash).getByRole('button', { name: '查看活动' }));
+    expect(within(flash).getByText('Sale Service')).toBeInTheDocument();
+    fireEvent.click(within(flash).getByRole('button', { name: '查结果' }));
+    expect(within(flash).getByText(/Redis 是读模型/)).toBeInTheDocument();
   });
 
   it('shows local-only draft notes in development mode', async () => {
