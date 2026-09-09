@@ -9132,7 +9132,779 @@ function FWLGeometryVisual() {
   );
 }
 
+const CART_DEMO_POINTS = [
+  // R1: X1 in [0, 5], X2 in [0, 4.5] -> Mean = 8.5
+  { id: 1, x1: 1.5, x2: 1.5, y: 7.0 },
+  { id: 2, x1: 2.5, x2: 3.5, y: 9.0 },
+  { id: 3, x1: 4.0, x2: 1.0, y: 8.0 },
+  { id: 4, x1: 3.5, x2: 2.5, y: 10.0 },
+
+  // R2: X1 in [0, 5], X2 in (4.5, 10] -> Mean = 22.0
+  { id: 5, x1: 1.5, x2: 6.5, y: 20.0 },
+  { id: 6, x1: 3.0, x2: 8.0, y: 22.0 },
+  { id: 7, x1: 4.2, x2: 5.5, y: 21.0 },
+  { id: 8, x1: 2.0, x2: 9.0, y: 25.0 },
+
+  // R3: X1 in (5, 10], X2 in [0, 6.0] -> Mean = 34.0
+  { id: 9, x1: 6.0, x2: 2.0, y: 32.0 },
+  { id: 10, x1: 8.5, x2: 1.5, y: 35.0 },
+  { id: 11, x1: 7.0, x2: 4.5, y: 34.0 },
+  { id: 12, x1: 9.0, x2: 5.0, y: 35.0 },
+
+  // R4: X1 in (5, 7.5], X2 in (6.0, 10] -> Mean = 44.0
+  { id: 13, x1: 6.0, x2: 7.5, y: 43.0 },
+  { id: 14, x1: 7.0, x2: 9.0, y: 45.0 },
+
+  // R5: X1 in (7.5, 10], X2 in (6.0, 10] -> Mean = 55.0
+  { id: 15, x1: 8.5, x2: 7.0, y: 53.0 },
+  { id: 16, x1: 9.2, x2: 8.5, y: 57.0 },
+];
+
+function getCartPointColor(y) {
+  if (y <= 12) return '#38bdf8'; // Sky Blue
+  if (y <= 26) return '#34d399'; // Emerald
+  if (y <= 38) return '#fbbf24'; // Amber
+  if (y <= 48) return '#f43f5e'; // Rose
+  return '#c084fc'; // Purple
+}
+
+function getCartPointRegion(p, step) {
+  if (step === 0) return { key: 'R_all', name: 'R_all', c: 28.5, rule: '全部样本 Root (未切分)' };
+  if (step === 1) {
+    if (p.x1 <= 5.0) return { key: 'Left', name: '左半区 (X₁ ≤ 5.0)', c: 15.25, rule: 'X₁ ≤ 5.0' };
+    return { key: 'Right', name: '右半区 (X₁ > 5.0)', c: 41.75, rule: 'X₁ > 5.0' };
+  }
+  if (step === 2) {
+    if (p.x1 <= 5.0) {
+      if (p.x2 <= 4.5) return { key: 'R1', name: 'R₁', c: 8.5, rule: 'X₁ ≤ 5.0 ∩ X₂ ≤ 4.5' };
+      return { key: 'R2', name: 'R₂', c: 22.0, rule: 'X₁ ≤ 5.0 ∩ X₂ > 4.5' };
+    }
+    return { key: 'Right', name: '右半区 (X₁ > 5.0)', c: 41.75, rule: 'X₁ > 5.0' };
+  }
+  if (step === 3) {
+    if (p.x1 <= 5.0) {
+      if (p.x2 <= 4.5) return { key: 'R1', name: 'R₁', c: 8.5, rule: 'X₁ ≤ 5.0 ∩ X₂ ≤ 4.5' };
+      return { key: 'R2', name: 'R₂', c: 22.0, rule: 'X₁ ≤ 5.0 ∩ X₂ > 4.5' };
+    }
+    if (p.x2 <= 6.0) return { key: 'R3', name: 'R₃', c: 34.0, rule: 'X₁ > 5.0 ∩ X₂ ≤ 6.0' };
+    return { key: 'TopRight', name: '右上区 (X₁>5.0 ∩ X₂>6.0)', c: 49.5, rule: 'X₁ > 5.0 ∩ X₂ > 6.0' };
+  }
+  // Step 4
+  if (p.x1 <= 5.0) {
+    if (p.x2 <= 4.5) return { key: 'R1', name: 'R₁', c: 8.5, rule: 'X₁ ≤ 5.0 ∩ X₂ ≤ 4.5' };
+    return { key: 'R2', name: 'R₂', c: 22.0, rule: 'X₁ ≤ 5.0 ∩ X₂ > 4.5' };
+  }
+  if (p.x2 <= 6.0) return { key: 'R3', name: 'R₃', c: 34.0, rule: 'X₁ > 5.0 ∩ X₂ ≤ 6.0' };
+  if (p.x1 <= 7.5) return { key: 'R4', name: 'R₄', c: 44.0, rule: 'X₁ > 5.0 ∩ X₂ > 6.0 ∩ X₁ ≤ 7.5' };
+  return { key: 'R5', name: 'R₅', c: 55.0, rule: 'X₁ > 5.0 ∩ X₂ > 6.0 ∩ X₁ > 7.5' };
+}
+
+function CARTPartitionVisual() {
+  const { isEnglish, t } = useUiCopy();
+  const [activeStep, setActiveStep] = useState(0); // 0, 1, 2, 3, 4
+  const [selectedPointId, setSelectedPointId] = useState(1);
+  const [isPlaying, setIsPlaying] = useState(false);
+
+  useEffect(() => {
+    if (!isPlaying) return;
+    const timer = setInterval(() => {
+      setActiveStep((prev) => (prev + 1) % 5);
+    }, 2800);
+    return () => clearInterval(timer);
+  }, [isPlaying]);
+
+  const stepStats = useMemo(() => {
+    const statsByStep = [
+      { regions: 1, rss: 3810.0, vr: 0.0, deltaSS: 0.0, labelZh: '未切分 (全空间)', labelEn: 'Root Node (No Split)' },
+      { regions: 2, rss: 1001.0, vr: 73.7, deltaSS: 2809.0, labelZh: '切分 1: X₁ ≤ 5.0', labelEn: 'Split 1: X₁ ≤ 5.0' },
+      { regions: 3, rss: 636.5, vr: 83.3, deltaSS: 364.5, labelZh: '切分 2: 左侧 X₂ ≤ 4.5', labelEn: 'Split 2: Left X₂ ≤ 4.5' },
+      { regions: 4, rss: 156.0, vr: 95.9, deltaSS: 480.5, labelZh: '切分 3: 右侧 X₂ ≤ 6.0', labelEn: 'Split 3: Right X₂ ≤ 6.0' },
+      { regions: 5, rss: 35.0, vr: 99.1, deltaSS: 121.0, labelZh: '切分 4: 右上 X₁ ≤ 7.5', labelEn: 'Split 4: Top-Right X₁ ≤ 7.5' },
+    ];
+    return statsByStep[activeStep];
+  }, [activeStep]);
+
+  const selectedPoint = useMemo(() => {
+    return CART_DEMO_POINTS.find((p) => p.id === selectedPointId) || CART_DEMO_POINTS[0];
+  }, [selectedPointId]);
+
+  const selectedRegion = useMemo(() => {
+    return getCartPointRegion(selectedPoint, activeStep);
+  }, [selectedPoint, activeStep]);
+
+  const residual = selectedPoint.y - selectedRegion.c;
+
+  // Coordinate mapping for 2D Feature Space SVG
+  // viewBox: 0 0 480 390
+  // plot area: X from 55 to 445 (w=390), Y from 340 down to 40 (h=300)
+  const mapX = (x) => 55 + (x / 10) * 390;
+  const mapY = (y) => 340 - (y / 10) * 300;
+
+  // Path check for tree highlighting
+  const isSelectedLeft1 = selectedPoint.x1 <= 5.0;
+  const isSelectedLeft2 = isSelectedLeft1 && selectedPoint.x2 <= 4.5;
+  const isSelectedRight2 = isSelectedLeft1 && selectedPoint.x2 > 4.5;
+  const isSelectedRight3_bottom = !isSelectedLeft1 && selectedPoint.x2 <= 6.0;
+  const isSelectedRight3_top = !isSelectedLeft1 && selectedPoint.x2 > 6.0;
+  const isSelectedR4 = isSelectedRight3_top && selectedPoint.x1 <= 7.5;
+  const isSelectedR5 = isSelectedRight3_top && selectedPoint.x1 > 7.5;
+
+  return (
+    <section className="cart-demo-container" aria-label={t('CART 递归二叉切分与空间划分交互实验室', 'CART Recursive Binary Partition Interactive Lab')}>
+      <header className="cart-demo-header">
+        <div>
+          <p className="eyebrow">{t('CART 递归二叉切分与特征空间划分', 'CART Recursive Binary Partition Lab')}</p>
+          <h2>{t('二维空间 (X₁, X₂) 轴对齐切分、目标响应 y 局部均值预测与等价二叉树', '2D Space (X₁, X₂) Partition, Response y Local Mean & Binary Tree')}</h2>
+        </div>
+        <div className="cart-demo-controls">
+          <div className="cart-tab-group" role="tablist">
+            <button
+              type="button"
+              className={`cart-tab-btn ${activeStep === 0 ? 'active' : ''}`}
+              onClick={() => { setActiveStep(0); setIsPlaying(false); }}
+            >
+              {t('步骤 0: 原始数据', 'Step 0: Raw Data')}
+            </button>
+            <button
+              type="button"
+              className={`cart-tab-btn ${activeStep === 1 ? 'active' : ''}`}
+              onClick={() => { setActiveStep(1); setIsPlaying(false); }}
+            >
+              {t('切分 1: X₁ ≤ 5.0', 'Split 1: X₁ ≤ 5.0')}
+            </button>
+            <button
+              type="button"
+              className={`cart-tab-btn ${activeStep === 2 ? 'active' : ''}`}
+              onClick={() => { setActiveStep(2); setIsPlaying(false); }}
+            >
+              {t('切分 2: X₂ ≤ 4.5', 'Split 2: X₂ ≤ 4.5')}
+            </button>
+            <button
+              type="button"
+              className={`cart-tab-btn ${activeStep === 3 ? 'active' : ''}`}
+              onClick={() => { setActiveStep(3); setIsPlaying(false); }}
+            >
+              {t('切分 3: X₂ ≤ 6.0', 'Split 3: X₂ ≤ 6.0')}
+            </button>
+            <button
+              type="button"
+              className={`cart-tab-btn ${activeStep === 4 ? 'active' : ''}`}
+              onClick={() => { setActiveStep(4); setIsPlaying(false); }}
+            >
+              {t('切分 4: X₁ ≤ 7.5 (全景)', 'Split 4: Full R₁~R₅')}
+            </button>
+          </div>
+          <button
+            type="button"
+            className="cart-chip-btn"
+            onClick={() => setIsPlaying(!isPlaying)}
+          >
+            {isPlaying ? t('⏸ 暂停演练', '⏸ Pause') : t('▶ 自动演练', '▶ Auto Play')}
+          </button>
+        </div>
+      </header>
+
+      {/* Real-time Math Metrics Bar */}
+      <div className="cart-metrics-grid">
+        <div className="cart-metric-card" style={{ borderLeft: '3px solid #38bdf8' }}>
+          <span>{t('当前活跃超矩形区域数 M', 'Active Regions M')}</span>
+          <strong style={{ color: '#38bdf8' }}>{stepStats.regions} 个区域</strong>
+        </div>
+        <div className="cart-metric-card" style={{ borderLeft: '3px solid #f43f5e' }}>
+          <span>{t('残差平方和 RSS = ∑(y - ĉ)²', 'Residual Sum of Squares (RSS)')}</span>
+          <strong style={{ color: '#f43f5e' }}>{stepStats.rss.toFixed(1)}</strong>
+        </div>
+        <div className="cart-metric-card" style={{ borderLeft: '3px solid #34d399' }}>
+          <span>{t('累计方差缩减率 (1 - RSS/TSS)', 'Total Variance Reduction')}</span>
+          <strong style={{ color: '#34d399', fontSize: '1.25rem' }}>{stepStats.vr.toFixed(1)}%</strong>
+        </div>
+        <div className="cart-metric-card" style={{ borderLeft: '3px solid #fbbf24' }}>
+          <span>{t('本次切分增益 ΔSS = N₁N₂/N(ĉ₁-ĉ₂)² ', 'Step Split Gain ΔSS')}</span>
+          <strong style={{ color: '#fbbf24' }}>+{stepStats.deltaSS.toFixed(1)}</strong>
+        </div>
+      </div>
+
+      {/* Dual Coordinated Visualizations: 2D Feature Space on Left, CART Binary Tree on Right */}
+      <div className="cart-dual-canvas">
+        {/* Left Panel: 2D Partition Feature Space */}
+        <div className="cart-canvas-box">
+          <div className="cart-canvas-title">
+            <span><strong>{t('二维输入特征空间 (X₁, X₂)', '2D Input Feature Space (X₁, X₂)')}</strong></span>
+            <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>
+              {t('点击样本点查看坐标与残差', 'Click any sample point to inspect')}
+            </span>
+          </div>
+
+          <svg className="cart-svg" viewBox="0 0 480 380" role="img">
+            <defs>
+              <marker id="cart-arrow" viewBox="0 0 10 10" refX="7" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+                <path d="M 0 1 L 9 5 L 0 9 z" fill="#64748b" />
+              </marker>
+            </defs>
+
+            {/* Background Grid Lines */}
+            {[2, 4, 6, 8].map((v) => (
+              <g key={`grid-${v}`}>
+                <line x1={mapX(v)} y1={40} x2={mapX(v)} y2={340} stroke="#1e293b" strokeWidth="1" strokeDasharray="3 3" />
+                <line x1={55} y1={mapY(v)} x2={445} y2={mapY(v)} stroke="#1e293b" strokeWidth="1" strokeDasharray="3 3" />
+              </g>
+            ))}
+
+            {/* Partition Region Rectangles */}
+            {activeStep === 0 && (
+              <g>
+                <rect x={55} y={40} width={390} height={300} fill="rgba(56, 189, 248, 0.08)" stroke="#334155" strokeWidth="1" />
+                <rect x={150} y={170} width={200} height={40} rx={6} fill="rgba(15, 23, 42, 0.85)" stroke="#38bdf8" strokeWidth="1" />
+                <text x={250} y={195} fill="#38bdf8" fontSize="13" fontWeight="700" textAnchor="middle">
+                  R_all: ŷ = ĉ₀ = 28.50 (N=16)
+                </text>
+              </g>
+            )}
+
+            {activeStep === 1 && (
+              <g>
+                <rect x={55} y={40} width={195} height={300} fill="rgba(56, 189, 248, 0.12)" stroke="#334155" />
+                <rect x={250} y={40} width={195} height={300} fill="rgba(251, 191, 36, 0.12)" stroke="#334155" />
+                <text x={152.5} y={190} fill="#38bdf8" fontSize="12" fontWeight="700" textAnchor="middle">
+                  Left: ŷ = ĉ_L = 15.25 (N=8)
+                </text>
+                <text x={347.5} y={190} fill="#fbbf24" fontSize="12" fontWeight="700" textAnchor="middle">
+                  Right: ŷ = ĉ_R = 41.75 (N=8)
+                </text>
+              </g>
+            )}
+
+            {activeStep === 2 && (
+              <g>
+                <rect x={55} y={205} width={195} height={135} fill="rgba(56, 189, 248, 0.15)" stroke="#334155" />
+                <rect x={55} y={40} width={195} height={165} fill="rgba(52, 211, 153, 0.15)" stroke="#334155" />
+                <rect x={250} y={40} width={195} height={300} fill="rgba(251, 191, 36, 0.12)" stroke="#334155" />
+                <text x={152.5} y={272} fill="#38bdf8" fontSize="12" fontWeight="700" textAnchor="middle">
+                  R₁: ŷ = ĉ₁ = 8.50 (N=4)
+                </text>
+                <text x={152.5} y={122} fill="#34d399" fontSize="12" fontWeight="700" textAnchor="middle">
+                  R₂: ŷ = ĉ₂ = 22.00 (N=4)
+                </text>
+                <text x={347.5} y={190} fill="#fbbf24" fontSize="12" fontWeight="700" textAnchor="middle">
+                  Right: ŷ = ĉ_R = 41.75 (N=8)
+                </text>
+              </g>
+            )}
+
+            {activeStep === 3 && (
+              <g>
+                <rect x={55} y={205} width={195} height={135} fill="rgba(56, 189, 248, 0.15)" stroke="#334155" />
+                <rect x={55} y={40} width={195} height={165} fill="rgba(52, 211, 153, 0.15)" stroke="#334155" />
+                <rect x={250} y={160} width={195} height={180} fill="rgba(251, 191, 36, 0.15)" stroke="#334155" />
+                <rect x={250} y={40} width={195} height={120} fill="rgba(244, 63, 94, 0.12)" stroke="#334155" />
+                <text x={152.5} y={272} fill="#38bdf8" fontSize="12" fontWeight="700" textAnchor="middle">
+                  R₁: ŷ = ĉ₁ = 8.50 (N=4)
+                </text>
+                <text x={152.5} y={122} fill="#34d399" fontSize="12" fontWeight="700" textAnchor="middle">
+                  R₂: ŷ = ĉ₂ = 22.00 (N=4)
+                </text>
+                <text x={347.5} y={250} fill="#fbbf24" fontSize="12" fontWeight="700" textAnchor="middle">
+                  R₃: ŷ = ĉ₃ = 34.00 (N=4)
+                </text>
+                <text x={347.5} y={100} fill="#f43f5e" fontSize="12" fontWeight="700" textAnchor="middle">
+                  TopRight: ŷ = 49.50 (N=4)
+                </text>
+              </g>
+            )}
+
+            {activeStep >= 4 && (
+              <g>
+                <rect x={55} y={205} width={195} height={135} fill="rgba(56, 189, 248, 0.16)" stroke="#334155" />
+                <rect x={55} y={40} width={195} height={165} fill="rgba(52, 211, 153, 0.16)" stroke="#334155" />
+                <rect x={250} y={160} width={195} height={180} fill="rgba(251, 191, 36, 0.16)" stroke="#334155" />
+                <rect x={250} y={40} width={97.5} height={120} fill="rgba(244, 63, 94, 0.16)" stroke="#334155" />
+                <rect x={347.5} y={40} width={97.5} height={120} fill="rgba(192, 132, 252, 0.16)" stroke="#334155" />
+
+                <text x={152.5} y={272} fill="#38bdf8" fontSize="12" fontWeight="700" textAnchor="middle">
+                  R₁: ŷ = 8.50
+                </text>
+                <text x={152.5} y={122} fill="#34d399" fontSize="12" fontWeight="700" textAnchor="middle">
+                  R₂: ŷ = 22.00
+                </text>
+                <text x={347.5} y={250} fill="#fbbf24" fontSize="12" fontWeight="700" textAnchor="middle">
+                  R₃: ŷ = 34.00
+                </text>
+                <text x={298.75} y={100} fill="#f43f5e" fontSize="12" fontWeight="700" textAnchor="middle">
+                  R₄: ŷ = 44.00
+                </text>
+                <text x={396.25} y={100} fill="#c084fc" fontSize="12" fontWeight="700" textAnchor="middle">
+                  R₅: ŷ = 55.00
+                </text>
+              </g>
+            )}
+
+            {/* Active Split Lines */}
+            {activeStep >= 1 && (
+              <g className="cart-split-line-anim">
+                <line x1={250} y1={40} x2={250} y2={340} stroke="#f43f5e" strokeWidth="2.5" strokeDasharray="6 4" />
+                <rect x={215} y={45} width={70} height={18} rx={4} fill="#f43f5e" />
+                <text x={250} y={58} fill="#fff" fontSize="10" fontWeight="700" textAnchor="middle">
+                  s₁: X₁ = 5.0
+                </text>
+              </g>
+            )}
+
+            {activeStep >= 2 && (
+              <g className="cart-split-line-anim">
+                <line x1={55} y1={205} x2={250} y2={205} stroke="#38bdf8" strokeWidth="2.5" strokeDasharray="6 4" />
+                <rect x={60} y={196} width={70} height={18} rx={4} fill="#0284c7" />
+                <text x={95} y={209} fill="#fff" fontSize="10" fontWeight="700" textAnchor="middle">
+                  s₂: X₂ = 4.5
+                </text>
+              </g>
+            )}
+
+            {activeStep >= 3 && (
+              <g className="cart-split-line-anim">
+                <line x1={250} y1={160} x2={445} y2={160} stroke="#fbbf24" strokeWidth="2.5" strokeDasharray="6 4" />
+                <rect x={370} y={151} width={70} height={18} rx={4} fill="#d97706" />
+                <text x={405} y={164} fill="#fff" fontSize="10" fontWeight="700" textAnchor="middle">
+                  s₃: X₂ = 6.0
+                </text>
+              </g>
+            )}
+
+            {activeStep >= 4 && (
+              <g className="cart-split-line-anim">
+                <line x1={347.5} y1={40} x2={347.5} y2={160} stroke="#c084fc" strokeWidth="2.5" strokeDasharray="6 4" />
+                <rect x={312.5} y={45} width={70} height={18} rx={4} fill="#7c3aed" />
+                <text x={347.5} y={58} fill="#fff" fontSize="10" fontWeight="700" textAnchor="middle">
+                  s₄: X₁ = 7.5
+                </text>
+              </g>
+            )}
+
+            {/* Selected Point Perpendicular Projection Lines */}
+            {selectedPoint && (
+              <g>
+                <line
+                  x1={mapX(selectedPoint.x1)}
+                  y1={mapY(selectedPoint.x2)}
+                  x2={mapX(selectedPoint.x1)}
+                  y2={340}
+                  stroke="#38bdf8"
+                  strokeWidth="1.5"
+                  strokeDasharray="4 3"
+                />
+                <line
+                  x1={mapX(selectedPoint.x1)}
+                  y1={mapY(selectedPoint.x2)}
+                  x2={55}
+                  y2={mapY(selectedPoint.x2)}
+                  stroke="#38bdf8"
+                  strokeWidth="1.5"
+                  strokeDasharray="4 3"
+                />
+                {/* Axis Coordinate Indicators */}
+                <circle cx={mapX(selectedPoint.x1)} cy={340} r="3.5" fill="#38bdf8" />
+                <circle cx={55} cy={mapY(selectedPoint.x2)} r="3.5" fill="#38bdf8" />
+              </g>
+            )}
+
+            {/* Main Axes */}
+            <line x1={55} y1={340} x2={465} y2={340} stroke="#64748b" strokeWidth="1.5" markerEnd="url(#cart-arrow)" />
+            <line x1={55} y1={340} x2={55} y2={25} stroke="#64748b" strokeWidth="1.5" markerEnd="url(#cart-arrow)" />
+
+            {/* Ticks and Numbers on X1 */}
+            {[0, 2, 4, 6, 8, 10].map((v) => (
+              <g key={`tick-x-${v}`}>
+                <line x1={mapX(v)} y1={340} x2={mapX(v)} y2={345} stroke="#64748b" strokeWidth="1" />
+                <text x={mapX(v)} y={358} fill="#94a3b8" fontSize="10" textAnchor="middle" fontFamily="IBM Plex Mono">
+                  {v}
+                </text>
+              </g>
+            ))}
+            <text x={250} y={375} fill="#e2e8f0" fontSize="11" fontWeight="700" textAnchor="middle">
+              {t('特征 X₁ (Feature 1)', 'Feature X₁')}
+            </text>
+
+            {/* Ticks and Numbers on X2 */}
+            {[0, 2, 4, 6, 8, 10].map((v) => (
+              <g key={`tick-y-${v}`}>
+                <line x1={50} y1={mapY(v)} x2={55} y2={mapY(v)} stroke="#64748b" strokeWidth="1" />
+                <text x={45} y={mapY(v) + 3} fill="#94a3b8" fontSize="10" textAnchor="end" fontFamily="IBM Plex Mono">
+                  {v}
+                </text>
+              </g>
+            ))}
+            <text x={25} y={22} fill="#e2e8f0" fontSize="11" fontWeight="700" textAnchor="start">
+              {t('特征 X₂ (Feature 2)', 'Feature X₂')}
+            </text>
+
+            {/* Data Points */}
+            {CART_DEMO_POINTS.map((p) => {
+              const isSelected = p.id === selectedPointId;
+              const px = mapX(p.x1);
+              const py = mapY(p.x2);
+              const col = getCartPointColor(p.y);
+
+              return (
+                <g
+                  key={`pt-${p.id}`}
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => setSelectedPointId(p.id)}
+                >
+                  {/* Outer Pulsing Halo when selected */}
+                  {isSelected && (
+                    <circle
+                      cx={px}
+                      cy={py}
+                      r={14}
+                      fill="none"
+                      stroke={col}
+                      strokeWidth={2}
+                      className="cart-point-selected"
+                    />
+                  )}
+
+                  {/* Core Point Circle */}
+                  <circle
+                    cx={px}
+                    cy={py}
+                    r={isSelected ? 8 : 6}
+                    fill={col}
+                    stroke="#0b1120"
+                    strokeWidth={2}
+                  />
+
+                  {/* Ground Truth Label Badge: y=... */}
+                  <rect
+                    x={px - 14}
+                    y={py - 19}
+                    width={28}
+                    height={13}
+                    rx={3}
+                    fill="rgba(15, 23, 42, 0.88)"
+                    stroke={isSelected ? col : '#334155'}
+                    strokeWidth={isSelected ? 1.5 : 1}
+                  />
+                  <text
+                    x={px}
+                    y={py - 9}
+                    fill={isSelected ? '#fff' : '#cbd5e1'}
+                    fontSize="9"
+                    fontWeight="700"
+                    textAnchor="middle"
+                    fontFamily="IBM Plex Mono"
+                  >
+                    y={p.y.toFixed(0)}
+                  </text>
+                </g>
+              );
+            })}
+          </svg>
+        </div>
+
+        {/* Right Panel: Equivalent CART Binary Decision Tree */}
+        <div className="cart-canvas-box">
+          <div className="cart-canvas-title">
+            <span><strong>{t('等价 CART 二叉决策树', 'Equivalent Binary Decision Tree')}</strong></span>
+            <span style={{ fontSize: '0.7rem', color: '#c084fc' }}>
+              {t('高亮显示选中样本判定路径', 'Highlighted decision path')}
+            </span>
+          </div>
+
+          <svg className="cart-svg" viewBox="0 0 320 380" role="img">
+            {activeStep === 0 && (
+              <g>
+                <rect x={60} y={150} width={200} height={60} rx={8} fill="#1e293b" stroke="#38bdf8" strokeWidth="2" />
+                <text x={160} y={176} fill="#f8fafc" fontSize="12" fontWeight="700" textAnchor="middle">
+                  {t('全量根节点 (未分裂)', 'Root Node (Unsplit)')}
+                </text>
+                <text x={160} y={196} fill="#38bdf8" fontSize="11" fontWeight="700" textAnchor="middle" fontFamily="IBM Plex Mono">
+                  ŷ = ĉ₀ = 28.50 (N=16)
+                </text>
+              </g>
+            )}
+
+            {activeStep >= 1 && (
+              <g>
+                {/* Level 0: Root Split X1 <= 5.0 */}
+                <line
+                  x1={160}
+                  y1={45}
+                  x2={80}
+                  y2={125}
+                  stroke={isSelectedLeft1 ? '#38bdf8' : '#475569'}
+                  strokeWidth={isSelectedLeft1 ? 3 : 1.5}
+                />
+                <line
+                  x1={160}
+                  y1={45}
+                  x2={240}
+                  y2={125}
+                  stroke={!isSelectedLeft1 ? '#fbbf24' : '#475569'}
+                  strokeWidth={!isSelectedLeft1 ? 3 : 1.5}
+                />
+                <text x={110} y={80} fill="#38bdf8" fontSize="10" fontWeight="700">Yes (≤)</text>
+                <text x={205} y={80} fill="#fbbf24" fontSize="10" fontWeight="700">No (&gt;)</text>
+
+                <rect
+                  x={115}
+                  y={20}
+                  width={90}
+                  height={32}
+                  rx={6}
+                  fill="#1e293b"
+                  stroke="#f43f5e"
+                  strokeWidth={2}
+                />
+                <text x={160} y={40} fill="#fff" fontSize="11" fontWeight="700" textAnchor="middle">
+                  X₁ ≤ 5.0
+                </text>
+
+                {/* Level 1: Left Child */}
+                {activeStep === 1 && (
+                  <g>
+                    <rect x={25} y={125} width={110} height={40} rx={6} fill="#1e293b" stroke="#38bdf8" strokeWidth={isSelectedLeft1 ? 2.5 : 1} />
+                    <text x={80} y={143} fill="#fff" fontSize="10" fontWeight="700" textAnchor="middle">Left Leaf (N=8)</text>
+                    <text x={80} y={157} fill="#38bdf8" fontSize="10" fontWeight="700" textAnchor="middle">ŷ = 15.25</text>
+                  </g>
+                )}
+
+                {activeStep >= 2 && (
+                  <g>
+                    <line
+                      x1={80}
+                      y1={140}
+                      x2={45}
+                      y2={220}
+                      stroke={isSelectedLeft2 ? '#38bdf8' : '#475569'}
+                      strokeWidth={isSelectedLeft2 ? 3 : 1.5}
+                    />
+                    <line
+                      x1={80}
+                      y1={140}
+                      x2={115}
+                      y2={220}
+                      stroke={isSelectedRight2 ? '#34d399' : '#475569'}
+                      strokeWidth={isSelectedRight2 ? 3 : 1.5}
+                    />
+                    <rect
+                      x={40}
+                      y={125}
+                      width={80}
+                      height={30}
+                      rx={6}
+                      fill="#1e293b"
+                      stroke="#38bdf8"
+                      strokeWidth={isSelectedLeft1 ? 2.5 : 1.5}
+                    />
+                    <text x={80} y={144} fill="#fff" fontSize="11" fontWeight="700" textAnchor="middle">
+                      X₂ ≤ 4.5
+                    </text>
+
+                    {/* Leaf R1 */}
+                    <rect
+                      x={10}
+                      y={220}
+                      width={70}
+                      height={38}
+                      rx={6}
+                      fill="#1e293b"
+                      stroke="#38bdf8"
+                      strokeWidth={isSelectedLeft2 ? 3 : 1}
+                    />
+                    <text x={45} y={236} fill="#fff" fontSize="10" fontWeight="700" textAnchor="middle">Leaf R₁ (N=4)</text>
+                    <text x={45} y={250} fill="#38bdf8" fontSize="10" fontWeight="700" textAnchor="middle">ŷ = 8.50</text>
+
+                    {/* Leaf R2 */}
+                    <rect
+                      x={85}
+                      y={220}
+                      width={70}
+                      height={38}
+                      rx={6}
+                      fill="#1e293b"
+                      stroke="#34d399"
+                      strokeWidth={isSelectedRight2 ? 3 : 1}
+                    />
+                    <text x={120} y={236} fill="#fff" fontSize="10" fontWeight="700" textAnchor="middle">Leaf R₂ (N=4)</text>
+                    <text x={120} y={250} fill="#34d399" fontSize="10" fontWeight="700" textAnchor="middle">ŷ = 22.00</text>
+                  </g>
+                )}
+
+                {/* Level 1: Right Child */}
+                {activeStep < 3 && (
+                  <g>
+                    <rect x={185} y={125} width={110} height={40} rx={6} fill="#1e293b" stroke="#fbbf24" strokeWidth={!isSelectedLeft1 ? 2.5 : 1} />
+                    <text x={240} y={143} fill="#fff" fontSize="10" fontWeight="700" textAnchor="middle">Right Leaf (N=8)</text>
+                    <text x={240} y={157} fill="#fbbf24" fontSize="10" fontWeight="700" textAnchor="middle">ŷ = 41.75</text>
+                  </g>
+                )}
+
+                {activeStep >= 3 && (
+                  <g>
+                    <line
+                      x1={240}
+                      y1={140}
+                      x2={195}
+                      y2={220}
+                      stroke={isSelectedRight3_bottom ? '#fbbf24' : '#475569'}
+                      strokeWidth={isSelectedRight3_bottom ? 3 : 1.5}
+                    />
+                    <line
+                      x1={240}
+                      y1={140}
+                      x2={275}
+                      y2={220}
+                      stroke={isSelectedRight3_top ? '#f43f5e' : '#475569'}
+                      strokeWidth={isSelectedRight3_top ? 3 : 1.5}
+                    />
+                    <rect
+                      x={200}
+                      y={125}
+                      width={80}
+                      height={30}
+                      rx={6}
+                      fill="#1e293b"
+                      stroke="#fbbf24"
+                      strokeWidth={!isSelectedLeft1 ? 2.5 : 1.5}
+                    />
+                    <text x={240} y={144} fill="#fff" fontSize="11" fontWeight="700" textAnchor="middle">
+                      X₂ ≤ 6.0
+                    </text>
+
+                    {/* Leaf R3 */}
+                    <rect
+                      x={165}
+                      y={220}
+                      width={65}
+                      height={38}
+                      rx={6}
+                      fill="#1e293b"
+                      stroke="#fbbf24"
+                      strokeWidth={isSelectedRight3_bottom ? 3 : 1}
+                    />
+                    <text x={197.5} y={236} fill="#fff" fontSize="10" fontWeight="700" textAnchor="middle">Leaf R₃ (N=4)</text>
+                    <text x={197.5} y={250} fill="#fbbf24" fontSize="10" fontWeight="700" textAnchor="middle">ŷ = 34.00</text>
+
+                    {/* Right Right Child */}
+                    {activeStep === 3 && (
+                      <g>
+                        <rect x={240} y={220} width={75} height={38} rx={6} fill="#1e293b" stroke="#f43f5e" strokeWidth={isSelectedRight3_top ? 3 : 1} />
+                        <text x={277.5} y={236} fill="#fff" fontSize="10" fontWeight="700" textAnchor="middle">TopRight (N=4)</text>
+                        <text x={277.5} y={250} fill="#f43f5e" fontSize="10" fontWeight="700" textAnchor="middle">ŷ = 49.50</text>
+                      </g>
+                    )}
+
+                    {activeStep >= 4 && (
+                      <g>
+                        <line
+                          x1={275}
+                          y1={235}
+                          x2={245}
+                          y2={305}
+                          stroke={isSelectedR4 ? '#f43f5e' : '#475569'}
+                          strokeWidth={isSelectedR4 ? 3 : 1.5}
+                        />
+                        <line
+                          x1={275}
+                          y1={235}
+                          x2={295}
+                          y2={305}
+                          stroke={isSelectedR5 ? '#c084fc' : '#475569'}
+                          strokeWidth={isSelectedR5 ? 3 : 1.5}
+                        />
+
+                        <rect
+                          x={240}
+                          y={220}
+                          width={70}
+                          height={30}
+                          rx={6}
+                          fill="#1e293b"
+                          stroke="#c084fc"
+                          strokeWidth={isSelectedRight3_top ? 2.5 : 1.5}
+                        />
+                        <text x={275} y={239} fill="#fff" fontSize="10" fontWeight="700" textAnchor="middle">
+                          X₁ ≤ 7.5
+                        </text>
+
+                        {/* Leaf R4 */}
+                        <rect
+                          x={220}
+                          y={305}
+                          width={48}
+                          height={38}
+                          rx={6}
+                          fill="#1e293b"
+                          stroke="#f43f5e"
+                          strokeWidth={isSelectedR4 ? 3 : 1}
+                        />
+                        <text x={244} y={321} fill="#fff" fontSize="9" fontWeight="700" textAnchor="middle">R₄ (N=2)</text>
+                        <text x={244} y={335} fill="#f43f5e" fontSize="9" fontWeight="700" textAnchor="middle">ŷ=44.0</text>
+
+                        {/* Leaf R5 */}
+                        <rect
+                          x={272}
+                          y={305}
+                          width={48}
+                          height={38}
+                          rx={6}
+                          fill="#1e293b"
+                          stroke="#c084fc"
+                          strokeWidth={isSelectedR5 ? 3 : 1}
+                        />
+                        <text x={296} y={321} fill="#fff" fontSize="9" fontWeight="700" textAnchor="middle">R₅ (N=2)</text>
+                        <text x={296} y={335} fill="#c084fc" fontSize="9" fontWeight="700" textAnchor="middle">ŷ=55.0</text>
+                      </g>
+                    )}
+                  </g>
+                )}
+              </g>
+            )}
+          </svg>
+        </div>
+      </div>
+
+      {/* Selected Point Inspector Card */}
+      <div className="cart-inspector-card">
+        <div className="cart-inspector-tags">
+          <span style={{ color: '#94a3b8', fontWeight: 600 }}>{t('当前选中样本点:', 'Selected Observation:')}</span>
+          <span className="cart-tag" style={{ color: getCartPointColor(selectedPoint.y), fontWeight: 700 }}>
+            P{selectedPoint.id}
+          </span>
+          <span className="cart-tag" style={{ color: '#cbd5e1' }}>
+            {t('输入特征向量 x', 'Feature Vector x')}: (X₁={selectedPoint.x1.toFixed(1)}, X₂={selectedPoint.x2.toFixed(1)})
+          </span>
+          <span className="cart-tag" style={{ color: '#38bdf8', fontWeight: 700 }}>
+            {t('真实标签 y', 'Target y')}: {selectedPoint.y.toFixed(1)}
+          </span>
+          <span className="cart-tag" style={{ color: '#fbbf24' }}>
+            {t('归属叶区域', 'Leaf Region')}: {selectedRegion.name}
+          </span>
+          <span className="cart-tag" style={{ color: '#34d399', fontWeight: 700 }}>
+            {t('局部预测值 ŷ = ĉ', 'Prediction ŷ = ĉ')}: {selectedRegion.c.toFixed(2)}
+          </span>
+          <span className="cart-tag" style={{ color: residual >= 0 ? '#38bdf8' : '#f43f5e', fontWeight: 700 }}>
+            {t('残差 e = y - ŷ', 'Residual e')}: {residual >= 0 ? `+${residual.toFixed(2)}` : residual.toFixed(2)}
+          </span>
+        </div>
+        <div style={{ fontSize: '0.75rem', color: '#94a3b8' }}>
+          {t('判定路径', 'Rule Path')}: <strong style={{ color: '#e2e8f0' }}>{selectedRegion.rule}</strong>
+        </div>
+      </div>
+
+      {/* Educational Callout */}
+      <div className="cart-explanation-box">
+        <strong>{t('💡 几何坐标 vs 监督标签 y 的物理本质', '💡 Geometric Coordinates vs Target Response y')}</strong>：
+        {t(
+          '在监督回归任务中，每个样本是元组 (x₁, x₂, y)。横轴为特征 X₁，纵轴为特征 X₂，共同决定了样本在特征平面的落点。目标值 y 绝非纵坐标，而是每个样本点上绑定的真实标量（如房价、用户停留时长、成交额），以颜色冷暖与数值标签呈现在散点上。CART 在特征空间画线切出若干互不重叠的格子 Rₘ，为最小化平方误差，每个格子内的最优预测常数 ĉₘ 严格等于该区域所有样本真实标签 y 的算术均值！每次切分所降低的残差平方和，在统计物理上严格等价于最大化方差缩减量 ΔSS。',
+          'In supervised regression, each sample is a tuple (x₁, x₂, y). Axes X₁ and X₂ form the feature plane coordinates. The response y is NOT a spatial axis, but the ground-truth scalar label (e.g. price, dwell time) attached to each point, displayed via heatmap colors and badges. CART slices the feature plane into non-overlapping boxes Rₘ. To minimize squared loss, the optimal constant ĉₘ strictly equals the arithmetic mean of all y values inside that box! The reduction in sum of squared errors strictly equals maximizing between-group variance reduction ΔSS.'
+        )}
+      </div>
+    </section>
+  );
+}
+
 function mathErf(x) {
+
   const sign = x >= 0 ? 1 : -1;
   const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
   const t = 1.0 / (1.0 + p * Math.abs(x));
@@ -23586,7 +24358,7 @@ function MartingaleRandomWalkVisual() {
 function MarkdownPre({ children, ...props }) {
   const child = Array.isArray(children) ? children[0] : children;
   const className = child?.props?.className ?? '';
-  const match = /language-(quiz|mcq|mermaid|topo-demo|bellman-demo|segment-tree-demo|interval-merge-demo|interval-insert-demo|interval-rooms-demo|interval-query-demo|pow-demo|sliding-window-demo|longest-substring-demo|sliding-window-patterns|monotonic-stack-demo|largest-rectangle-demo|binary-search-template-demo|linked-list-reversal-demo|fast-slow-pointer-demo|array-duplicate-demo|lru-cache-demo|tree-traversal-demo|avl-rotation-demo|build-tree-demo|median-two-heaps-demo|three-sum-demo|rain-water-demo|simple-sort-race-demo|efficient-sort-race-demo|high-dimensional-integral-demo|record-minimum-demo|message-queue-demo|business-algorithm-map|system-design-overview-visual|photo-sharing-architecture-visual|async-messaging-architecture-visual|virtualization-container-visual|grid-multi-source-bfs-demo|union-find-demo|quickselect-partition-demo|trie-core-demo|trie-wildcard-demo|palindrome-dp-demo|coin-change-demo|subset-sum-demo|anisotropy-cone-demo|backtracking-patterns|backtracking-tree-demo|permutations-demo|combination-sum-demo|backtracking-dedup-demo|n-queens-demo|greedy-patterns|kadane-demo|jump-game-demo|gas-station-demo|partition-labels-demo|vtable-dispatch-demo|false-sharing-demo|fork-cow-demo|epoll-vs-select-demo|shared-ptr-cycle-demo|martingale-rw-demo|random-walk-ruin-demo|brownian-motion-demo|two-d-walk-demo|ito-geometry-demo|reflection-principle-demo|delta-hedging-demo|game-theory-interactive-demo|fwl-geometry-demo|ml-metrics-demo)/.exec(className);
+  const match = /language-(quiz|mcq|mermaid|topo-demo|bellman-demo|segment-tree-demo|interval-merge-demo|interval-insert-demo|interval-rooms-demo|interval-query-demo|pow-demo|sliding-window-demo|longest-substring-demo|sliding-window-patterns|monotonic-stack-demo|largest-rectangle-demo|binary-search-template-demo|linked-list-reversal-demo|fast-slow-pointer-demo|array-duplicate-demo|lru-cache-demo|tree-traversal-demo|avl-rotation-demo|build-tree-demo|median-two-heaps-demo|three-sum-demo|rain-water-demo|simple-sort-race-demo|efficient-sort-race-demo|high-dimensional-integral-demo|record-minimum-demo|message-queue-demo|business-algorithm-map|system-design-overview-visual|photo-sharing-architecture-visual|async-messaging-architecture-visual|virtualization-container-visual|grid-multi-source-bfs-demo|union-find-demo|quickselect-partition-demo|trie-core-demo|trie-wildcard-demo|palindrome-dp-demo|coin-change-demo|subset-sum-demo|anisotropy-cone-demo|backtracking-patterns|backtracking-tree-demo|permutations-demo|combination-sum-demo|backtracking-dedup-demo|n-queens-demo|greedy-patterns|kadane-demo|jump-game-demo|gas-station-demo|partition-labels-demo|vtable-dispatch-demo|false-sharing-demo|fork-cow-demo|epoll-vs-select-demo|shared-ptr-cycle-demo|martingale-rw-demo|random-walk-ruin-demo|brownian-motion-demo|two-d-walk-demo|ito-geometry-demo|reflection-principle-demo|delta-hedging-demo|game-theory-interactive-demo|fwl-geometry-demo|ml-metrics-demo|cart-partition-demo)/.exec(className);
 
   if (match?.[1] === 'mermaid') {
     return <MermaidDiagram chart={extractPlainText(child.props.children).replace(/\n$/, '')} />;
@@ -23850,6 +24622,10 @@ function MarkdownPre({ children, ...props }) {
 
   if (match?.[1] === 'ml-metrics-demo') {
     return <MLMetricsInteractiveVisual />;
+  }
+
+  if (match?.[1] === 'cart-partition-demo') {
+    return <CARTPartitionVisual />;
   }
 
   if (match) {

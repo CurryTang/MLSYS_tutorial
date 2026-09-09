@@ -345,16 +345,7 @@ A decision tree is a non-parametric supervised learning algorithm. Its core prin
 
 $$f(x) = \sum_{m=1}^M c_m I(x \in R_m)$$
 
-```text
-       X2 ▲
-          │   ┌───────────────┬──────────────┐
-          │   │               │   R4         │
-          │   │      R2       ├──────────────┤
-          │   │               │   R5         │
-       s1 ┼───┴───────────────┴──────────────┤
-          │   │      R1       │   R3         │
-          └───┴───────────────┴──────────────┴──► X1
-                             s2
+```cart-partition-demo
 ```
 
 #### (1) Why Must Splits Be Binary? (ESL Section 9.2.4)
@@ -365,14 +356,74 @@ ESL specifically notes that while multiway splits into more than two daughter no
 #### (2) Splitting Criteria & Numerical Optimization
 
 At node $m$, candidate feature $j$ and split point $s$ define a pair of half-planes:
-$$R_1(j, s) = \{X \mid X_j \le s\}, \quad R_2(j, s) = \{X \mid X_j > s\}$$
+
+$$
+R_1(j, s) = \{X \mid X_j \le s\}, \quad R_2(j, s) = \{X \mid X_j > s\}
+$$
 
 - **Regression Tasks (Squared Error Loss)**:
-  The optimal constant prediction in region $R_m$ is the empirical mean: $\hat{c}_m = \frac{1}{N_m} \sum_{x_i \in R_m} y_i$.
-  Node impurity is measured by residual mean squared error: $Q_m(T) = \frac{1}{N_m} \sum_{x_i \in R_m} (y_i - \hat{c}_m)^2$.
-  The optimal split $(j, s)$ solves:
-  $$\min_{j, s} \left[ \sum_{x_i \in R_1(j, s)} (y_i - \hat{c}_1)^2 + \sum_{x_i \in R_2(j, s)} (y_i - \hat{c}_2)^2 \right]$$
-  This is mathematically identical to maximizing **Variance Reduction**.
+  
+  **1. Origin & Physical Interpretation of Target Response $y$**:
+  In supervised regression, the training cohort is formally defined as an observation set $\mathcal{D} = \{(\mathbf{x}_i, y_i)\}_{i=1}^N$.
+  - In a 2D feature space, $\mathbf{x}_i = (x_{i1}, x_{i2})$ specifies the **physical planar location** of observation $i$ (horizontal axis $X_1$ is Feature 1, vertical axis $X_2$ is Feature 2);
+  - **The response variable $y_i \in \mathbb{R}$ is NEVER a spatial axis!** It is the ground-truth scalar response/label attached to each coordinate point $(x_{i1}, x_{i2})$ (e.g. house price, dwell time, transaction volume). In the interactive lab above, $y_i$ is explicitly rendered via numerical badge values and color gradients; in a 3D perspective, $(X_1, X_2)$ forms the base plane while $y$ represents the step-function elevation.
+
+  **2. Why Region Optimal Prediction $\hat{c}_m$ Strictly Equals the Arithmetic Mean of $y_i$**:
+  Within any partitioned hyper-rectangle $R_m$ containing $N_m$ training instances, CART fits a local constant prediction $c$. The objective minimizes the sum of squared errors:
+
+  $$
+  \min_{c} L(c) = \sum_{x_i \in R_m} (y_i - c)^2
+  $$
+
+  Taking the first derivative with respect to scalar parameter $c$:
+
+  $$
+  \frac{\partial L(c)}{\partial c} = -2 \sum_{x_i \in R_m} (y_i - c) = -2 \left( \sum_{x_i \in R_m} y_i - N_m c \right)
+  $$
+
+  Setting the derivative to zero yields the critical point:
+
+  $$
+  -2 \left( \sum_{x_i \in R_m} y_i - N_m c \right) = 0 \implies N_m c = \sum_{x_i \in R_m} y_i \implies \hat{c}_m = \frac{1}{N_m} \sum_{x_i \in R_m} y_i = \bar{y}_{R_m}
+  $$
+
+  The second derivative $\frac{\partial^2 L(c)}{\partial c^2} = 2N_m > 0$ confirms strict convexity across the entire real domain. Hence, **the optimal leaf prediction $\hat{c}_m$ strictly and uniquely equals the empirical arithmetic mean of the target response $y_i$ within that region**.
+
+  **3. Node Impurity Definition**:
+  Inside leaf region $R_m$, the residual mean squared error represents within-node sample variance (variance equals impurity):
+
+  $$
+  Q_m(T) = \frac{1}{N_m} \sum_{x_i \in R_m} (y_i - \hat{c}_m)^2 = \text{Var}(y \mid x \in R_m)
+  $$
+
+  **4. Equivalence Between Minimizing Children RSS and Maximizing Variance Reduction**:
+  For a parent node $R_m$ ($N_m$ instances, mean $\bar{y}_m$), consider candidate split $(j, s)$ yielding left child $R_1$ ($N_1$ instances, mean $\hat{c}_1$) and right child $R_2$ ($N_2$ instances, mean $\hat{c}_2$):
+  - Parent Total Sum of Squares (TSS):
+
+    $$
+    \text{SS}_{\text{parent}} = \sum_{x_i \in R_m} (y_i - \bar{y}_m)^2 = N_m \cdot \text{Var}(y \mid R_m)
+    $$
+
+  - Children Residual Sum of Squares (RSS):
+
+    $$
+    \text{SS}_{\text{children}} = \sum_{x_i \in R_1} (y_i - \hat{c}_1)^2 + \sum_{x_i \in R_2} (y_i - \hat{c}_2)^2 = N_1 \text{Var}(y \mid R_1) + N_2 \text{Var}(y \mid R_2)
+    $$
+
+  - By the ANOVA Sum of Squares Decomposition Theorem ($\text{TSS} = \text{RSS} + \text{ESS}$), the Explained Sum of Squares / Variance Reduction Gain $\Delta \text{SS}$ expands as:
+
+    $$
+    \Delta \text{SS} = \text{SS}_{\text{parent}} - \text{SS}_{\text{children}} = \frac{N_1 N_2}{N_1 + N_2} (\hat{c}_1 - \hat{c}_2)^2 \ge 0
+    $$
+
+  - **Engineering Formulation**:
+
+    $$
+    \min_{j, s} \left[ \sum_{x_i \in R_1(j, s)} (y_i - \hat{c}_1)^2 + \sum_{x_i \in R_2(j, s)} (y_i - \hat{c}_2)^2 \right] \iff \max_{j, s} \Delta \text{SS} \iff \max_{j, s} \left[ \frac{N_1 N_2}{N_m} (\hat{c}_1 - \hat{c}_2)^2 \right]
+    $$
+
+    At every internal node, greedy split selection **physically searches for the cut that maximally separates the daughter node response means $|\hat{c}_1 - \hat{c}_2|$ while shrinking internal residual variance to its theoretical minimum**.
+
 
 - **Classification Tasks (Node Impurity Measures)**:
   Let $\hat{p}_{mk} = \frac{1}{N_m} \sum_{x_i \in R_m} I(y_i = k)$ denote the class-$k$ proportion in node $m$. Node assignment classifies to the majority label $k(m) = \arg\max_k \hat{p}_{mk}$. Standard impurity measures include:

@@ -377,16 +377,7 @@ if __name__ == "__main__":
 
 $$f(x) = \sum_{m=1}^M c_m I(x \in R_m)$$
 
-```text
-       X2 ▲
-          │   ┌───────────────┬──────────────┐
-          │   │               │   R4         │
-          │   │      R2       ├──────────────┤
-          │   │               │   R5         │
-       s1 ┼───┴───────────────┴──────────────┤
-          │   │      R1       │   R3         │
-          └───┴───────────────┴──────────────┴──► X1
-                             s2
+```cart-partition-demo
 ```
 
 #### (1) 为什么必须是二叉切分（Binary Splits）？
@@ -397,14 +388,74 @@ ESL (Section 9.2.4) 明确指出：虽然理论上可以允许将节点一次性
 #### (2) 节点切分准则与数学优化目标
 
 在给定节点 $m$ 上，切分变量 $j$ 与切分点 $s$ 定义了两个半平面空间：
-$$R_1(j, s) = \{X \mid X_j \le s\}, \quad R_2(j, s) = \{X \mid X_j > s\}$$
 
-- **回归任务（Squared Error Loss）**：
-  叶节点最优预测值即为该区域目标值的算术平均：$\hat{c}_m = \frac{1}{N_m} \sum_{x_i \in R_m} y_i$。
-  局部节点不纯度度量定义为残差均方误差：$Q_m(T) = \frac{1}{N_m} \sum_{x_i \in R_m} (y_i - \hat{c}_m)^2$。
-  最优切分 $(j, s)$ 通过最小化两子节点的加权平方误差和得到：
-  $$\min_{j, s} \left[ \sum_{x_i \in R_1(j, s)} (y_i - \hat{c}_1)^2 + \sum_{x_i \in R_2(j, s)} (y_i - \hat{c}_2)^2 \right]$$
-  这在统计物理上等价于最大化**方差缩减量（Variance Reduction）**。
+$$
+R_1(j, s) = \{X \mid X_j \le s\}, \quad R_2(j, s) = \{X \mid X_j > s\}
+$$
+
+- **回归任务（Squared Error Loss）：**
+  
+  **1. 目标响应变量 $y$ 从何而来？（解除几何坐标与标签混淆）**：
+  在监督回归问题中，数据集形式化定义为样本元组集合 $\mathcal{D} = \{(\mathbf{x}_i, y_i)\}_{i=1}^N$。
+  - 在二维输入特征空间中，$\mathbf{x}_i = (x_{i1}, x_{i2})$ 是样本在几何平面上的**物理坐标落点**（横轴 $X_1$ 为特征 1，纵轴 $X_2$ 为特征 2）；
+  - **真实响应变量 $y_i \in \mathbb{R}$ 绝非任何一条空间坐标轴**！它是依附在每个样本坐标点 $(x_{i1}, x_{i2})$ 上的**真实目标标量值（Ground Truth Target）**，例如房屋价格、用户在线停留时长、消费金额等。在上方交互实验室中，$y_i$ 直观体现为散点上的数值标签与基于数值梯度的冷暖色相；在三维物理图景中，$(X_1, X_2)$ 是底面平面，而 $y$ 是拔地而起的阶梯曲面高度。
+
+  **2. 为什么叶区域最优预测常数 $\hat{c}_m$ 严格等于 $y_i$ 的算术均值？（严格最小二乘求导）**：
+  在切分出的任意超矩形区域 $R_m$（包含 $N_m$ 个训练样本）内部，CART 拟合局部常数预测值 $c$。优化目标是最小化该区域内所有样本的残差平方和：
+
+  $$
+  \min_{c} L(c) = \sum_{x_i \in R_m} (y_i - c)^2
+  $$
+
+  对未知标量标号 $c$ 求一阶导数：
+
+  $$
+  \frac{\partial L(c)}{\partial c} = -2 \sum_{x_i \in R_m} (y_i - c) = -2 \left( \sum_{x_i \in R_m} y_i - \sum_{x_i \in R_m} c \right) = -2 \left( \sum_{x_i \in R_m} y_i - N_m c \right)
+  $$
+
+  令一阶导数等于 0 求极值驻点：
+
+  $$
+  -2 \left( \sum_{x_i \in R_m} y_i - N_m c \right) = 0 \implies N_m c = \sum_{x_i \in R_m} y_i \implies \hat{c}_m = \frac{1}{N_m} \sum_{x_i \in R_m} y_i = \bar{y}_{R_m}
+  $$
+
+  求二阶导数：$\frac{\partial^2 L(c)}{\partial c^2} = 2N_m > 0$。目标损失函数在全域严格凸，一阶驻点严格为唯一全局最小值。**因此，叶节点的最优常数预测值在数学上严格等于该区域内所有训练样本真实响应值 $y_i$ 的算术均值**。
+
+  **3. 局部节点不纯度度量定义**：
+  在叶区域 $R_m$ 内，残差均方误差即为该节点的样本方差（方差即不纯度）：
+
+  $$
+  Q_m(T) = \frac{1}{N_m} \sum_{x_i \in R_m} (y_i - \hat{c}_m)^2 = \text{Var}(y \mid x \in R_m)
+  $$
+
+  **4. 为什么最小化子节点残差和等价于最大化方差缩减量（Variance Reduction）？**：
+  对给定父节点 $R_m$（含 $N_m$ 个样本，均值为 $\bar{y}_m$），若通过切分点 $(j, s)$ 二分为左子节点 $R_1$（$N_1$ 个样本，均值 $\hat{c}_1$）与右子节点 $R_2$（$N_2$ 个样本，均值 $\hat{c}_2$）：
+  - 切分前父节点的离差平方和（Total Sum of Squares, TSS）：
+    
+    $$
+    \text{SS}_{\text{parent}} = \sum_{x_i \in R_m} (y_i - \bar{y}_m)^2 = N_m \cdot \text{Var}(y \mid R_m)
+    $$
+
+  - 切分后两子节点的残差平方和之和（Residual Sum of Squares, RSS）：
+    
+    $$
+    \text{SS}_{\text{children}} = \sum_{x_i \in R_1} (y_i - \hat{c}_1)^2 + \sum_{x_i \in R_2} (y_i - \hat{c}_2)^2 = N_1 \text{Var}(y \mid R_1) + N_2 \text{Var}(y \mid R_2)
+    $$
+
+  - 由方差分析（ANOVA）离差平方和分解定理：$\text{TSS} = \text{RSS} + \text{ESS}$，方差缩减增益（Explained Sum of Squares / $\Delta \text{SS}$）展开推导为：
+
+    $$
+    \Delta \text{SS} = \text{SS}_{\text{parent}} - \text{SS}_{\text{children}} = \frac{N_1 N_2}{N_1 + N_2} (\hat{c}_1 - \hat{c}_2)^2 \ge 0
+    $$
+
+  - **核心工程结论**：
+    
+    $$
+    \min_{j, s} \left[ \sum_{x_i \in R_1(j, s)} (y_i - \hat{c}_1)^2 + \sum_{x_i \in R_2(j, s)} (y_i - \hat{c}_2)^2 \right] \iff \max_{j, s} \Delta \text{SS} \iff \max_{j, s} \left[ \frac{N_1 N_2}{N_m} (\hat{c}_1 - \hat{c}_2)^2 \right]
+    $$
+
+    CART 回归树在每个节点贪心扫描全部特征 $j$ 与切分阈值 $s$，**其物理本质就是寻找能使两子节点响应均值差距 $|\hat{c}_1 - \hat{c}_2|$ 最大化、同时让子节点内部残留方差最小化的最优轴对齐切分面**。
+
 
 - **分类任务（Classification Impurity Measures）**：
   设节点 $m$ 中第 $k$ 类的样本经验概率为 $\hat{p}_{mk} = \frac{1}{N_m} \sum_{x_i \in R_m} I(y_i = k)$。多数类预测为 $k(m) = \arg\max_k \hat{p}_{mk}$。常见不纯度度量：

@@ -1549,6 +1549,36 @@ describe('App', () => {
       expect(scrollToSpy).toHaveBeenCalledWith({ top: 1250, behavior: 'instant' });
     });
   });
+
+  it('renders the CART 2D partition visualizer, steps through splits, and inspects points', async () => {
+    globalThis.fetch.mockImplementation(async (input) => {
+      const requestUrl = String(input);
+      return {
+        ok: true,
+        text: async () => requestUrl.includes('MLCoding09')
+          ? '# ML Coding 09\n\n```cart-partition-demo\n```'
+          : '# Default Tutorial',
+      };
+    });
+
+    window.location.hash = '#MLCoding09%20Data%20Science%20Statistical%20Testing%20Distribution%20Drift%20C2ST.md';
+    render(<App />);
+
+    const cartSection = await screen.findByRole('region', { name: /CART 递归二叉切分/i });
+    expect(cartSection).toBeInTheDocument();
+    expect(within(cartSection).getByText(/步骤 0: 原始数据/i)).toBeInTheDocument();
+    expect(within(cartSection).getByText(/3810.0/)).toBeInTheDocument();
+
+    // Click Split 1
+    fireEvent.click(within(cartSection).getByRole('button', { name: /切分 1: X₁ ≤ 5.0/i }));
+    expect(within(cartSection).getByText(/73.7%/i)).toBeInTheDocument();
+    expect(within(cartSection).getByText(/\+2809.0/i)).toBeInTheDocument();
+
+    // Click Split 4 (Full R1~R5)
+    fireEvent.click(within(cartSection).getByRole('button', { name: /切分 4: X₁ ≤ 7.5/i }));
+    expect(within(cartSection).getByText(/99.1%/i)).toBeInTheDocument();
+    expect(within(cartSection).getByText(/5 个区域/i)).toBeInTheDocument();
+  });
 });
 
 
