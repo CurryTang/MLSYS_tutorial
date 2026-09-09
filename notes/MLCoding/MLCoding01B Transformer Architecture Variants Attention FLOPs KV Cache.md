@@ -7,7 +7,7 @@
 2. **多头注意力（MHA）数学推导、张量形状演化与执行流水线**
 3. **MHA 计算复杂度 FLOPs 严密分解与长短序列体制转移（Regime Shift）**
 4. **自回归推理动态与 KV Cache 显存容量精确数学模型**
-5. **硬件感知注意力优化体系（MQA / GQA、FlashAttention SRAM 分块平铺、PagedAttention 与 KV 量化）**
+5. **长序列与硬件感知注意力优化体系（效率演进全景、MQA / GQA、FlashAttention SRAM 分块平铺、PagedAttention 与 KV 量化）**
 
 ---
 
@@ -191,9 +191,115 @@ $$\text{Memory}_{\text{KVCache}} = 2 \times B \times S \times L \times H_{KV} \t
 
 ---
 
-## 模块五：硬件感知注意力优化体系
+## 模块五：长序列与硬件感知注意力优化体系
 
-### 1. 注意力架构演化：MHA vs MQA vs GQA
+### 1. 长序列 Attention 核心矛盾与三大物理墙
+
+在标准 Scaled Dot-Product Attention 中：
+$$\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{Q K^T}{\sqrt{d_k}}\right) V$$
+整个计算由两部分构成：
+- **线性投影**：$Q, K, V, W_O$ 四次矩阵乘法，时间复杂度 $\mathcal{O}(S D^2)$；
+- **注意力交互**：$Q K^T$ 得分计算与 $\tilde{A} V$ 聚合，时间复杂度 $\mathcal{O}(S^2 D)$，中间矩阵空间复杂度 $\mathcal{O}(S^2)$。
+
+当序列长度 $S \gg D$ 时，计算与显存的瓶颈发生根本性转移，长上下文在 Prefill 与 Decode 阶段同时撞上**三大物理墙**：
+
+```text
+长序列三大物理瓶颈特征：
+┌─────────────────────────┬─────────────────────────┬─────────────────────────┐
+│ 1. 算力二次方 (Compute) │ 2. 训练激活显存 (Memory)│ 3. 推理 KV Cache (IO带宽│
+├─────────────────────────┼─────────────────────────┼─────────────────────────┤
+│ • S 从 4K 拓展到 128K:  │ • 物化 S×S 的 Logits 与 │ • 显存容量 O(B·S·L·d)   │
+│   长度扩大 32 倍         │   Attention Score 矩阵   │   呈线性持续膨胀        │
+│ • Attn FLOPs 暴增 1024倍│ • 经典实现 O(S²) 导致   │ • Decode 每生成 1 Token │
+│ • Prefill 耗时呈二次方  │   GPU 发生显存溢出(OOM) │   需读取全量历史 KV     │
+│   剧烈爆炸              │ • 反向传播需保留得分梯度│ • 算术强度极低，带宽受限│
+└─────────────────────────┴─────────────────────────┴─────────────────────────┘
+```
+
+为了从根本上化解这一矛盾，学术界与工业界形成了**系统补丁 $\to$ 三大算法路线（改计算复杂度 / 改系统切分）$\to$ 混合收敛形态（Hybrid）**的演进脉络：
+
+![长序列 Attention 效率演进脉络](./assets/attention-efficiency-landscape.png)
+
+---
+
+### 2. 系统/算子层补丁：FlashAttention（Exact，不改变渐近复杂度）
+
+FlashAttention（Dao et al.）是现代大模型训练与推理的基础设施级系统优化。它的核心特质是**数学完全等价（Exact Attention，零精度损失）**。
+
+#### (1) 核心机制
+- **Tiling（SRAM 分块平铺）**：将输入 $Q, K, V$ 划分为适合 GPU 片上高速 SRAM（通常为 100KB~228KB/SM）大小的子块，所有矩阵乘法与归一化计算均在 SRAM 内部完成；
+- **Online Softmax（增量归一化）**：传统 Softmax 需要物化整个序列求最大值与指数和；Online Softmax 通过维护局部缩放因子 $m_i$ 与 $l_i$，在流式加载子块时动态更新局部 Attention 输出，**彻底消除了在慢速高带宽显存（HBM）中显式写入与读取 $S \times S$ 激活值矩阵的过程**；
+- **Recomputation in Backward（反向重算）**：反向传播时不保存前向的 $S \times S$ 激活图，而是在 SRAM 中直接快速重算，将训练激活显存从 $\mathcal{O}(S^2)$ 压缩到 $\mathcal{O}(S D)$。
+
+#### (2) 权衡分析：解决了什么 vs. 解决不了什么
+- **$\checkmark$ 解决了什么**：
+  - 消除了训练期间的 $\mathcal{O}(S^2)$ 激活值显存 OOM 危机；
+  - 减少了大量低效的 HBM 访存往返，将算子从 Memory-Bound 状态推向高算力利用率（MFU 提升 2~4 倍）；
+  - 输出与标准 Attention 严格一致，无需修改模型权重或重训。
+- **$\times$ 解决不了什么**：
+  - **总计算量（FLOPs）仍然是严格的 $\mathcal{O}(S^2 D)$**，算法渐近复杂度并未降低；
+  - 自回归 Decode 阶段仍然需要逐步加载全量历史 KV Cache；
+  - 当上下文长度向 1M 推进时，Prefill 阶段的二次方计算耗时依然无法承受。
+- **核心工程结论**：**FlashAttention 是硬件层/IO 访存优化，长序列算法与吞吐瓶颈必须依靠三大效率路线（Sparse / Linear / Chunking）彻底解决。**
+
+---
+
+### 3. 三大效率路线：改算法复杂度与改系统切分
+
+#### 路线 A：稀疏注意力（Sparse Attention，剪枝图）
+* **核心思想**：切断全连接注意力图中的大部分边，每个 Query 只与特定的 Key 集合子集计算相关性，将复杂度从 $\mathcal{O}(S^2)$ 降为 $\mathcal{O}(S \cdot k)$ 或 $\mathcal{O}(S\sqrt{S})$。
+* **早期静态规则稀疏（Static Heuristics）**：
+  * **Longformer / BigBird**：手工设计三类注意力模式的组合——局部滑动窗口（Local Window，捕捉相邻短语语法结构）+ 跨步空洞窗口（Strided / Dilated，捕捉中程语境）+ 全局固定标记（Global Tokens，如 `[CLS]` 负责汇聚全篇语义）。
+  * **局限**：硬编码规则无法自适应复杂的动态语义跳跃，对不规则依赖的建模能力受限。
+* **现代前沿：端到端硬件对齐原生稀疏（DeepSeek NSA: Native Sparse Attention）**：
+  * 摒弃传统的细粒度非连续索引，改为**块级对齐（Block-Aligned）的原生动态稀疏**：
+    1. **Compressed Tokens（压缩块粗视野）**：将相邻 Token 块通过轻量池化压缩为单向量，Query 先在粗粒度级别扫描定位潜在相关的上下文区域；
+    2. **Selected Tokens（Top-$k$ 细粒度检索）**：基于粗筛结果，只将得分最高的几个关键块调入高速缓存进行精确细粒度注意力交互；
+    3. **Sliding Window（局部精细上下文）**：对邻近的最近若干 Token 保持全注意力。
+  * **工程收益**：在 64K+ 长文本下实现了数倍的预训练与推理加速，且在“大海捞针”（Needle In A Haystack, NIAH）基准上保持极高锐度。
+* **优缺点权衡**：
+  * $\checkmark$ 保留 Softmax 指数放大特性，注意力聚焦度（Sharpness）高，复杂长程检索能力强；
+  * $\times$ 动态稀疏索引若未做块对齐，非连续离散访存开销会抵消算力节约。
+
+#### 路线 B：低秩与核化线性注意力（Linear Attention & Delta Rule，改写结合律）
+* **核心思想**：通过非线性映射 $\phi(\cdot)$ 将 Softmax 解耦为内积 $\text{Sim}(Q, K) = \phi(Q) \phi(K)^T$。利用矩阵乘法的结合律改写计算顺序：
+  $$\text{Standard: } (Q K^T) V \in \mathcal{O}(S^2 D) \implies \text{Linear: } \phi(Q) \left(\phi(K)^T V\right) \in \mathcal{O}(S \cdot D^2)$$
+* **流派与演进**：
+  * **Linformer**：将 $K, V$ 的序列维度通过投影矩阵压缩为固定的 $k \ll S$；
+  * **Performer / Linear Transformer**：利用正随机特征（Positive Random Features）近似高斯核函数。
+* **自回归推理的 RNN 恒定态**：
+  在自回归生成中，Key 与 Value 的聚合可以写成流式累加状态：
+  $$S_t = S_{t-1} + \phi(k_t) v_t^T \in \mathbb{R}^{d \times d}, \quad o_t = \phi(q_t) S_t$$
+  此时单步推理仅需维护固定维度的隐状态 $S_t$，**推理显存与计算复杂度均为 $\mathcal{O}(1)$**，无需维护线性膨胀的 KV Cache！
+* **致命缺陷与 Delta 规则破局（DeltaNet / RetNet / Mamba-2）**：
+  * **纯线性累加的“容量饱和与弥散”**：由于 $S_t = S_{t-1} + k_t v_t^T$ 只有写入没有擦除，随着序列增长，历史无关信息迅速填满隐状态矩阵，导致对新信息的辨识力彻底丧失（Attention Dilution）。
+  * **Delta 学习规则（DeltaNet / RetNet）**：引入关联记忆的经典 Delta 擦除更新机制：
+    $$W_t = W_{t-1}(I - \beta_t k_t k_t^T) + \beta_t v_t k_t^T$$
+    若新 Key 与历史 Key 冲突，则先从记忆矩阵中扣除旧值的投影，再写入新 Value。
+  * **并行训练突破**：Chunkwise 算法在块内将 Rank-1 更新转化为下三角可逆系统，块间使用高速 Associative Scan 算子结合 SRAM 融合，训练复杂度达 $\mathcal{O}(S D^2)$ 全并行，召回率逼近标准 Softmax。
+* **优缺点权衡**：
+  * $\checkmark$ 推理吞吐极高，无 KV Cache 显存暴涨，无限生成长度友好；
+  * $\times$ 纯线性注意力的联想记忆（Associative Recall）与少样本上下文学习（In-Context Learning）能力仍弱于标准注意力；
+  * **工业落地形态**：**混合架构（Hybrid）**。如 **Jamba** 与 **Nemotron-4**，每隔若干线性/SSM 层插入一层标准因果 Attention，以极小显存代价换取全量检索精度。
+
+#### 路线 C：分块与系统级并行（Chunking & RingAttention，改系统切分）
+* **核心思想**：算法上固定局部注意力块 $B \ll S$，或者在系统架构层面将长序列跨 GPU 进行切片通信，单卡峰值显存控制在 $\mathcal{O}(B \cdot D)$。
+* **算法端分块**：
+  * **Transformer-XL**：维护固定的向前段落 Memory Cache，跨块截断反向传播梯度，仅保留前向隐藏状态流。
+* **分布式系统前沿：RingAttention（Liu et al.）**：
+  * 将长序列切分为 $P$ 个分块分散在 $P$ 张 GPU 上；
+  * 核心流转：每张 GPU 持有本地的 $Q$，通过环形通信拓扑（Ring P2P）在 GPU 之间流动传递 $K, V$ 块；
+  * **计算与通信重叠（Compute-Communication Overlap）**：当 GPU 计算第 $i$ 块的 Attention 时，底层异步流水线同步向邻居节点发送与接收下一块的 $K, V$，计算耗时有效掩盖网络传输开销；
+  * **Chunked Prefill（vLLM / SGLang）**：将超长 Prompt 切片分批进入调度队列，防止单次大 Prefill 垄断计算单元导致排队任务的 Decode 延迟发生毛刺（Head-of-Line Blocking）。
+* **优缺点权衡**：
+  * $\checkmark$ 彻底打破单卡显存上限，单卡即可处理百万上下文；
+  * $\times$ 算法分块会损失跨块直接关联；RingAttention 则对跨卡网络互联（NVLink / RoCE）带宽要求极高。
+
+---
+
+### 4. 架构级头数压缩（MHA vs MQA vs GQA）与 Serving 显存优化
+
+除了算法层面的改动，现代大模型在架构层面通过精简 Key/Value 头数，直接在物理上压缩自回归推理的显存开销：
 
 ```text
 MHA vs MQA vs GQA 架构对比：
@@ -207,45 +313,34 @@ K/V Heads: [1] [2] [3] [4] [5] [6] [7] [8]  K/V Heads: [         1 (共享)     
 - **MQA**：$H_Q = H, H_{KV} = 1$。所有 Query 头共享单一组 Key/Value 头，KV Cache 显存骤降 $H$ 倍，但大幅降低了模型在长文本和复杂多轮推理下的多头表达容量；
 - **GQA**：$H_Q = H, H_{KV} = G$（$1 < G < H$）。将 Query 头划分为 $G$ 组，每组共享一组 Key/Value 头（如 LLaMA-3 的 64:8 分组）。实证表明，**GQA 能够以接近 MHA 99% 的模型效果，获得接近 MQA 的推理显存带宽与吞吐提升**。
 
----
-
-### 2. FlashAttention：IO 感知分块平铺与在线 Softmax
-
-```text
-标准 Attention 与 FlashAttention 显存交互对比：
-标准 Attention (HBM 访存受限):
-[GPU SRAM] ──(写入 S×S 矩阵)──> [GPU HBM 慢速显存] ──(读取 S×S 矩阵)──> [GPU SRAM] ──(写入 S×D)──> [HBM]
-• 产生 O(S²) 巨大的 HBM 读写流量！
-
-FlashAttention (SRAM 分块计算 + Kernel 融合):
-[GPU SRAM] ──(Tiling 分块加载 Q,K,V，在片上高速 SRAM 增量计算 Online Softmax，绝不回写 S×S 矩阵)──> 最终直接输出 (S×D) 写入 HBM
-• HBM 访存降为 O(S)！IO 速度提升 2~4 倍！
-```
-
-- **传统 Attention 性能瓶颈**：标准 Attention 计算 $QK^T$ 后，需要将庞大的 $S \times S$ 中间得分矩阵写回低速 GPU HBM，再从 HBM 读出计算 Softmax，然后再写回 HBM，产生极大的内存带宽读写开销（IO-Bound）；
-- **FlashAttention 创新核心**：
-  1. **Tiling（分块计算）**：将 $Q, K, V$ 划分为适合 GPU 快速片上 SRAM（如 A100 的 192KB/SM）大小的子块；
-  2. **Online Softmax 增量归一化**：在不物化完整 $S \times S$ 矩阵的前提下，通过记录局部的最大值 $m(x)$ 和指数和 $l(x)$，在 SRAM 内动态修正注意力输出；
-  3. **Recomputation in Backward**：反向传播时不保存 $S \times S$ 激活值矩阵，而是在 SRAM 中直接快速重算，大幅压缩训练显存。
+#### PagedAttention 与 KV Cache 量化
+- **PagedAttention（vLLM 核心引擎）**：借鉴操作系统分页机制，将连续的 KV 张量映射到离散物理内存页（如 16 Tokens/Block），将显存碎片从 $60\% \sim 80\%$ 压缩到 $<4\%$；
+- **KV Cache 量化（FP8 / INT4）**：将缓存值量化存储，显存需求直接减半甚至减少 $75\%$，在显存带宽受限的 Decode 阶段显著倍增推理并发。
 
 ---
 
-### 3. PagedAttention（vLLM 核心引擎）
+### 5. 四大机制横向对比与工业收敛形态
 
-- **传统显存痛点**：传统推理引擎要求 KV Cache 在物理显存中保持严格连续分配。由于生成长度不可预知，系统必须提前预留最大长度（如 4K/8K），导致**内部碎片（已预留未填充）**与**外部碎片（内存无法凑齐整块）**高达 $60\% \sim 80\%$；
-- **PagedAttention 方案**：借鉴操作系统虚拟内存分页机制，将 KV Cache 划分为固定大小的**物理块（Block / Page，如 16 个 Token 一页）**。通过逻辑块到物理块的页表映射，实现非连续显存动态分配，将显存浪费降低至 $<4\%$，同等硬件下的 Serving 并发吞吐提升 2~4 倍。
+| 机制 / 范式 | 计算时间复杂度 | 训练显存复杂度 | 推理 KV 状态显存 | 核心优势 | 核心局限与工程代价 |
+|---|---|---|---|---|---|
+| **Standard (+FlashAttention)** | $\mathcal{O}(S^2 D)$ | $\mathcal{O}(S D)$ | $\mathcal{O}(B \cdot S \cdot L \cdot d_k)$ 线性膨胀 | 精确 Softmax、无损质量、长程关联强 | 算力与 Prefill 仍二次方，长序列吞吐低 |
+| **Sparse / NSA (DeepSeek)** | $\mathcal{O}(S \cdot k \cdot D)$ | $\mathcal{O}(S \cdot k)$ | $\mathcal{O}(B \cdot k \cdot L \cdot d_k)$ 稀疏受限 | 保持 Softmax 尖锐度，NIAH 检索极强，64K+ 解码加速 | 需深度定制硬件对齐算子，非连续访存 |
+| **Linear / DeltaNet** | $\mathcal{O}(S \cdot D^2)$ | $\mathcal{O}(S D)$ | $\mathcal{O}(D^2)$，单步 $\mathcal{O}(1)$ | 吞吐极高，显存不随序列线性增长 | 纯核化缺乏擦除易弥散，ICL 联想记忆较弱 |
+| **Ring / Chunked Parallel** | 多卡 $\mathcal{O}(S^2 D / P)$ | 单卡 $\mathcal{O}(B_{\text{chunk}} D)$ | 分布式切片持有 | 打破单卡显存墙，支持超百万上下文 | 强依赖高速互联（NVLink/RoCE），通信易成瓶颈 |
+
+#### 工业收敛形态：Hybrid + 算法硬件协同
+在千万级、亿级 Token 的前沿生产系统中，效率优化已收敛为多层级的协同体系：
+- **底层硬件与通信地基**：使用 **FlashAttention** 实现单卡 SRAM-HBM 访存优化，结合 **RingAttention** 进行跨卡环形序列切分；
+- **顶层算法与模型结构**：采用 **GQA** 压缩推理头数，并引入 **NSA 原生稀疏** 或 **SSM/DeltaNet 与标准 Attention 混合堆叠（Hybrid）**；
+- **技术本质提炼**：
+  * *Flash 不改 FLOPs，解决的是 IO 墙与激活 OOM；*
+  * *Sparse 保留 Softmax 锐度，精髓在于块级硬件对齐；*
+  * *Linear 改写结合律，引入 Delta 规则才具备动态记忆擦除；*
+  * *Ring 将二次方算力摊平到分布式节点，本质仍是 Exact Attention。*
 
 ---
 
-### 4. KV Cache 量化（FP8 / INT4）
-
-在超长上下文（32K ~ 128K）与高并发场景中，将 KV Cache 从 BF16（16 bits）量化为 FP8（8 bits）或 INT4（4 bits）：
-- 显存占用直接降低 $50\% \sim 75\%$；
-- 显存带宽搬运需求减半，在 Memory-Bound 的 Decode 阶段直接实现推理生成速度翻倍。
-
----
-
-## 模块六：面试高频必背公式与速答清单
+## 模块六：核心工程公式与推导速查清单
 
 ### Q1：计算一个序列长度为 $S=4096$、隐藏维度 $D=4096$ 的单层 MHA 线性投影和注意力计算的 FLOPs 分别是多少？
 > **答**：

@@ -51,11 +51,7 @@ $$P(X) = \prod_{i=1}^S P(x_i \mid x_1, x_2, \dots, x_{i-1})$$
 - 因果下三角注意力天然具备时间单向因果性，与**旋转位置编码（RoPE）**、**Chunked Prefill** 以及注意力窗口滑动机制（Sliding Window）天然契合，能够非常平滑地通过位置内插/外推（如 YaRN、Dynamic NTK）从 4K 上下文无缝拓展到 128K 乃至 1M。
 - 双向 Encoder 在极长上下文下容易发生**注意力弥散（Attention Dilution）**，且无法直接使用单向因果推理优化。
 
-#### 长序列 Attention 效率演进脉络
-
-标准 Scaled Dot-Product Attention 在 $n \gg d$ 时，时间复杂度 $\mathcal{O}(n^2 d)$、空间 $\mathcal{O}(n^2)$（FlashAttention 可将激活显存降到 $\mathcal{O}(nd)$，但 FLOPs 仍是二次方）。长上下文同时撞上算力墙、训练激活显存与推理 KV Cache 带宽墙。下图概括从系统补丁（FlashAttention）到 Sparse / Linear / Chunking 三条算法路线，以及 Hybrid 收敛形态：
-
-![长序列 Attention 效率演进脉络](./assets/attention-efficiency-landscape.png)
+- **长序列效率优化全局脉络**：关于标准 Attention 的二次方瓶颈推导、从 FlashAttention 到稀疏/线性/分块的效率演进全景图及硬件加速机理，详见专项解析：[ML Coding 01B · 长序列与硬件感知注意力优化体系](#MLCoding01B%20Transformer%20Architecture%20Variants%20Attention%20FLOPs%20KV%20Cache.md::5-长序列与硬件感知注意力优化体系)。
 
 ---
 

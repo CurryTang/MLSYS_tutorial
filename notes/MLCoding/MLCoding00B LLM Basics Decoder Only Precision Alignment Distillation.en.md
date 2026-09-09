@@ -53,11 +53,7 @@ $$P(X) = \prod_{i=1}^S P(x_i \mid x_1, x_2, \dots, x_{i-1})$$
 - Unidirectional causal attention pairs seamlessly with **Rotary Position Embeddings (RoPE)**, **Chunked Prefill**, and Sliding Window Attention. Dynamic interpolation methods (YaRN, Dynamic NTK) scale context smoothly from 4K to 128K+.
 - Bidirectional encoders suffer from **attention dilution** across extreme context lengths and cannot leverage causal inference speedups.
 
-#### Long-Context Attention Efficiency Landscape
-
-Standard Scaled Dot-Product Attention scales with time complexity $\mathcal{O}(n^2 d)$ and memory $\mathcal{O}(n^2)$ ($n \gg d$). While FlashAttention cuts memory footprint to $\mathcal{O}(nd)$, compute remains quadratic. Long contexts encounter compute walls, activation memory bounds, and KV cache bandwidth bottlenecks simultaneously:
-
-![Long-context attention efficiency landscape](./assets/attention-efficiency-landscape.png)
+- **Long-Context Efficiency Landscape**: For a rigorous breakdown of the quadratic attention bottleneck, FlashAttention SRAM tiling, MQA/GQA architectures, and the global efficiency landscape diagram, see the dedicated guide: [ML Coding 01B · Long-Context & Hardware-Aware Attention Optimizations](#MLCoding01B%20Transformer%20Architecture%20Variants%20Attention%20FLOPs%20KV%20Cache.md::5-long-context--hardware-aware-attention-optimizations).
 
 ---
 
