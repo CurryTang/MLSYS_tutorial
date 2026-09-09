@@ -1,4 +1,5 @@
 import { createContext, Fragment, useContext, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
@@ -24240,6 +24241,552 @@ function normalizeObsidianMarkdown(markdownText) {
   return normalized;
 }
 
+function ImageLightboxModal({ src, alt, onClose }) {
+  const { t } = useUiCopy();
+  const [scale, setScale] = useState(1.0);
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const [isDragging, setIsDragging] = useState(false);
+  const [naturalDim, setNaturalDim] = useState({ width: 0, height: 0 });
+  const [isModalLoupe, setIsModalLoupe] = useState(false);
+  const [loupeCoord, setLoupeCoord] = useState({ x: 0, y: 0, show: false, w: 0, h: 0 });
+  const [loupeZoom, setLoupeZoom] = useState(3.0);
+
+  const canvasRef = useRef(null);
+  const imgRef = useRef(null);
+  const dragStartRef = useRef({ mouseX: 0, mouseY: 0, posX: 0, posY: 0 });
+  const touchDistanceRef = useRef(null);
+
+  // Keyboard and body scroll lock
+  useEffect(() => {
+    const originalOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') onClose();
+      else if (e.key === '+' || e.key === '=') handleZoomIn();
+      else if (e.key === '-' || e.key === '_') handleZoomOut();
+      else if (e.key === '0') handleReset();
+      else if (e.key === '1') handleActualSize();
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.body.style.overflow = originalOverflow;
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [onClose]);
+
+  // Non-passive wheel event listener for smooth zoom
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const handleNativeWheel = (e) => {
+      e.preventDefault();
+      if (isModalLoupe) {
+        const delta = e.deltaY < 0 ? 0.3 : -0.3;
+        setLoupeZoom((prev) => Math.min(6.0, Math.max(1.5, Math.round((prev + delta) * 10) / 10)));
+        return;
+      }
+
+      const zoomFactor = e.deltaY < 0 ? 1.15 : 0.87;
+      setScale((prevScale) => {
+        const newScale = Math.min(8.0, Math.max(0.2, Math.round(prevScale * zoomFactor * 100) / 100));
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left - rect.width / 2;
+        const mouseY = e.clientY - rect.top - rect.height / 2;
+        const ratio = newScale / prevScale;
+        setPosition((prevPos) => ({
+          x: mouseX - (mouseX - prevPos.x) * ratio,
+          y: mouseY - (mouseY - prevPos.y) * ratio,
+        }));
+        return newScale;
+      });
+    };
+
+    canvas.addEventListener('wheel', handleNativeWheel, { passive: false });
+    return () => {
+      canvas.removeEventListener('wheel', handleNativeWheel);
+    };
+  }, [isModalLoupe]);
+
+  const handleZoomIn = () => {
+    setScale((prev) => Math.min(8.0, Math.round(prev * 1.25 * 100) / 100));
+  };
+
+  const handleZoomOut = () => {
+    setScale((prev) => Math.max(0.2, Math.round(prev * 0.8 * 100) / 100));
+  };
+
+  const handleReset = () => {
+    setScale(1.0);
+    setPosition({ x: 0, y: 0 });
+  };
+
+  const handleActualSize = () => {
+    if (naturalDim.width && imgRef.current) {
+      const renderedWidth = imgRef.current.clientWidth || 1;
+      const targetScale = Math.round((naturalDim.width / renderedWidth) * 100) / 100;
+      setScale(targetScale || 1.0);
+      setPosition({ x: 0, y: 0 });
+    } else {
+      setScale(1.0);
+      setPosition({ x: 0, y: 0 });
+    }
+  };
+
+  const handleImageLoad = (e) => {
+    setNaturalDim({
+      width: e.target.naturalWidth || 0,
+      height: e.target.naturalHeight || 0,
+    });
+  };
+
+  const handleMouseDown = (e) => {
+    if (e.button !== 0 || isModalLoupe) return;
+    setIsDragging(true);
+    dragStartRef.current = {
+      mouseX: e.clientX,
+      mouseY: e.clientY,
+      posX: position.x,
+      posY: position.y,
+    };
+  };
+
+  const handleMouseMove = (e) => {
+    if (isDragging) {
+      const dx = e.clientX - dragStartRef.current.mouseX;
+      const dy = e.clientY - dragStartRef.current.mouseY;
+      setPosition({
+        x: dragStartRef.current.posX + dx,
+        y: dragStartRef.current.posY + dy,
+      });
+    } else if (isModalLoupe && imgRef.current) {
+      const rect = imgRef.current.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      if (x < 0 || x > rect.width || y < 0 || y > rect.height) {
+        setLoupeCoord((prev) => ({ ...prev, show: false }));
+      } else {
+        setLoupeCoord({
+          x,
+          y,
+          w: rect.width,
+          h: rect.height,
+          show: true,
+        });
+      }
+    }
+  };
+
+  const handleMouseUp = () => {
+    setIsDragging(false);
+  };
+
+  const handleDoubleClick = () => {
+    if (isModalLoupe) return;
+    if (scale > 1.25) {
+      handleReset();
+    } else {
+      setScale(2.5);
+    }
+  };
+
+  const handleTouchStart = (e) => {
+    if (e.touches.length === 1) {
+      setIsDragging(true);
+      dragStartRef.current = {
+        mouseX: e.touches[0].clientX,
+        mouseY: e.touches[0].clientY,
+        posX: position.x,
+        posY: position.y,
+      };
+    } else if (e.touches.length === 2) {
+      touchDistanceRef.current = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+    }
+  };
+
+  const handleTouchMove = (e) => {
+    if (e.touches.length === 1 && isDragging) {
+      const dx = e.touches[0].clientX - dragStartRef.current.mouseX;
+      const dy = e.touches[0].clientY - dragStartRef.current.mouseY;
+      setPosition({
+        x: dragStartRef.current.posX + dx,
+        y: dragStartRef.current.posY + dy,
+      });
+    } else if (e.touches.length === 2 && touchDistanceRef.current) {
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      const factor = dist / touchDistanceRef.current;
+      setScale((prev) => Math.min(8.0, Math.max(0.25, Math.round(prev * factor * 100) / 100)));
+      touchDistanceRef.current = dist;
+    }
+  };
+
+  const handleTouchEnd = () => {
+    setIsDragging(false);
+    touchDistanceRef.current = null;
+  };
+
+  // Modal Loupe calculations
+  const LENS_SIZE = 260;
+  const LENS_RADIUS = LENS_SIZE / 2;
+  const lensLeft = Math.max(0, Math.min(loupeCoord.w - LENS_SIZE, loupeCoord.x - LENS_RADIUS));
+  const lensTop = Math.max(0, Math.min(loupeCoord.h - LENS_SIZE, loupeCoord.y - LENS_RADIUS));
+  const curXInLens = loupeCoord.x - lensLeft;
+  const curYInLens = loupeCoord.y - lensTop;
+  const bgW = loupeCoord.w * loupeZoom;
+  const bgH = loupeCoord.h * loupeZoom;
+  const bgX = curXInLens - loupeCoord.x * loupeZoom;
+  const bgY = curYInLens - loupeCoord.y * loupeZoom;
+
+  return createPortal(
+    <div
+      className="image-lightbox-overlay"
+      onMouseMove={handleMouseMove}
+      onMouseUp={handleMouseUp}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="lightbox-top-bar" onClick={(e) => e.stopPropagation()}>
+        <div className="lightbox-title-area">
+          <span className="lightbox-badge">{t('图像探查器', 'Image Inspector')}</span>
+          {alt && <h4 className="lightbox-title" title={alt}>{alt}</h4>}
+        </div>
+
+        <div className="lightbox-controls">
+          <button
+            type="button"
+            className="lightbox-ctrl-btn"
+            onClick={handleZoomOut}
+            title={t('缩小 (-)', 'Zoom Out (-)')}
+          >
+            −
+          </button>
+          <span className="lightbox-scale-indicator">
+            {Math.round(scale * 100)}%
+          </span>
+          <button
+            type="button"
+            className="lightbox-ctrl-btn"
+            onClick={handleZoomIn}
+            title={t('放大 (+)', 'Zoom In (+)')}
+          >
+            +
+          </button>
+
+          <div className="lightbox-ctrl-divider" />
+
+          <button
+            type="button"
+            className={`lightbox-ctrl-btn ${scale === 1.0 && position.x === 0 && position.y === 0 ? 'active' : ''}`}
+            onClick={handleReset}
+            title={t('自适应视口 (0)', 'Fit to Window (0)')}
+          >
+            {t('自适应', 'Fit')}
+          </button>
+
+          <button
+            type="button"
+            className="lightbox-ctrl-btn"
+            onClick={handleActualSize}
+            title={t('1:1 原图分辨率 (1)', '1:1 Pixel Native Size (1)')}
+          >
+            100%
+          </button>
+
+          <button
+            type="button"
+            className={`lightbox-ctrl-btn ${isModalLoupe ? 'active' : ''}`}
+            onClick={() => setIsModalLoupe((prev) => !prev)}
+            title={t('局部放大镜模式', 'Toggle Loupe Mode')}
+          >
+            🔍 {t('放大镜', 'Loupe')} {isModalLoupe && `(${loupeZoom.toFixed(1)}×)`}
+          </button>
+
+          <div className="lightbox-ctrl-divider" />
+
+          <button
+            type="button"
+            className="lightbox-close-btn"
+            onClick={onClose}
+            title={t('关闭 (Esc)', 'Close (Esc)')}
+            aria-label={t('关闭', 'Close')}
+          >
+            ✕
+          </button>
+        </div>
+      </div>
+
+      <div
+        ref={canvasRef}
+        className={`lightbox-canvas ${isDragging ? 'is-dragging' : ''} ${isModalLoupe ? 'loupe-active' : ''}`}
+        onMouseDown={handleMouseDown}
+        onTouchStart={handleTouchStart}
+        onDoubleClick={handleDoubleClick}
+      >
+        <div
+          className="lightbox-image-wrapper"
+          style={{
+            transform: `translate(${position.x}px, ${position.y}px) scale(${scale})`,
+            transformOrigin: 'center center',
+          }}
+        >
+          <img
+            ref={imgRef}
+            src={src}
+            alt={alt}
+            onLoad={handleImageLoad}
+            className="lightbox-img"
+            draggable={false}
+          />
+
+          {isModalLoupe && loupeCoord.show && (
+            <div
+              className="modal-loupe-lens"
+              style={{
+                width: `${LENS_SIZE}px`,
+                height: `${LENS_SIZE}px`,
+                left: `${lensLeft}px`,
+                top: `${lensTop}px`,
+                backgroundImage: `url("${src}")`,
+                backgroundSize: `${bgW}px ${bgH}px`,
+                backgroundPosition: `${bgX}px ${bgY}px`,
+              }}
+            >
+              <div className="loupe-lens-crosshair" />
+              <div className="loupe-lens-badge">{loupeZoom.toFixed(1)}×</div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="lightbox-bottom-bar" onClick={(e) => e.stopPropagation()}>
+        <div className="lightbox-shortcuts">
+          <span><kbd>{t('滚轮', 'Scroll')}</kbd> {t('缩放', 'Zoom')}</span>
+          <span><kbd>{t('拖拽', 'Drag')}</kbd> {t('平移', 'Pan')}</span>
+          <span><kbd>{t('双击', 'Double-click')}</kbd> {t('切换倍率', 'Toggle Scale')}</span>
+          <span><kbd>Esc</kbd> {t('退出', 'Exit')}</span>
+        </div>
+        {naturalDim.width > 0 && (
+          <div className="lightbox-meta">
+            {t('原图分辨率', 'Native Resolution')}: {naturalDim.width} × {naturalDim.height} px
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+function MarkdownImage({ src, alt, ...props }) {
+  const cleanSrc = src?.trim() ?? '';
+  const resolvedSrc = (cleanSrc && resolveMediaUrl(cleanSrc)) || cleanSrc;
+  const { t } = useUiCopy();
+
+  const [isLoupeActive, setIsLoupeActive] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
+  const [isShiftKey, setIsShiftKey] = useState(false);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [loupeZoom, setLoupeZoom] = useState(2.5);
+  const [mouseCoord, setMouseCoord] = useState({ x: 0, y: 0, rectWidth: 0, rectHeight: 0, showLens: false });
+
+  const containerRef = useRef(null);
+  const imgRef = useRef(null);
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Shift') setIsShiftKey(true);
+    };
+    const handleKeyUp = (e) => {
+      if (e.key === 'Shift') setIsShiftKey(false);
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
+
+  const effectiveLoupe = isLoupeActive || (isHovered && isShiftKey);
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleNativeWheel = (e) => {
+      if (effectiveLoupe && mouseCoord.showLens) {
+        e.preventDefault();
+        const delta = e.deltaY < 0 ? 0.25 : -0.25;
+        setLoupeZoom((prev) => Math.min(5.0, Math.max(1.5, Math.round((prev + delta) * 100) / 100)));
+      }
+    };
+
+    container.addEventListener('wheel', handleNativeWheel, { passive: false });
+    return () => {
+      container.removeEventListener('wheel', handleNativeWheel);
+    };
+  }, [effectiveLoupe, mouseCoord.showLens]);
+
+  const handleMouseMove = (e) => {
+    if (!imgRef.current) return;
+    const rect = imgRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+
+    if (x < 0 || x > rect.width || y < 0 || y > rect.height) {
+      setMouseCoord((prev) => ({ ...prev, showLens: false }));
+      return;
+    }
+
+    setMouseCoord({
+      x,
+      y,
+      rectWidth: rect.width,
+      rectHeight: rect.height,
+      showLens: effectiveLoupe,
+    });
+  };
+
+  const handleMouseLeave = () => {
+    setIsHovered(false);
+    setMouseCoord((prev) => ({ ...prev, showLens: false }));
+  };
+
+  const toggleLoupe = (e) => {
+    e.stopPropagation();
+    setIsLoupeActive((prev) => !prev);
+  };
+
+  const openModal = (e) => {
+    e.stopPropagation();
+    setIsModalOpen(true);
+  };
+
+  const handleImageClick = () => {
+    if (effectiveLoupe) {
+      setIsLoupeActive(false);
+    } else {
+      setIsModalOpen(true);
+    }
+  };
+
+  const LENS_MAX_SIZE = 220;
+  const rectW = mouseCoord.rectWidth || 1;
+  const rectH = mouseCoord.rectHeight || 1;
+  const actualLensSize = Math.min(LENS_MAX_SIZE, Math.max(120, Math.min(rectW, rectH) * 0.88));
+  const actualRadius = actualLensSize / 2;
+  const maxLeft = Math.max(0, rectW - actualLensSize);
+  const maxTop = Math.max(0, rectH - actualLensSize);
+  const lensLeft = Math.max(0, Math.min(maxLeft, mouseCoord.x - actualRadius));
+  const lensTop = Math.max(0, Math.min(maxTop, mouseCoord.y - actualRadius));
+  const curXInLens = mouseCoord.x - lensLeft;
+  const curYInLens = mouseCoord.y - lensTop;
+  const bgW = rectW * loupeZoom;
+  const bgH = rectH * loupeZoom;
+  const bgX = curXInLens - mouseCoord.x * loupeZoom;
+  const bgY = curYInLens - mouseCoord.y * loupeZoom;
+
+  return (
+    <figure
+      ref={containerRef}
+      className={`markdown-image-container ${effectiveLoupe ? 'loupe-mode-active' : ''}`}
+      onMouseEnter={() => setIsHovered(true)}
+      onMouseLeave={handleMouseLeave}
+      onMouseMove={handleMouseMove}
+    >
+      <div
+        className={`markdown-image-viewport ${effectiveLoupe ? 'loupe-mode-active' : ''}`}
+        onClick={handleImageClick}
+        title={effectiveLoupe ? t('点击退出放大镜模式', 'Click to exit loupe') : t('点击全屏交互缩放', 'Click for fullscreen zoom')}
+      >
+        <img
+          ref={imgRef}
+          src={resolvedSrc}
+          alt={alt}
+          loading="lazy"
+          className="markdown-image-el"
+          {...props}
+        />
+
+        <div className="markdown-image-toolbar" onClick={(e) => e.stopPropagation()}>
+          <button
+            type="button"
+            className={`image-tool-btn ${effectiveLoupe ? 'active' : ''}`}
+            onClick={toggleLoupe}
+            title={t(
+              '切换局部放大镜 (按住 Shift 键亦可随时呼出)',
+              'Toggle Magnifier Loupe (or hold Shift)'
+            )}
+            aria-label={t('局部放大镜', 'Magnifier Loupe')}
+          >
+            <span className="tool-icon">🔍</span>
+            <span className="tool-text">
+              {effectiveLoupe ? t('退出放大镜', 'Exit Loupe') : t('局部放大镜', 'Magnifier')}
+            </span>
+            {effectiveLoupe && <span className="zoom-badge">{loupeZoom.toFixed(1)}×</span>}
+          </button>
+
+          <button
+            type="button"
+            className="image-tool-btn"
+            onClick={openModal}
+            title={t('全屏交互缩放与拖拽探查', 'Fullscreen Pan & Zoom')}
+            aria-label={t('全屏缩放', 'Fullscreen Zoom')}
+          >
+            <span className="tool-icon">⛶</span>
+            <span className="tool-text">{t('全屏缩放', 'Fullscreen')}</span>
+          </button>
+        </div>
+
+        {effectiveLoupe && (
+          <div className="loupe-active-banner">
+            <span>{t('🔍 放大镜已启用 · 滚轮微调倍率 · 点击退出', '🔍 Loupe active · Scroll to zoom · Click to exit')}</span>
+            <span className="loupe-scale-pill">{loupeZoom.toFixed(1)}×</span>
+          </div>
+        )}
+
+        {effectiveLoupe && mouseCoord.showLens && (
+          <div
+            className="markdown-loupe-lens"
+            style={{
+              width: `${actualLensSize}px`,
+              height: `${actualLensSize}px`,
+              left: `${lensLeft}px`,
+              top: `${lensTop}px`,
+              backgroundImage: `url("${resolvedSrc}")`,
+              backgroundSize: `${bgW}px ${bgH}px`,
+              backgroundPosition: `${bgX}px ${bgY}px`,
+            }}
+          >
+            <div className="loupe-lens-crosshair" />
+            <div className="loupe-lens-badge">{loupeZoom.toFixed(1)}×</div>
+          </div>
+        )}
+      </div>
+
+      {alt && <figcaption className="markdown-image-caption">{alt}</figcaption>}
+
+      {isModalOpen && (
+        <ImageLightboxModal
+          src={resolvedSrc}
+          alt={alt}
+          onClose={() => setIsModalOpen(false)}
+        />
+      )}
+    </figure>
+  );
+}
+
 function safeScrollTo(y) {
   if (typeof window === 'undefined') return;
   try {
@@ -24852,11 +25399,9 @@ function App() {
                           {children}
                         </code>
                       ),
-                      img: ({ src, alt, ...props }) => {
-                        const cleanSrc = src?.trim() ?? '';
-                        const resolvedSrc = (cleanSrc && resolveMediaUrl(cleanSrc)) || cleanSrc;
-                        return <img src={resolvedSrc} alt={alt} loading="lazy" {...props} />;
-                      },
+                      img: ({ src, alt, ...props }) => (
+                        <MarkdownImage src={src} alt={alt} {...props} />
+                      ),
                     }}
                   >
                     {normalizedSelectedContent}

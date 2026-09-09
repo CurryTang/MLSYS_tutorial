@@ -234,6 +234,104 @@ FlashAttention (Dao et al.) is foundational infrastructure for modern LLM traini
   3. **Sliding Window (Fine Local Context)**: Preserves full attention over adjacent local tokens.
 - **Trade-Offs**: Retains Softmax contrastive sharpness; requires block-level hardware alignment to avoid gather/scatter memory latency penalties.
 
+<details class="technical-deep-dive">
+<summary><span class="deep-dive-badge">Kernel Deep-Dive</span><span class="deep-dive-title">DeepSeek NSA Native Sparse Attention: Hardware Tile Alignment & Triton Kernel Implementation</span></summary>
+<div class="deep-dive-content">
+
+##### 1. Why Fine-Grained Token-Level Sparsity Fails on Modern GPUs
+Early dynamic sparsity approaches (e.g., token-level Top-$k$ pruning) reduce theoretical FLOPs, but frequently result in **severe throughput degradation** on modern hardware (e.g., Hopper H100, Blackwell B200):
+- **Memory Coalescing Breakdown**: GPU HBM3/HBM3e peak bandwidth requires 32-thread warps to request contiguous 128-byte cache lines. Dynamic per-token gather/scatter addressing breaks memory coalescing, degrading effective DRAM bandwidth to below $10\%$ of peak;
+- **Tensor Core Systolic Array Misalignment**: Tensor Cores (such as Hopper `wgmma`) process dense $64 \times 64$ or $128 \times 128$ tiles directly within on-chip Shared Memory (SRAM). Unstructured token selections cannot populate these dense hardware pipelines, forcing fallback to low-throughput generic CUDA cores;
+- **Warp Divergence**: Divergent sparse index patterns across threads within the same warp cause execution serialization and pipeline stalls.
+
+##### 2. DeepSeek NSA 3-Branch Hardware-Aligned Architecture
+DeepSeek NSA enforces **Block Alignment ($L_b = 64$ contiguous tokens)** as the fundamental hardware dataflow primitive:
+1. **Compressed Coarse Branch**:
+   - Compresses Key/Value tokens with block-level AvgPool: $K^{\text{cmp}} \in \mathbb{R}^{\frac{S}{L_c} \times D}$;
+   - Queries interact with compressed keys to yield coarse block-importance scores via fast, contiguous Tensor Core GEMMs.
+2. **Selected Fine-Grained Block Branch**:
+   - Based on coarse scores, selects the Top-$k$ **entire contiguous blocks**;
+   - Blocks are loaded using Hopper TMA (Tensor Memory Accelerator) asynchronous copy engines directly from HBM to SRAM with 100% coalescing.
+3. **Sliding Window Branch**:
+   - Maintains dense causal attention over the most recent $W$ tokens (e.g., 512 tokens = 8 contiguous blocks) to ensure syntactic and grammatical integrity.
+4. **Unified Streaming Online Softmax**:
+   - All three branches update a single shared Online Softmax state $(m_i, l_i, O_i)$ inside SRAM registers within one fused kernel pass, avoiding numerical drift or intermediate activation spills.
+
+##### 3. NSA Forward Triton Kernel Skeleton
+
+```python
+import triton
+import triton.language as tl
+
+@triton.jit
+def _nsa_fwd_kernel(
+    Q, K, V, SelectedIndices, Out,
+    stride_qb, stride_qh, stride_qm, stride_qd,
+    stride_kb, stride_kh, stride_kn, stride_kd,
+    stride_vb, stride_vh, stride_vn, stride_vd,
+    stride_ob, stride_oh, stride_om, stride_od,
+    stride_sb, stride_sh, stride_sm, stride_sk,
+    sm_scale,
+    Q_LEN: tl.constexpr,
+    NUM_SELECTED_BLOCKS: tl.constexpr,  # e.g., Top-4 selected blocks
+    BLOCK_SIZE: tl.constexpr,           # Hardware-aligned block size (64 tokens)
+    HEAD_DIM: tl.constexpr,             # Head hidden dimension (64 or 128)
+    BLOCK_M: tl.constexpr,              # Query tile size (64)
+):
+    # Grid: (cdiv(Q_LEN, BLOCK_M), NUM_HEADS, BATCH)
+    pid_m = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    batch_idx = tl.program_id(2)
+
+    # 1. Load Query Tile into SRAM [BLOCK_M, HEAD_DIM]
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, HEAD_DIM)
+    q_ptrs = Q + batch_idx * stride_qb + head_idx * stride_qh + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd
+    q = tl.load(q_ptrs, mask=offs_m[:, None] < Q_LEN, other=0.0)
+
+    # 2. Initialize Online Softmax accumulators in registers
+    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc_o = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
+
+    # 3. Iterate over hardware-coalesced selected block indices
+    sel_base = SelectedIndices + batch_idx * stride_sb + head_idx * stride_sh + pid_m * stride_sm
+    
+    for k_idx in range(NUM_SELECTED_BLOCKS):
+        block_id = tl.load(sel_base + k_idx * stride_sk)
+        
+        # Contiguous block offset calculation
+        offs_n = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        k_ptrs = K + batch_idx * stride_kb + head_idx * stride_kh + offs_n[None, :] * stride_kn + offs_d[:, None] * stride_kd
+        v_ptrs = V + batch_idx * stride_vb + head_idx * stride_vh + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vd
+        
+        # Coalesced block transfer into SRAM
+        k_block = tl.load(k_ptrs) # [HEAD_DIM, BLOCK_SIZE]
+        v_block = tl.load(v_ptrs) # [BLOCK_SIZE, HEAD_DIM]
+
+        # Compute block dot product via Tensor Core [BLOCK_M, BLOCK_SIZE]
+        s_ij = tl.dot(q, k_block) * sm_scale
+
+        # Online Softmax running statistics update
+        m_curr = tl.maximum(m_i, tl.max(s_ij, axis=1))
+        alpha = tl.exp(m_i - m_curr)
+        p = tl.exp(s_ij - m_curr[:, None])
+
+        # Accumulate attention output and normalization factor
+        acc_o = acc_o * alpha[:, None] + tl.dot(p.to(v_block.dtype), v_block)
+        l_i = l_i * alpha + tl.sum(p, axis=1)
+        m_i = m_curr
+
+    # 4. Sliding window blocks process similarly in SRAM...
+
+    # 5. Normalize and write back to global HBM
+    out_ptrs = Out + batch_idx * stride_ob + head_idx * stride_oh + offs_m[:, None] * stride_om + offs_d[None, :] * stride_od
+    tl.store(out_ptrs, (acc_o / l_i[:, None]).to(Out.dtype.element_ty), mask=offs_m[:, None] < Q_LEN)
+```
+
+</div>
+</details>
+
 #### Trajectory B: Linear & Kernelized Attention (Rewriting Associativity & Delta Rule)
 - **Core Idea**: Decomposes Softmax via feature maps $\phi(\cdot)$ such that $\text{Sim}(Q, K) = \phi(Q)\phi(K)^T$. Rewriting evaluation order via associativity:
   $$\text{Standard: } (Q K^T) V \in \mathcal{O}(S^2 D) \implies \text{Linear: } \phi(Q) \left(\phi(K)^T V\right) \in \mathcal{O}(S \cdot D^2)$$
@@ -246,6 +344,95 @@ FlashAttention (Dao et al.) is foundational infrastructure for modern LLM traini
   Subtracts old projections before writing new values, achieving associative retrieval recall approaching standard Softmax.
 - **Industrial Deployment**: **Hybrid Architectures** (e.g., Jamba, Nemotron-4), interleaving standard causal attention periodically among SSM/linear layers.
 
+<details class="technical-deep-dive">
+<summary><span class="deep-dive-badge">Kernel Deep-Dive</span><span class="deep-dive-title">DeltaNet Associative Memory Update, Chunkwise Parallel Scan & Triton Kernel Implementation</span></summary>
+<div class="deep-dive-content">
+
+##### 1. Capacity Saturation in Linear Attention & The Delta Erasure Mechanism
+In naive linear attention, the recurrent update is purely additive: $S_t = S_{t-1} + k_t v_t^T$.
+- **Capacity Saturation**: The recurrent state $S_t \in \mathbb{R}^{d \times d}$ is an unweighted sum of outer products. For sequence lengths $t \gg d$, the matrix rank saturates and early signals cannot be forgotten, precipitating severe "Attention Dilution" in associative retrieval and multi-needle tasks;
+- **Delta Rule (Online Associative Gradient Descent)**:
+  DeltaNet casts each memory write as error-driven online correction against key $k_t$:
+  $$\mathcal{L}_t = \frac{1}{2} \| S_{t-1} k_t - v_t \|_2^2$$
+  Updating the state with learning rate $\beta_t \in [0, 1]$:
+  $$S_t = S_{t-1} - \beta_t \nabla_S \mathcal{L}_t = S_{t-1}(I - \beta_t k_t k_t^T) + \beta_t v_t k_t^T$$
+  The factor $(I - \beta_t k_t k_t^T)$ forms a rank-1 Householder-like projection that **geometrically projects out and erases old memory stored along the direction of $k_t$** before writing the new value $v_t$.
+
+##### 2. The Training Parallelization Paradox & Chunkwise Parallel Formulation
+- **The Parallelization Paradox**: At inference time, updating $S_t$ takes $\mathcal{O}(1)$ time. At training time, however, sequential dependence across $S = 4096$ tokens would serialize the GPU and underutilize SMs;
+- **Chunkwise Parallel Decoupling**: Decomposes the sequence into blocks of size $C = 64$ (aligned with Tensor Core tiles):
+  1. **Intra-Chunk Fast Solve**:
+     Internal causal interactions within a chunk are solved via a lower-triangular matrix equation in SRAM:
+     $$V_{\text{new}} = (I + \text{tril}(\beta K K^T, -1))^{-1} (\beta \odot V)$$
+     Since $C = 64$ is small, the matrix inverse $(I + L)^{-1}$ is resolved directly inside SRAM registers using a 1st-order Neumann series expansion ($I - L + L^2$) or forward substitution;
+     Intra-chunk attention is evaluated as: $O_{\text{intra}} = \text{tril}(Q K^T) V_{\text{new}}$;
+  2. **Inter-Chunk State Transfer**:
+     Inter-chunk state transmission operates as a macro-RNN:
+     $$S_c = S_{c-1} A_c + B_c$$
+     where $A_c = \prod_{t \in c} (I - \beta_t k_t k_t^T) \in \mathbb{R}^{d \times d}$ is the cumulative chunk decay matrix and $B_c = K_c^T V_{\text{new}}$.
+     The state is updated once per chunk, shrinking the sequential step count to $S / C$ ($4096 / 64 = 64$ steps), achieving high Tensor Core utilization.
+
+##### 3. DeltaNet Chunkwise Triton Kernel Skeleton
+
+```python
+import triton
+import triton.language as tl
+
+@triton.jit
+def _deltanet_chunk_fwd_kernel(
+    Q, K, V, Beta, Out,
+    stride_b, stride_h, stride_s, stride_d,
+    CHUNK_SIZE: tl.constexpr, # Tile size (64)
+    DIM: tl.constexpr,        # Hidden state dimension (64 or 128)
+    NUM_CHUNKS: tl.constexpr  # S // CHUNK_SIZE
+):
+    batch_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    base_ptr = batch_idx * stride_b + head_idx * stride_h
+
+    # 1. Initialize recurrent state S [DIM, DIM] in SRAM registers
+    offs_d1 = tl.arange(0, DIM)
+    offs_d2 = tl.arange(0, DIM)
+    s_state = tl.zeros([DIM, DIM], dtype=tl.float32)
+
+    # 2. Iterate across chunks (S // CHUNK_SIZE iterations)
+    for c_idx in range(NUM_CHUNKS):
+        offs_c = c_idx * CHUNK_SIZE + tl.arange(0, CHUNK_SIZE)
+        
+        # Load chunk Q, K, V, Beta into SRAM
+        q = tl.load(Q + base_ptr + offs_c[:, None] * stride_s + offs_d1[None, :] * stride_d)
+        k = tl.load(K + base_ptr + offs_c[:, None] * stride_s + offs_d1[None, :] * stride_d)
+        v = tl.load(V + base_ptr + offs_c[:, None] * stride_s + offs_d1[None, :] * stride_d)
+        beta = tl.load(Beta + base_ptr + offs_c[:, None] * stride_s) # [CHUNK_SIZE, 1]
+
+        # 3. Inter-chunk historical memory contribution: O_inter = Q @ S_{c-1}
+        o_inter = tl.dot(q, s_state) # [CHUNK_SIZE, DIM]
+
+        # 4. Intra-chunk causal solve
+        gram = tl.dot(k, tl.trans(k)) * beta
+        mask_tril = offs_c[:, None] > offs_c[None, :]
+        gram_tril = tl.where(mask_tril, gram, 0.0)
+
+        # First-order Neumann expansion solve in SRAM
+        v_eff = beta * v
+        v_eff = v_eff - tl.dot(gram_tril, v_eff)
+
+        # Intra-chunk attention interaction: O_intra = tril(Q @ K.T) @ v_eff
+        qk = tl.dot(q, tl.trans(k))
+        qk_causal = tl.where(mask_tril, qk, 0.0)
+        o_intra = tl.dot(qk_causal, v_eff)
+
+        # 5. Write back combined chunk output: Out = O_inter + O_intra
+        tl.store(Out + base_ptr + offs_c[:, None] * stride_s + offs_d1[None, :] * stride_d, o_inter + o_intra)
+
+        # 6. Update global recurrent state S_c = S_{c-1} (I - beta K^T K) + K^T v_eff
+        decay = tl.dot(tl.trans(k), tl.dot(k, s_state)) * tl.mean(beta)
+        s_state = s_state - decay + tl.dot(tl.trans(k), v_eff)
+```
+
+</div>
+</details>
+
 #### Trajectory C: Chunking & System-Level Parallelism (Altering System Partitioning)
 - **Core Idea**: Fix local attention blocks $B \ll S$ algorithmically, or partition long sequences across multiple GPUs at the systems level.
 - **RingAttention (Liu et al.)**:
@@ -253,6 +440,105 @@ FlashAttention (Dao et al.) is foundational infrastructure for modern LLM traini
   - **Ring Topology**: $K, V$ blocks circulate peer-to-peer across the interconnect;
   - **Compute-Communication Overlap**: Chunk attention computation completely overlaps with asynchronous P2P transfer of the next $K, V$ block;
   - **Chunked Prefill**: Slices ultra-long prompts into scheduled chunks, eliminating Head-of-Line Blocking for concurrent Decode steps.
+
+<details class="technical-deep-dive">
+<summary><span class="deep-dive-badge">Distributed Systems Deep-Dive</span><span class="deep-dive-title">RingAttention: Asynchronous P2P Double-Buffering, Causal Block Skipping & Streaming Softmax Fusion</span></summary>
+<div class="deep-dive-content">
+
+##### 1. The Context Parallelism Bottleneck & Ring Topology Solution
+For context lengths spanning millions of tokens ($S = 1\text{M} \sim 10\text{M}$), a single GPU's 80GB HBM cannot hold activations and KV Caches.
+- **Memory Explosion of AllGather**: Using naive distributed AllGather to broadcast all $K, V$ blocks restores the per-GPU memory footprint to $\mathcal{O}(S)$, negating distributed memory advantages;
+- **Ring P2P Circulation**: Arranges $P$ GPUs in a 1D logical ring ($0 \to 1 \to \dots \to P-1 \to 0$):
+  - Each GPU persistently holds its local query slice $Q_{\text{local}} \in \mathbb{R}^{\frac{S}{P} \times D}$;
+  - $K, V$ slices stream peer-to-peer across the ring in chunks. Each GPU computes against the incoming block and forwards it, keeping **per-GPU memory bounded strictly at $\mathcal{O}(S / P)$**.
+
+##### 2. Exact Condition for 100% Compute-Communication Overlap
+By allocating ping-pong double buffers:
+- **Pipeline Step $s$**:
+  1. **Asynchronous Communication**: In the background, non-blocking NCCL P2P primitives (`isend` / `irecv`) transmit $K^{(s)}, V^{(s)}$ to $(r+1)\%P$ and receive $K^{(s+1)}, V^{(s+1)}$ from $(r-1)\%P$;
+  2. **Compute Core**: On the GPU foreground, Tensor Cores evaluate FlashAttention between local $Q$ and incoming $K^{(s)}, V^{(s)}$;
+- **Zero-Overhead Invariant**:
+  $$T_{\text{comm}} = \frac{4 \times (S/P) \times D \times b}{\text{Bandwidth}_{\text{ring}}}, \quad T_{\text{comp}} = \frac{4 \times (S/P)^2 \times D}{\text{TFLOPS}_{\text{GPU}}}$$
+  As long as local chunk size satisfies $S/P \ge \frac{\text{TFLOPS}_{\text{GPU}}}{\text{Bandwidth}_{\text{ring}}} \cdot b$, compute time exceeds network transfer, rendering communication **100% hidden (Compute-Bound)**.
+
+##### 3. Causal Block Pruning & Inter-Step Streaming Softmax Update
+- **Causal Block Pruning**:
+  For GPU rank $i$, attention only requires evaluating source keys $j \le i$:
+  - If $j > i$ (future blocks): entirely skipped, saving $50\%$ of global FLOPs;
+  - If $j == i$ (diagonal block): applies standard causal triangular mask;
+  - If $j < i$ (historical blocks): full unmasked attention.
+- **Inter-Step Online Softmax Formulation**:
+  Each GPU maintains local state $(m_{\text{run}}, l_{\text{run}}, O_{\text{run}})$ updated smoothly after each ring hop:
+  $$m_{\text{new}} = \max(m_{\text{run}}, m_{\text{block}})$$
+  $$\alpha = \exp(m_{\text{run}} - m_{\text{new}}), \quad \beta = \exp(m_{\text{block}} - m_{\text{new}})$$
+  $$l_{\text{run}} = \alpha \cdot l_{\text{run}} + \beta \cdot l_{\text{block}}$$
+  $$O_{\text{run}} = \alpha \cdot O_{\text{run}} + \beta \cdot O_{\text{block}}$$
+  After $P$ steps, normalizing $O_{\text{final}} = O_{\text{run}} / l_{\text{run}}$ produces a result **bit-exact to full single-GPU attention**.
+
+##### 4. PyTorch Distributed Ring Attention Core Implementation
+
+```python
+import torch
+import torch.distributed as dist
+
+def ring_flash_attention_forward(q_local, k_local, v_local, group=None):
+    """
+    q_local, k_local, v_local: [Batch, S_local, Heads, Dim], with S_local = Total_Seq / P
+    """
+    world_size = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+    next_rank = (rank + 1) % world_size
+    prev_rank = (rank - 1 + world_size) % world_size
+
+    # 1. Allocate ping-pong buffers to prevent memory overwrites
+    k_curr, v_curr = k_local.clone(), v_local.clone()
+    k_next = torch.empty_like(k_local)
+    v_next = torch.empty_like(v_local)
+
+    # 2. Initialize streaming Online Softmax state
+    m_running = torch.full((q_local.shape[0], q_local.shape[2], q_local.shape[1]), -float('inf'), device=q_local.device)
+    l_running = torch.zeros_like(m_running)
+    o_running = torch.zeros_like(q_local)
+
+    # 3. Step through the logical ring
+    for step in range(world_size):
+        work_handles = []
+        if step < world_size - 1:
+            reqs = [
+                dist.P2POp(dist.isend, k_curr, next_rank, group),
+                dist.P2POp(dist.isend, v_curr, next_rank, group),
+                dist.P2POp(dist.irecv, k_next, prev_rank, group),
+                dist.P2POp(dist.irecv, v_next, prev_rank, group),
+            ]
+            work_handles = dist.batch_isend_irecv(reqs)
+
+        source_rank = (rank - step + world_size) % world_size
+
+        # Causal block pruning
+        if source_rank <= rank:
+            is_causal = (source_rank == rank)
+            out_block, m_block, l_block = flash_attn_chunk(q_local, k_curr, v_curr, causal=is_causal)
+            
+            # Dynamic Online Softmax rescaling
+            m_new = torch.maximum(m_running, m_block)
+            alpha = torch.exp(m_running - m_new)
+            beta = torch.exp(m_block - m_new)
+            
+            l_running = alpha * l_running + beta * l_block
+            o_running = alpha.unsqueeze(-1) * o_running + beta.unsqueeze(-1) * out_block
+            m_running = m_new
+
+        if step < world_size - 1:
+            for req in work_handles:
+                req.wait()
+            k_curr, k_next = k_next, k_curr
+            v_curr, v_next = v_next, v_curr
+
+    return o_running / l_running.unsqueeze(-1)
+```
+
+</div>
+</details>
 
 ---
 

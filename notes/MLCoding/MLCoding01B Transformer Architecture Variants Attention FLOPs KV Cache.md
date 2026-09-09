@@ -234,6 +234,104 @@ FlashAttention（Dao et al.）是现代大模型基础设施级系统优化，�
   3. **Sliding Window（局部精细上下文）**：对邻近若干 Token 保持全注意力。
 - **优缺点**：保留 Softmax 指数放大与注意力锐度；但必须做块级硬件对齐，否则离散访存开销会抵消算力节约。
 
+<details class="technical-deep-dive">
+<summary><span class="deep-dive-badge">Kernel 深度解析</span><span class="deep-dive-title">DeepSeek NSA 原生稀疏注意力的硬件对齐设计与 Triton 算子实现</span></summary>
+<div class="deep-dive-content">
+
+##### 1. 传统 Token 级稀疏在现代 GPU 上的硬件失配困境
+在早期稀疏算法（如动态 Top-$k$ Token 剪枝）中，算法虽然消减了理论 FLOPs，但在现代 GPU（如 Hopper H100、Blackwell B200）上吞吐往往**不升反降**：
+- **非连续访存与合并缺失（Memory Coalescing Breakdown）**：GPU HBM3/HBM3e 的峰值带宽依赖于 Warp（32 线程）发起连续 128 字节的 Cache Line 请求。逐 Token 动态稀疏索引会触发离散 Gather/Scatter 寻址，导致实际有效带宽跌落至峰值的 $10\%$ 以下；
+- **Tensor Core 脉动阵列失配**：现代 GPU 的 Tensor Core（如 Hopper `wgmma` 架构）以固定尺寸的密集矩阵分块（$64 \times 64$ 或 $128 \times 128$）直接在片上共享内存（SRAM）中运作。细粒度离散 Token 无法填充张量单元，硬件被迫回退到低吞吐的通用 CUDA Cores；
+- **Warp 线程分化（Branch Divergence）**：同 Warp 内不同线程如果执行不同长度或位置的稀疏索引分支，会导致严重流水线气泡。
+
+##### 2. DeepSeek NSA 的三路硬件对齐设计
+DeepSeek NSA（Native Sparse Attention）彻底抛弃细粒度离散寻址，强制以**连续块（Block-Aligned，通常为 $L_b = 64$ 个连续 Token）**作为硬件流转基元：
+1. **压缩粗筛分支（Compressed Tokens）**：
+   - 将 Key/Value 按每块 $L_c$ 个 Token 进行 AvgPool 压缩：$K^{\text{cmp}} \in \mathbb{R}^{\frac{S}{L_c} \times D}$；
+   - Query 与连续压缩键计算粗粒度注意力得分，生成块级重要性分布；因张量连续紧凑，计算直接由 Tensor Core 高速完成。
+2. **细粒度块级选中分支（Selected Tokens）**：
+   - 依据粗筛分数，仅选出 Top-$k$ 个**整块（Contiguous Blocks）**；
+   - 载入时利用 Hopper TMA（Tensor Memory Accelerator）硬件引擎以块为单位跨级直接异步搬运（HBM $\to$ SRAM），实现 100% 内存合并访存。
+3. **局域滑动窗口分支（Sliding Window）**：
+   - 维持最近 $W$ 个 Token（如 512 个，即 8 个连续块）的密集因果注意力，保全局部语法与代码词法。
+4. **统一流式归一化（Unified Online Softmax）**：
+   - 三路分支在 SRAM 寄存器中共享同一组动态累加器 $(m_i, l_i, O_i)$，在单个 Kernel 中完成流式融合，杜绝精度漂移与中间激活落盘。
+
+##### 3. NSA 前向 Triton Kernel 核心骨架
+
+```python
+import triton
+import triton.language as tl
+
+@triton.jit
+def _nsa_fwd_kernel(
+    Q, K, V, SelectedIndices, Out,
+    stride_qb, stride_qh, stride_qm, stride_qd,
+    stride_kb, stride_kh, stride_kn, stride_kd,
+    stride_vb, stride_vh, stride_vn, stride_vd,
+    stride_ob, stride_oh, stride_om, stride_od,
+    stride_sb, stride_sh, stride_sm, stride_sk,
+    sm_scale,
+    Q_LEN: tl.constexpr,
+    NUM_SELECTED_BLOCKS: tl.constexpr,  # 例如粗筛选出的 Top-4 块
+    BLOCK_SIZE: tl.constexpr,           # 硬件对齐块大小 (64 tokens)
+    HEAD_DIM: tl.constexpr,             # 头隐层维度 (64 或 128)
+    BLOCK_M: tl.constexpr,              # Query Tiling 大小 (64)
+):
+    # 网格配置：(cdiv(Q_LEN, BLOCK_M), NUM_HEADS, BATCH)
+    pid_m = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    batch_idx = tl.program_id(2)
+
+    # 1. 片上 SRAM 载入 Query 块 [BLOCK_M, HEAD_DIM]
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, HEAD_DIM)
+    q_ptrs = Q + batch_idx * stride_qb + head_idx * stride_qh + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qd
+    q = tl.load(q_ptrs, mask=offs_m[:, None] < Q_LEN, other=0.0)
+
+    # 2. 寄存器初始化 Online Softmax 累加状态
+    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc_o = tl.zeros([BLOCK_M, HEAD_DIM], dtype=tl.float32)
+
+    # 3. 遍历选中的整块连续索引（硬件合并读入）
+    sel_base = SelectedIndices + batch_idx * stride_sb + head_idx * stride_sh + pid_m * stride_sm
+    
+    for k_idx in range(NUM_SELECTED_BLOCKS):
+        block_id = tl.load(sel_base + k_idx * stride_sk)
+        
+        # 内存连续块偏移计算（完全消除逐 Token 散列寻址）
+        offs_n = block_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        k_ptrs = K + batch_idx * stride_kb + head_idx * stride_kh + offs_n[None, :] * stride_kn + offs_d[:, None] * stride_kd
+        v_ptrs = V + batch_idx * stride_vb + head_idx * stride_vh + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vd
+        
+        # 利用 Tensor Core 块级对齐载入 SRAM
+        k_block = tl.load(k_ptrs) # [HEAD_DIM, BLOCK_SIZE]
+        v_block = tl.load(v_ptrs) # [BLOCK_SIZE, HEAD_DIM]
+
+        # 计算块内密集点积 [BLOCK_M, BLOCK_SIZE]
+        s_ij = tl.dot(q, k_block) * sm_scale
+
+        # 流式更新局部最大值与归一化分母
+        m_curr = tl.maximum(m_i, tl.max(s_ij, axis=1))
+        alpha = tl.exp(m_i - m_curr)
+        p = tl.exp(s_ij - m_curr[:, None])
+
+        # 累加 Attention 加权和与 Softmax 因子
+        acc_o = acc_o * alpha[:, None] + tl.dot(p.to(v_block.dtype), v_block)
+        l_i = l_i * alpha + tl.sum(p, axis=1)
+        m_i = m_curr
+
+    # 4. 局域滑动窗口块类似流程（连续遍历并在 SRAM 融合更新 m_i, l_i, acc_o）...
+
+    # 5. 归一化并写回 HBM
+    out_ptrs = Out + batch_idx * stride_ob + head_idx * stride_oh + offs_m[:, None] * stride_om + offs_d[None, :] * stride_od
+    tl.store(out_ptrs, (acc_o / l_i[:, None]).to(Out.dtype.element_ty), mask=offs_m[:, None] < Q_LEN)
+```
+
+</div>
+</details>
+
 #### 路线 B：低秩与核化线性注意力（Linear Attention & Delta Rule，改写结合律）
 - **核心思想**：利用非线性映射 $\phi(\cdot)$ 解耦 Softmax 为内积 $\phi(Q)\phi(K)^T$，借由乘法结合律调整计算顺序：
   $$\text{Standard: } (Q K^T) V \in \mathcal{O}(S^2 D) \implies \text{Linear: } \phi(Q) \left(\phi(K)^T V\right) \in \mathcal{O}(S \cdot D^2)$$
@@ -246,6 +344,96 @@ FlashAttention（Dao et al.）是现代大模型基础设施级系统优化，�
   新 Key 写入前先从记忆矩阵中扣除旧值投影，辅以 Chunkwise 并行扫描算子，召回率逼近标准 Softmax。
 - **工业落地形态**：**Hybrid 混合架构**（如 Jamba、Nemotron-4），周期性交替堆叠 SSM/线性层与因果 Attention 层，兼顾恒定吞吐与复杂检索精度。
 
+<details class="technical-deep-dive">
+<summary><span class="deep-dive-badge">Kernel 深度解析</span><span class="deep-dive-title">DeltaNet 联想记忆更新规则、Chunkwise 块级并行扫描与 Triton 算子实现</span></summary>
+<div class="deep-dive-content">
+
+##### 1. 经典线性注意力容量饱和与 Delta 擦除数学本质
+在朴素核化线性注意力中，递推式为纯累加：$S_t = S_{t-1} + k_t v_t^T$。
+- **容量饱和（Capacity Saturation）**：记忆状态 $S_t \in \mathbb{R}^{d \times d}$ 是外积的线性叠加。当序列长度 $t \gg d$ 时，状态矩阵秩饱和，早期噪声无法被主动遗忘，导致模型在少样本（In-Context Learning）与检索任务上发生严重“注意力稀释（Attention Dilution）”；
+- **Delta 学习规则（Online Associative Gradient Descent）**：
+  DeltaNet 将单步写入建模为对目标记忆的在线纠错。定义预测损失：
+  $$\mathcal{L}_t = \frac{1}{2} \| S_{t-1} k_t - v_t \|_2^2$$
+  对记忆状态求梯度并进行单步步长为 $\beta_t \in [0, 1]$ 的梯度更新：
+  $$S_t = S_{t-1} - \beta_t \nabla_S \mathcal{L}_t = S_{t-1}(I - \beta_t k_t k_t^T) + \beta_t v_t k_t^T$$
+  其中矩阵 $(I - \beta_t k_t k_t^T)$ 类似 Householder 投影变换，其在写入新特征 $v_t$ 之前，**在几何上将旧记忆沿 $k_t$ 空间的分量进行主动投影擦除**。
+
+##### 2. 训练并行化悖论与 Chunkwise 并行扫描算法
+- **并行化悖论**：在推理阶段，单步状态更新是纯粹的 $\mathcal{O}(1)$；但在预训练阶段，$S_t$ 强依赖于 $S_{t-1}$ 的序列因果递推。若在 GPU 上顺序循环执行 $S=4096$ 步，将导致 GPU SM 算力被严重串行化阻塞；
+- **Chunkwise 分块并行解耦**：将序列划分为大小为 $C = 64$（对齐硬件 Tile）的子块。
+  1. **块内矩阵化求解（Intra-Chunk Fast Solve）**：
+     块内部的因果级联通过下三角矩阵方程在 SRAM 内部一次性解出：
+     $$V_{\text{new}} = (I + \text{tril}(\beta K K^T, -1))^{-1} (\beta \odot V)$$
+     由于 $C=64$ 极小，逆矩阵 $(I + L)^{-1}$ 可直接在片上 SRAM 中利用纽曼级数展开（$I - L + L^2$）或精确三角代换用 Tensor Core 极速展开；
+     块内自注意力输出为：$O_{\text{intra}} = \text{tril}(Q K^T) V_{\text{new}}$；
+  2. **块间状态转移（Inter-Chunk State Transfer）**：
+     块之间的隐状态传递等价于宏观 RNN：
+     $$S_c = S_{c-1} A_c + B_c$$
+     其中 $A_c = \prod_{t \in c} (I - \beta_t k_t k_t^T) \in \mathbb{R}^{d \times d}$ 为块衰减累积矩阵，$B_c = K_c^T V_{\text{new}}$。
+     宏观状态在每个 Chunk 只需更新一次，总步骤缩减为 $S / C$（例如 $4096 / 64 = 64$ 步），使得跨块递推开销可以被忽略，兼得 RNN 的线性复杂度与 Transformer 的高 Tensor Core 硬件利用率。
+
+##### 3. DeltaNet Chunkwise Triton Kernel 实现骨架
+
+```python
+import triton
+import triton.language as tl
+
+@triton.jit
+def _deltanet_chunk_fwd_kernel(
+    Q, K, V, Beta, Out,
+    stride_b, stride_h, stride_s, stride_d,
+    CHUNK_SIZE: tl.constexpr, # 硬件对齐块大小 (64)
+    DIM: tl.constexpr,        # 隐状态维度 (64 或 128)
+    NUM_CHUNKS: tl.constexpr  # S // CHUNK_SIZE
+):
+    batch_idx = tl.program_id(0)
+    head_idx = tl.program_id(1)
+    base_ptr = batch_idx * stride_b + head_idx * stride_h
+
+    # 1. 初始化片上寄存器记忆状态 S [DIM, DIM]
+    offs_d1 = tl.arange(0, DIM)
+    offs_d2 = tl.arange(0, DIM)
+    s_state = tl.zeros([DIM, DIM], dtype=tl.float32)
+
+    # 2. 宏观跨块循环 (S / CHUNK_SIZE 次)
+    for c_idx in range(NUM_CHUNKS):
+        offs_c = c_idx * CHUNK_SIZE + tl.arange(0, CHUNK_SIZE)
+        
+        # 加载本 Chunk 的 Q, K, V, Beta 到 SRAM
+        q = tl.load(Q + base_ptr + offs_c[:, None] * stride_s + offs_d1[None, :] * stride_d)
+        k = tl.load(K + base_ptr + offs_c[:, None] * stride_s + offs_d1[None, :] * stride_d)
+        v = tl.load(V + base_ptr + offs_c[:, None] * stride_s + offs_d1[None, :] * stride_d)
+        beta = tl.load(Beta + base_ptr + offs_c[:, None] * stride_s) # [CHUNK_SIZE, 1]
+
+        # 3. 计算来自历史记忆的输出贡献：O_inter = Q @ S_{c-1}
+        o_inter = tl.dot(q, s_state) # [CHUNK_SIZE, DIM]
+
+        # 4. 块内因果修正（Intra-Chunk Delta Inversion）
+        # 构建因果 Gram 矩阵: G = tril(beta * K @ K.T)
+        gram = tl.dot(k, tl.trans(k)) * beta
+        mask_tril = offs_c[:, None] > offs_c[None, :]
+        gram_tril = tl.where(mask_tril, gram, 0.0)
+
+        # 纽曼级数一阶展开在 SRAM 快速求解有效值向量
+        v_eff = beta * v
+        v_eff = v_eff - tl.dot(gram_tril, v_eff)
+
+        # 计算块内自注意力交互贡献：O_intra = tril(Q @ K.T) @ v_eff
+        qk = tl.dot(q, tl.trans(k))
+        qk_causal = tl.where(mask_tril, qk, 0.0)
+        o_intra = tl.dot(qk_causal, v_eff)
+
+        # 5. 写回本 Chunk 完整输出：Out = O_inter + O_intra
+        tl.store(Out + base_ptr + offs_c[:, None] * stride_s + offs_d1[None, :] * stride_d, o_inter + o_intra)
+
+        # 6. 更新全局隐状态 S_c = S_{c-1} (I - beta K^T K) + K^T v_eff
+        decay = tl.dot(tl.trans(k), tl.dot(k, s_state)) * tl.mean(beta)
+        s_state = s_state - decay + tl.dot(tl.trans(k), v_eff)
+```
+
+</div>
+</details>
+
 #### 路线 C：分块与系统级并行（Chunking & RingAttention，改系统切分）
 - **核心思想**：算法上固定局部注意力块 $B \ll S$，或系统架构上将长序列切分分散至多张 GPU 流转。
 - **RingAttention（Liu et al.）**：
@@ -253,6 +441,110 @@ FlashAttention（Dao et al.）是现代大模型基础设施级系统优化，�
   - 核心流转：$K, V$ 块通过 GPU 环形拓扑（Ring P2P）跨卡流动；
   - **计算通信完全重叠（Compute-Comm Overlap）**：计算当前块注意力时，底层异步流水线同步发送与接收下一块 $K, V$，网络传输耗时被计算隐藏；
   - **Chunked Prefill**：将超长 Prompt 切片打散分批调度，防止单次大 Prefill 独占计算资源导致 Decode 任务出现排队毛刺（Head-of-Line Blocking）。
+
+<details class="technical-deep-dive">
+<summary><span class="deep-dive-badge">分布式系统深度解析</span><span class="deep-dive-title">RingAttention 环形 P2P 双缓冲异步重叠、因果块跳过与流式 Softmax 融合实现</span></summary>
+<div class="deep-dive-content">
+
+##### 1. 上下文并行（Context Parallelism）的核心痛点与 Ring 拓扑化解
+面对百万级上下文（$S = 1\text{M} \sim 10\text{M}$），单张 GPU 的 80GB HBM 甚至无法容纳长序列的 KV Cache 与激活值。
+- **AllGather 的显存爆炸**：若采用常规并行将全量 $K, V$ 广播至各卡，单卡显存开销立刻退化回 $\mathcal{O}(S)$，完全抵消多卡并行的意义；
+- **Ring 拓扑流转（Ring P2P）**：将世界大小为 $P$ 的 GPU 排列为环形逻辑拓扑（$0 \to 1 \to \dots \to P-1 \to 0$）。
+  - 每张 GPU 仅持有局部序列切片 $S_{\text{local}} = S / P$ 的 $Q, K, V$；
+  - 整个流转过程中，本地 Query 切片 $Q_{\text{local}}$ 永驻本地 SRAM/HBM；
+  - $K, V$ 切片以块为单位沿环异步流转，各卡仅在计算时借用，用完即换，**单卡显存占用恒定维持在严格的 $\mathcal{O}(S / P)$**。
+
+##### 2. 通信计算完全重叠（Double-Buffering Overlap）条件
+通过维护 Ping-Pong 接收双缓冲：
+- **流水线步骤 $s$**：
+  1. **异步通信引擎**：在后台通过 NCCL P2P（`isend` / `irecv`）将当前的 $K^{(s)}, V^{(s)}$ 发往下一节点 $(r+1)\%P$，同时从上一节点 $(r-1)\%P$ 接收 $K^{(s+1)}, V^{(s+1)}$；
+  2. **计算核心**：在前台通过 Tensor Core 计算本地 $Q$ 与当前 $K^{(s)}, V^{(s)}$ 的 FlashAttention 分块；
+- **零通信开销物理准则**：
+  $$T_{\text{comm}} = \frac{4 \times (S/P) \times D \times b}{\text{Bandwidth}_{\text{ring}}}, \quad T_{\text{comp}} = \frac{4 \times (S/P)^2 \times D}{\text{TFLOPS}_{\text{GPU}}}$$
+  只要切片块大小满足 $S/P \ge \frac{\text{TFLOPS}_{\text{GPU}}}{\text{Bandwidth}_{\text{ring}}} \cdot b$，计算耗时必然大于网络传输耗时，网络通信被**完全隐藏（100% Compute-Bound）**。
+
+##### 3. 因果掩码裁剪与跨步流式 Softmax 数学融合
+- **因果块跳过（Causal Pruning）**：
+  对第 $i$ 号 GPU，其仅需计算源节点 $j \le i$ 的历史键值块：
+  - 若 $j > i$（未来块）：完全跳过计算与通信等待，直接省去 $50\%$ 的全局 FLOPs；
+  - 若 $j == i$（对角块）：应用因果下三角 Mask；
+  - 若 $j < i$（历史块）：全矩阵无 Mask 计算。
+- **跨环步 Online Softmax 递推更新**：
+  在各环步 $s$ 完成分块 Attention 后，本地维护状态 $(m_{\text{run}}, l_{\text{run}}, O_{\text{run}})$ 按如下公式平滑更新：
+  $$m_{\text{new}} = \max(m_{\text{run}}, m_{\text{block}})$$
+  $$\alpha = \exp(m_{\text{run}} - m_{\text{new}}), \quad \beta = \exp(m_{\text{block}} - m_{\text{new}})$$
+  $$l_{\text{run}} = \alpha \cdot l_{\text{run}} + \beta \cdot l_{\text{block}}$$
+  $$O_{\text{run}} = \alpha \cdot O_{\text{run}} + \beta \cdot O_{\text{block}}$$
+  全部 $P$ 步完成后执行最终归一化 $O_{\text{final}} = O_{\text{run}} / l_{\text{run}}$，其结果与单卡全量 Attention **在数学上严格等价（Bit-Exact）**。
+
+##### 4. PyTorch + 分布式 P2P 双缓冲核心实现骨架
+
+```python
+import torch
+import torch.distributed as dist
+
+def ring_flash_attention_forward(q_local, k_local, v_local, group=None):
+    """
+    q_local, k_local, v_local: [Batch, S_local, Heads, Dim]，其中 S_local = Total_Seq / P
+    """
+    world_size = dist.get_world_size(group)
+    rank = dist.get_rank(group)
+    next_rank = (rank + 1) % world_size
+    prev_rank = (rank - 1 + world_size) % world_size
+
+    # 1. 分配 Ping-Pong 传输双缓冲，避免通信覆写冲突
+    k_curr, v_curr = k_local.clone(), v_local.clone()
+    k_next = torch.empty_like(k_local)
+    v_next = torch.empty_like(v_local)
+
+    # 2. 初始化跨环步流式 Softmax 累加状态
+    m_running = torch.full((q_local.shape[0], q_local.shape[2], q_local.shape[1]), -float('inf'), device=q_local.device)
+    l_running = torch.zeros_like(m_running)
+    o_running = torch.zeros_like(q_local)
+
+    # 3. 沿环推进 world_size 步
+    for step in range(world_size):
+        # 发起非阻塞 P2P 发送与接收
+        work_handles = []
+        if step < world_size - 1:
+            reqs = [
+                dist.P2POp(dist.isend, k_curr, next_rank, group),
+                dist.P2POp(dist.isend, v_curr, next_rank, group),
+                dist.P2POp(dist.irecv, k_next, prev_rank, group),
+                dist.P2POp(dist.irecv, v_next, prev_rank, group),
+            ]
+            work_handles = dist.batch_isend_irecv(reqs)
+
+        # 确定当前 K, V 块在原始序列中的全局位置
+        source_rank = (rank - step + world_size) % world_size
+
+        # 因果掩码裁剪：只计算历史与当前块 (source_rank <= rank)
+        if source_rank <= rank:
+            is_causal = (source_rank == rank)
+            # 调用底层 FlashAttention Kernel 计算局部块注意力
+            out_block, m_block, l_block = flash_attn_chunk(q_local, k_curr, v_curr, causal=is_causal)
+            
+            # 流式跨步 Online Softmax 动态重新缩放与累加
+            m_new = torch.maximum(m_running, m_block)
+            alpha = torch.exp(m_running - m_new)
+            beta = torch.exp(m_block - m_new)
+            
+            l_running = alpha * l_running + beta * l_block
+            o_running = alpha.unsqueeze(-1) * o_running + beta.unsqueeze(-1) * out_block
+            m_running = m_new
+
+        # 等待后台通信完成，交换 Ping-Pong 缓冲区指针
+        if step < world_size - 1:
+            for req in work_handles:
+                req.wait()
+            k_curr, k_next = k_next, k_curr
+            v_curr, v_next = v_next, v_curr
+
+    return o_running / l_running.unsqueeze(-1)
+```
+
+</div>
+</details>
 
 ---
 
