@@ -2,9 +2,9 @@
 
 课程位置：[[SystemDesign08 LLM Async RL Platform|08 异步 LLM RL]] → 本篇 → [[SystemDesign99 Glossary|99 术语]]
 
-白板解法：`notes/SystemDesign/figures/flash-sale-whiteboard.excalidraw`。
-
 一场活动、一个 SKU。读走 cache；买走队列；库存只在 DB 事务里扣。
+
+![[assets/flash-sale-whiteboard.png|Flash sale whiteboard]]
 
 ```flash-sale-architecture-visual
 ```
