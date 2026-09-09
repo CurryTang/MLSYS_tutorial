@@ -247,11 +247,11 @@ To fundamentally transcend the "quadratic FLOPs wall" and "autoregressive decodi
 
 | Mechanism / Efficiency Trajectory | Training Activation Memory | HBM Access / IO Traffic | Forward FLOPs | Backward FLOPs | Autoregressive Decode Step Cost | Hardware Regime | Physical Bottleneck & Engineering Constraints |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Standard Attention<br>(Standard / Eager)** | $\mathcal{O}(S^2)$<br>Materializes dense $S \times S$ matrix | $\mathcal{O}(S^2 + S D)$<br>Frequent round-trip HBM spills | $4 S^2 D$<br>($2 S^2 D$ causal) | $8 S^2 D$<br>($4 S^2 D$ causal) | Memory: $\mathcal{O}(S D)$ linear growth<br>Compute: $2 S D$ scans full history | **Severe Memory-Bound**<br>Intensity $< 1$, extreme bandwidth starvation | Instant activation OOM on long sequences; zero on-chip data reuse. |
-| **FlashAttention<br>(Dao et al. Systems Patch)** | $\mathcal{O}(S \cdot D)$<br>Discards intermediates; stores only $O$ and $L_i$ | $\mathcal{O}\left(\frac{S^2 D^2}{M}\right) \approx \mathcal{O}(S D)$<br>SRAM-tiled pipelined fusion | $4 S^2 D$<br>($2 S^2 D$ causal) | $10 S^2 D$<br>($5 S^2 D$ causal)<br>Recomputation adds ~25% | Memory: $\mathcal{O}(S D)$ linear growth<br>Compute: $2 S D$ scans full history | **Compute-Bound**<br>Fully saturates Tensor Core systolic arrays | **Does NOT reduce quadratic FLOPs**; Prefill latency explodes at 1M+ context; cannot break decoding KV cache wall. |
-| **Trajectory A: Native Sparse Attention<br>(DeepSeek NSA / Sparse)** | $\mathcal{O}(S \cdot D)$<br>Stores only coarse indices and Top-$k$ active blocks | $\mathcal{O}(S \cdot k_{\text{eff}} \cdot D)$<br>TMA block-aligned coalesced transfers | $\approx 4 S \cdot k_{\text{eff}} \cdot D$<br>(Scales near-linearly with length) | $\approx 8 S \cdot k_{\text{eff}} \cdot D$<br>(Compute drops by multiples to orders of magnitude) | Memory: $\mathcal{O}(k_{\text{eff}} \cdot D)$<br>Compute: $2 k_{\text{eff}} D$ scans active blocks only | **Compute-Bound**<br>(Requires 64-token block alignment) | Must strictly enforce hardware block alignment (64 tokens); discrete token pruning causes catastrophic uncoalesced memory stalls. |
-| **Trajectory B: Linear Attention & SSM<br>(DeltaNet / RetNet / SSM)** | $\mathcal{O}(S \cdot D)$<br>Propagates $D \times D$ hidden states chunkwise | $\mathcal{O}(S \cdot D)$<br>Single streaming linear scan, minimal IO | $\approx 4 S D^2$<br>(At $S \gg D$, compute drops 1000×) | $\approx 8 S D^2$<br>(Strictly linear complexity) | Memory: $\mathcal{O}(D^2)$ **Strictly $\mathcal{O}(1)$ constant**<br>Compute: $\mathcal{O}(D^2)$ **Strictly $\mathcal{O}(1)$ constant** | **Compute-Bound** (Training)<br>**Throughput-Flat** (Decoding) | Plain kernelization suffers capacity saturation & attention dilution; requires Delta projection erasure; slightly trails Softmax on complex retrieval. |
-| **Trajectory C: Distributed Context Parallelism<br>(RingAttention / CP)** | Per-GPU $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>Scales down linearly with GPU count $P$ | Per-GPU retains SRAM tiling; cross-node over NVLink/RDMA ring | Per-GPU $\approx \frac{2 S^2 D}{P}$<br>Cluster total strictly invariant | Per-GPU $\approx \frac{5 S^2 D}{P}$<br>Cluster total strictly invariant | Per-GPU holds slice $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>Asynchronous ring flow | **Overlap Compute-Bound**<br>(Double-buffering hides comm latency) | Highly dependent on cluster interconnect bandwidth; too small chunks fail to hide communication (falls back to Comm-Bound). |
+| **Standard Attention<br>(Standard / Eager)**<br>🔗 *[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.en.md#Exercise 1 · MultiHeadAttention (bidirectional, non-causal)|Ex 1 · MHA Scratch]]* | $\mathcal{O}(S^2)$<br>Materializes dense $S \times S$ matrix | $\mathcal{O}(S^2 + S D)$<br>Frequent round-trip HBM spills | $4 S^2 D$<br>($2 S^2 D$ causal) | $8 S^2 D$<br>($4 S^2 D$ causal) | Memory: $\mathcal{O}(S D)$ linear growth<br>Compute: $2 S D$ scans full history | **Severe Memory-Bound**<br>Intensity $< 1$, extreme bandwidth starvation | Instant activation OOM on long sequences; zero on-chip data reuse. |
+| **FlashAttention<br>(Dao et al. Systems Patch)**<br>🔗 *[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.en.md#Exercise 7 · Flash Attention (tiling + online softmax)|Ex 7 · FlashAttn Kernel]]* | $\mathcal{O}(S \cdot D)$<br>Discards intermediates; stores only $O$ and $L_i$ | $\mathcal{O}\left(\frac{S^2 D^2}{M}\right) \approx \mathcal{O}(S D)$<br>SRAM-tiled pipelined fusion | $4 S^2 D$<br>($2 S^2 D$ causal) | $10 S^2 D$<br>($5 S^2 D$ causal)<br>Recomputation adds ~25% | Memory: $\mathcal{O}(S D)$ linear growth<br>Compute: $2 S D$ scans full history | **Compute-Bound**<br>Fully saturates Tensor Core systolic arrays | **Does NOT reduce quadratic FLOPs**; Prefill latency explodes at 1M+ context; cannot break decoding KV cache wall. |
+| **Trajectory A: Native Sparse Attention<br>(DeepSeek NSA / Sparse)**<br>🔗 *[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.en.md#Exercise 4 · Sliding Window Attention|Ex 4 · Sliding Window]]*<br>⚡ *[[#Hardware-Aligned Native Sparse Attention (DeepSeek NSA)|Deep Dive: NSA Kernel]]* | $\mathcal{O}(S \cdot D)$<br>Stores only coarse indices and Top-$k$ active blocks | $\mathcal{O}(S \cdot k_{\text{eff}} \cdot D)$<br>TMA block-aligned coalesced transfers | $\approx 4 S \cdot k_{\text{eff}} \cdot D$<br>(Scales near-linearly with length) | $\approx 8 S \cdot k_{\text{eff}} \cdot D$<br>(Compute drops by multiples to orders of magnitude) | Memory: $\mathcal{O}(k_{\text{eff}} \cdot D)$<br>Compute: $2 k_{\text{eff}} D$ scans active blocks only | **Compute-Bound**<br>(Requires 64-token block alignment) | Must strictly enforce hardware block alignment (64 tokens); discrete token pruning causes catastrophic uncoalesced memory stalls. |
+| **Trajectory B: Linear Attention & SSM<br>(DeltaNet / RetNet / SSM)**<br>🔗 *[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.en.md#Exercise 5 · Linear Attention|Ex 5 · Linear Attention]]*<br>⚡ *[[#DeltaNet Associative Memory Update Rules, Chunkwise Parallel Scan & Triton Kernel Implementation|Deep Dive: DeltaNet]]* | $\mathcal{O}(S \cdot D)$<br>Propagates $D \times D$ hidden states chunkwise | $\mathcal{O}(S \cdot D)$<br>Single streaming linear scan, minimal IO | $\approx 4 S D^2$<br>(At $S \gg D$, compute drops 1000×) | $\approx 8 S D^2$<br>(Strictly linear complexity) | Memory: $\mathcal{O}(D^2)$ **Strictly $\mathcal{O}(1)$ constant**<br>Compute: $\mathcal{O}(D^2)$ **Strictly $\mathcal{O}(1)$ constant** | **Compute-Bound** (Training)<br>**Throughput-Flat** (Decoding) | Plain kernelization suffers capacity saturation & attention dilution; requires Delta projection erasure; slightly trails Softmax on complex retrieval. |
+| **Trajectory C: Distributed Context Parallelism<br>(RingAttention / CP)**<br>⚡ *[[#RingAttention Ring P2P Double-Buffering Overlap, Causal Pruning & Streaming Softmax Implementation|Deep Dive: RingAttn]]* | Per-GPU $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>Scales down linearly with GPU count $P$ | Per-GPU retains SRAM tiling; cross-node over NVLink/RDMA ring | Per-GPU $\approx \frac{2 S^2 D}{P}$<br>Cluster total strictly invariant | Per-GPU $\approx \frac{5 S^2 D}{P}$<br>Cluster total strictly invariant | Per-GPU holds slice $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>Asynchronous ring flow | **Overlap Compute-Bound**<br>(Double-buffering hides comm latency) | Highly dependent on cluster interconnect bandwidth; too small chunks fail to hide communication (falls back to Comm-Bound). |
 
 ---
 
@@ -263,6 +263,11 @@ To fundamentally transcend the "quadratic FLOPs wall" and "autoregressive decodi
   2. **Selected Tokens (Top-$k$ Block Interaction)**: Only top-$k$ critical blocks are scheduled into fast on-chip memory for exact fine-grained attention;
   3. **Sliding Window (Fine Local Context)**: Preserves full attention over adjacent local tokens.
 - **Trade-Offs**: Retains Softmax contrastive sharpness; requires block-level hardware alignment to avoid gather/scatter memory latency penalties.
+
+> [!TIP]
+> **Hands-On Exercises & Low-Level Kernels**:
+> - Foundational Local Sparse: Head to **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.en.md#Exercise 4 · Sliding Window Attention|ML Coding 03 · Exercise 4: Sliding Window Attention]]** for causal sliding window attention;
+> - Hardware-Aligned Triton Operator: Click below to expand the technical deep dive for the full **DeepSeek NSA Triton GPU kernel implementation**.
 
 <details class="technical-deep-dive">
 <summary><span class="deep-dive-badge">Kernel Deep-Dive</span><span class="deep-dive-title">DeepSeek NSA Native Sparse Attention: Hardware Tile Alignment & Triton Kernel Implementation</span></summary>
@@ -373,6 +378,11 @@ def _nsa_fwd_kernel(
   $$W_t = W_{t-1}(I - \beta_t k_t k_t^T) + \beta_t v_t k_t^T$$
   Subtracts old projections before writing new values, achieving associative retrieval recall approaching standard Softmax.
 - **Industrial Deployment**: **Hybrid Architectures** (e.g., Jamba, Nemotron-4), interleaving standard causal attention periodically among SSM/linear layers.
+
+> [!TIP]
+> **Hands-On Exercises & Low-Level Kernels**:
+> - Linear Attention Fundamentals: Head to **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.en.md#Exercise 5 · Linear Attention|ML Coding 03 · Exercise 5: Linear Attention]]** to implement $\phi(Q)(\phi(K)^T V)$ kernel mappings and prefix sums;
+> - Chunkwise Parallel Triton Operator: Click below to expand the technical deep dive for **DeltaNet associative memory rules and Triton kernel implementation**.
 
 <details class="technical-deep-dive">
 <summary><span class="deep-dive-badge">Kernel Deep-Dive</span><span class="deep-dive-title">DeltaNet Associative Memory Update, Chunkwise Parallel Scan & Triton Kernel Implementation</span></summary>
@@ -588,20 +598,36 @@ K/V Heads: [1] [2] [3] [4] [5] [6] [7] [8]  K/V Heads: [         1 (Shared)     
 - **PagedAttention (vLLM)**: Virtual memory paging for KV tensors (e.g., 16 tokens/block), slashing memory fragmentation from $60\% \sim 80\%$ to $<4\%$;
 - **KV Cache Quantization (FP8 / INT4)**: Quantizes cached Key/Value vectors to 8-bit or 4-bit precision, halving or quartering memory capacity demands and elevating decode concurrency.
 
+> [!TIP]
+> **Hands-On Coding Exercises**:
+> - Grouped Query Attention: Head to **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.en.md#Exercise 3 · Grouped Query Attention (GQA)|ML Coding 03 · Exercise 3: Grouped Query Attention (GQA)]]** to implement Query grouping and Key/Value broadcast mapping;
+> - Autoregressive KV Cache Decoding: Head to **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.en.md#Exercise 6 · KV Cache Attention|ML Coding 03 · Exercise 6: KV Cache Attention]]** for prefill and token-by-token decode cache concatenation.
+
 ---
 
-### 5. Multi-Paradigm Comparison Matrix & Industrial Convergence
+### 5. Industrial Convergence Stack & Hybrid Architecture Evolution
 
-| Paradigm / Mechanism | Compute Complexity | Training Memory | Inference KV State Memory | Core Strengths | Core Limitations & Engineering Overhead |
-|---|---|---|---|---|---|
-| **Standard (+FlashAttention)** | $\mathcal{O}(S^2 D)$ | $\mathcal{O}(S D)$ | $\mathcal{O}(B \cdot S \cdot L \cdot d_k)$ Linear | Exact Softmax, zero quality loss, sharp associative recall | Prefill & FLOPs remain quadratic; low throughput at long sequences |
-| **Sparse / NSA (DeepSeek)** | $\mathcal{O}(S \cdot k \cdot D)$ | $\mathcal{O}(S \cdot k)$ | $\mathcal{O}(B \cdot k \cdot L \cdot d_k)$ Sparse | Retains Softmax contrastive sharpness; high NIAH retrieval | Requires hardware-aligned block kernels; non-contiguous memory access risks |
-| **Linear / DeltaNet** | $\mathcal{O}(S \cdot D^2)$ | $\mathcal{O}(S D)$ | $\mathcal{O}(D^2)$, Step $\mathcal{O}(1)$ | Extreme decoding throughput; zero KV Cache expansion | Pure accumulation suffers from memory saturation; weaker ICL than Softmax |
-| **Ring / Chunked Parallel** | Distributed $\mathcal{O}(S^2 D / P)$ | Per-GPU $\mathcal{O}(B_{\text{chunk}} D)$ | Distributed slices | Breaks single-device memory limits; scales to 1M+ context | Heavy reliance on high-speed interconnects (NVLink/RoCE); network can bottleneck |
+> [!NOTE]
+> For a rigorous breakdown of activation memory, HBM IO, FLOPs, and decode-step overhead across all paradigms, refer to **[[#(0) Unified Complexity & Hardware Bottleneck Benchmark Matrix|(0) Unified Complexity & Hardware Bottleneck Benchmark Matrix]]**.
 
-#### Industrial Convergence Stack
-1. **Hardware & Interconnect Foundation**: FlashAttention manages single-GPU SRAM-HBM IO optimization, while RingAttention orchestrates cross-node sequence slicing;
-2. **Architecture & Algorithm Co-Design**: GQA shrinks inference head footprints, paired with NSA native dynamic sparsity or SSM/DeltaNet hybrid interleaving.
+In production deployments scaling to hundreds of billions of parameters and multi-million-token contexts, no single technique resolves all physical bottlenecks alone. Production systems converge on a **hierarchical multi-tier stack**:
+
+#### 1. Layered Systems Stack Synergy
+- **Single-GPU Micro-Architecture**: Universal adoption of **FlashAttention** (e.g. FlashAttention-2 / FlashAttention-3) to maximize arithmetic intensity and eliminate memory-bound stalls via on-chip SRAM tiling;
+- **Multi-GPU Cluster Tier (Context Parallelism)**: Distributed sequence parallelism via **RingAttention / USP (Unified Sequence Parallelism)**, streaming KV slices through ring P2P double-buffering to partition per-GPU memory by $P$ while completely hiding network communication behind compute;
+- **Inference Serving Tier**:
+  - Architectural standardization on **GQA (8:1 query-to-KV ratio)** to cut KV Cache generation by 87.5%;
+  - Memory virtualization via **PagedAttention (vLLM)** reducing internal/external fragmentation below 4%;
+  - Numerical compression via **FP8 / INT4 KV Cache Quantization**, cutting memory capacity and decoding memory bandwidth requirements by 2–4×.
+
+#### 2. Architectural Convergence: Hybrid Models
+Pure linear attention and state-space models (SSMs) hit theoretical capacity saturation barriers on multi-step reasoning and complex in-context learning (ICL), while dense quadratic softmax attention is computationally prohibitive at 1M+ context. State-of-the-art architectures converge on **Hybrid Stacks**:
+
+- **Periodic Hybrid Stacking (e.g. Jamba, Nemotron-4)**:
+  - Interleaving $N$ linear attention or Mamba SSM layers (e.g. 3:1 or 7:1 ratio) with 1 full dense Softmax attention layer;
+  - Linear/SSM layers stream context with flat $\mathcal{O}(1)$ decode complexity, while periodic attention layers retain full precision retrieval and associative recall;
+- **Hardware-Aligned Sparse + Dense Hybrids (e.g. DeepSeek NSA)**:
+  - Hardware-coalesced 64-token block sparse attention combining coarse pooling, top-$k$ block indexing, and sliding local windows, retaining softmax precision while dropping computation and memory traffic by an order of magnitude.
 
 ---
 

@@ -247,11 +247,11 @@ FlashAttention（Dao et al.）是现代大模型基础设施级系统优化，�
 
 | 机制 / 效率路线 | 训练激活显存<br>(Activation Memory) | HBM 访存 IO 量<br>(Memory Traffic) | 前向计算量<br>(Forward FLOPs) | 反向计算量<br>(Backward FLOPs) | 自回归推理单步<br>(Decode Step 开销) | 硬件运行瓶颈<br>(Hardware Regime) | 核心物理代价与工程约束 |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **标准 Attention<br>(Standard / Eager)** | $\mathcal{O}(S^2)$<br>物化保存完整 $S \times S$ 矩阵 | $\mathcal{O}(S^2 + S D)$<br>频繁往返 HBM 倾倒矩阵 | $4 S^2 D$<br>(因果掩码 $2 S^2 D$) | $8 S^2 D$<br>(因果掩码 $4 S^2 D$) | 显存：$\mathcal{O}(S D)$ 线性膨胀<br>计算：$2 S D$ 遍历历史 | **严重 Memory-Bound**<br>算术强度 $< 1$，带宽极度饥饿 | 训练长序列瞬间显存 OOM 崩溃；无任何片上数据复用。 |
-| **FlashAttention<br>(Dao et al. 系统补丁)** | $\mathcal{O}(S \cdot D)$<br>丢弃中间激活，仅存 $O$ 与 $L_i$ | $\mathcal{O}\left(\frac{S^2 D^2}{M}\right) \approx \mathcal{O}(S D)$<br>SRAM 分块流水线融合 | $4 S^2 D$<br>(因果掩码 $2 S^2 D$) | $10 S^2 D$<br>(因果掩码 $5 S^2 D$)<br>重算浮点量增 ~25% | 显存：$\mathcal{O}(S D)$ 仍线性膨胀<br>计算：$2 S D$ 仍需遍历历史 | **Compute-Bound**<br>充分跑满 Tensor Core 脉动阵列 | **未降低总 FLOPs 二次方**；Prefill 耗时依然剧烈爆炸；自回归无法摆脱 KV 访存墙。 |
-| **路线 A：原生稀疏注意力<br>(DeepSeek NSA / Sparse)** | $\mathcal{O}(S \cdot D)$<br>仅维护粗筛与 Top-$k$ 活跃块 | $\mathcal{O}(S \cdot k_{\text{eff}} \cdot D)$<br>TMA 块级对齐连续加载 | $\approx 4 S \cdot k_{\text{eff}} \cdot D$<br>(降为与序列近似线性) | $\approx 8 S \cdot k_{\text{eff}} \cdot D$<br>(计算量压低数倍至数十倍) | 显存：$\mathcal{O}(k_{\text{eff}} \cdot D)$<br>计算：$2 k_{\text{eff}} D$ 只算活跃块 | **Compute-Bound**<br>(依赖 64-token 块硬件对齐) | 必须保证硬件块对齐（64-token）；离散 Token 剪枝会导致非合并访存灾难。 |
-| **路线 B：线性与状态空间<br>(DeltaNet / RetNet / SSM)** | $\mathcal{O}(S \cdot D)$<br>Chunkwise 块级传递 $D \times D$ 状态 | $\mathcal{O}(S \cdot D)$<br>单次流式线性扫描，极低 IO | $\approx 4 S D^2$<br>(长文本下 $S \gg D$，计算降千倍) | $\approx 8 S D^2$<br>(严格线性复杂度) | 显存：$\mathcal{O}(D^2)$ **严格恒定 $\mathcal{O}(1)$**<br>计算：$\mathcal{O}(D^2)$ **严格恒定 $\mathcal{O}(1)$** | **Compute-Bound** (训练)<br>**Throughput-Flat** (推理) | 纯核化易产生注意力稀释与容量饱和；需引入 Delta 规则在线擦除投影，少样本检索略弱于 Softmax。 |
-| **路线 C：分布式上下文并行<br>(RingAttention / CP)** | 单卡 $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>随 GPU 卡数 $P$ 严格线性均摊 | 单卡片上 SRAM 极速流转；跨卡走 NVLink/RDMA 环 | 单卡 $\approx \frac{2 S^2 D}{P}$<br>集群总算力严格等价 | 单卡 $\approx \frac{5 S^2 D}{P}$<br>集群总算力严格等价 | 单卡切片持有 $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>环形异步流动检索 | **Overlap Compute-Bound**<br>(双缓冲重叠通信耗时) | 强依赖高速网络互联带宽；切片过小会导致通信无法被计算完全掩盖（退化为 Comm-Bound）。 |
+| **标准 Attention<br>(Standard / Eager)**<br>🔗 *[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.md#Exercise 1 · MultiHeadAttention（双向，非因果）|练习 1 · MHA 原生实现]]* | $\mathcal{O}(S^2)$<br>物化保存完整 $S \times S$ 矩阵 | $\mathcal{O}(S^2 + S D)$<br>频繁往返 HBM 倾倒矩阵 | $4 S^2 D$<br>(因果掩码 $2 S^2 D$) | $8 S^2 D$<br>(因果掩码 $4 S^2 D$) | 显存：$\mathcal{O}(S D)$ 线性膨胀<br>计算：$2 S D$ 遍历历史 | **严重 Memory-Bound**<br>算术强度 $< 1$，带宽极度饥饿 | 训练长序列瞬间显存 OOM 崩溃；无任何片上数据复用。 |
+| **FlashAttention<br>(Dao et al. 系统补丁)**<br>🔗 *[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.md#Exercise 7 · Flash Attention（分块 + online softmax）|练习 7 · FlashAttn 算子]]* | $\mathcal{O}(S \cdot D)$<br>丢弃中间激活，仅存 $O$ 与 $L_i$ | $\mathcal{O}\left(\frac{S^2 D^2}{M}\right) \approx \mathcal{O}(S D)$<br>SRAM 分块流水线融合 | $4 S^2 D$<br>(因果掩码 $2 S^2 D$) | $10 S^2 D$<br>(因果掩码 $5 S^2 D$)<br>重算浮点量增 ~25% | 显存：$\mathcal{O}(S D)$ 仍线性膨胀<br>计算：$2 S D$ 仍需遍历历史 | **Compute-Bound**<br>充分跑满 Tensor Core 脉动阵列 | **未降低总 FLOPs 二次方**；Prefill 耗时依然剧烈爆炸；自回归无法摆脱 KV 访存墙。 |
+| **路线 A：原生稀疏注意力<br>(DeepSeek NSA / Sparse)**<br>🔗 *[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.md#Exercise 4 · Sliding Window Attention|练习 4 · 局部窗口]]*<br>⚡ *[[#DeepSeek NSA 原生稀疏注意力的硬件对齐设计与 Triton 算子实现|解析：NSA Triton 算子]]* | $\mathcal{O}(S \cdot D)$<br>仅维护粗筛与 Top-$k$ 活跃块 | $\mathcal{O}(S \cdot k_{\text{eff}} \cdot D)$<br>TMA 块级对齐连续加载 | $\approx 4 S \cdot k_{\text{eff}} \cdot D$<br>(降为与序列近似线性) | $\approx 8 S \cdot k_{\text{eff}} \cdot D$<br>(计算量压低数倍至数十倍) | 显存：$\mathcal{O}(k_{\text{eff}} \cdot D)$<br>计算：$2 k_{\text{eff}} D$ 只算活跃块 | **Compute-Bound**<br>(依赖 64-token 块硬件对齐) | 必须保证硬件块对齐（64-token）；离散 Token 剪枝会导致非合并访存灾难。 |
+| **路线 B：线性与状态空间<br>(DeltaNet / RetNet / SSM)**<br>🔗 *[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.md#Exercise 5 · Linear Attention|练习 5 · 线性注意]]*<br>⚡ *[[#DeltaNet 联想记忆更新规则、Chunkwise 块级并行扫描与 Triton 算子实现|解析：DeltaNet 算子]]* | $\mathcal{O}(S \cdot D)$<br>Chunkwise 块级传递 $D \times D$ 状态 | $\mathcal{O}(S \cdot D)$<br>单次流式线性扫描，极低 IO | $\approx 4 S D^2$<br>(长文本下 $S \gg D$，计算降千倍) | $\approx 8 S D^2$<br>(严格线性复杂度) | 显存：$\mathcal{O}(D^2)$ **严格恒定 $\mathcal{O}(1)$**<br>计算：$\mathcal{O}(D^2)$ **严格恒定 $\mathcal{O}(1)$** | **Compute-Bound** (训练)<br>**Throughput-Flat** (推理) | 纯核化易产生注意力稀释与容量饱和；需引入 Delta 规则在线擦除投影，少样本检索略弱于 Softmax。 |
+| **路线 C：分布式上下文并行<br>(RingAttention / CP)**<br>⚡ *[[#RingAttention 环形 P2P 双缓冲异步重叠、因果块跳过与流式 Softmax 融合实现|解析：RingAttn 分布式]]* | 单卡 $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>随 GPU 卡数 $P$ 严格线性均摊 | 单卡片上 SRAM 极速流转；跨卡走 NVLink/RDMA 环 | 单卡 $\approx \frac{2 S^2 D}{P}$<br>集群总算力严格等价 | 单卡 $\approx \frac{5 S^2 D}{P}$<br>集群总算力严格等价 | 单卡切片持有 $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>环形异步流动检索 | **Overlap Compute-Bound**<br>(双缓冲重叠通信耗时) | 强依赖高速网络互联带宽；切片过小会导致通信无法被计算完全掩盖（退化为 Comm-Bound）。 |
 
 ---
 
@@ -263,6 +263,11 @@ FlashAttention（Dao et al.）是现代大模型基础设施级系统优化，�
   2. **Selected Tokens（Top-$k$ 块交互）**：仅将粗筛得分最高的块载入高速缓存进行精确细粒度交互；
   3. **Sliding Window（局部精细上下文）**：对邻近若干 Token 保持全注意力。
 - **优缺点**：保留 Softmax 指数放大与注意力锐度；但必须做块级硬件对齐，否则离散访存开销会抵消算力节约。
+
+> [!TIP]
+> **配套实战演练与底层算子**：
+> - 局部稀疏基石算法：前往 **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.md#Exercise 4 · Sliding Window Attention|ML Coding 03 · Exercise 4：Sliding Window Attention]]** 进行滑动窗口因果注意力手写；
+> - 硬件对齐 Triton 算子：点击下方展开折叠块查看 **DeepSeek NSA 原生稀疏注意力的 Triton GPU 算子完整实现**。
 
 <details class="technical-deep-dive">
 <summary><span class="deep-dive-badge">Kernel 深度解析</span><span class="deep-dive-title">DeepSeek NSA 原生稀疏注意力的硬件对齐设计与 Triton 算子实现</span></summary>
@@ -373,6 +378,11 @@ def _nsa_fwd_kernel(
   $$W_t = W_{t-1}(I - \beta_t k_t k_t^T) + \beta_t v_t k_t^T$$
   新 Key 写入前先从记忆矩阵中扣除旧值投影，辅以 Chunkwise 并行扫描算子，召回率逼近标准 Softmax。
 - **工业落地形态**：**Hybrid 混合架构**（如 Jamba、Nemotron-4），周期性交替堆叠 SSM/线性层与因果 Attention 层，兼顾恒定吞吐与复杂检索精度。
+
+> [!TIP]
+> **配套实战演练与底层算子**：
+> - 线性注意力基石算法：前往 **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.md#Exercise 5 · Linear Attention|ML Coding 03 · Exercise 5：Linear Attention]]** 编写 $\phi(Q)(\phi(K)^T V)$ 特征映射与因果前缀和；
+> - Chunkwise 并行 Triton 算子：点击下方展开折叠块查看 **DeltaNet 联想记忆更新规则与 Chunkwise Triton 算子完整实现**。
 
 <details class="technical-deep-dive">
 <summary><span class="deep-dive-badge">Kernel 深度解析</span><span class="deep-dive-title">DeltaNet 联想记忆更新规则、Chunkwise 块级并行扫描与 Triton 算子实现</span></summary>
@@ -594,20 +604,36 @@ K/V Heads: [1] [2] [3] [4] [5] [6] [7] [8]  K/V Heads: [         1 (共享)     
 - **PagedAttention（vLLM）**：借鉴虚拟内存分页，将逻辑连续 KV 张量映射到离散物理内存页（如 16 Tokens/页），显存碎片从 $60\% \sim 80\%$ 压至 $<4\%$；
 - **KV Cache 量化（FP8 / INT4）**：将缓存数值从 16-bit 压缩至 8-bit 或 4-bit，带宽与容量需求减半至四分之一。
 
+> [!TIP]
+> **配套实战编程演练**：
+> - 组查询注意力：前往 **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.md#Exercise 3 · GroupedQueryAttention（GQA）|ML Coding 03 · Exercise 3：Grouped Query Attention (GQA)]]** 实战编写 Query 分组与 Key/Value 广播映射；
+> - 自回归 KV 缓存维护：前往 **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.md#Exercise 6 · KV Cache Attention|ML Coding 03 · Exercise 6：KV Cache Attention]]** 实现 Prefill 与逐 Token Decode 缓存拼接。
+
 ---
 
-### 5. 四大机制横向对比与工业收敛形态
+### 5. 工业落地收敛形态与混合架构演进
 
-| 机制 / 范式 | 计算时间复杂度 | 训练显存复杂度 | 推理 KV 状态显存 | 核心优势 | 核心局限与工程代价 |
-|---|---|---|---|---|---|
-| **Standard (+FlashAttention)** | $\mathcal{O}(S^2 D)$ | $\mathcal{O}(S D)$ | $\mathcal{O}(B \cdot S \cdot L \cdot d_k)$ 线性膨胀 | 精确 Softmax、零质量损失、长程关联极强 | 算力与 Prefill 仍呈二次方，超长序列吞吐低 |
-| **Sparse / NSA (DeepSeek)** | $\mathcal{O}(S \cdot k \cdot D)$ | $\mathcal{O}(S \cdot k)$ | $\mathcal{O}(B \cdot k \cdot L \cdot d_k)$ 稀疏受限 | 保持 Softmax 尖锐度，NIAH 大海捞针检索极高 | 依赖块级硬件对齐定制算子，非连续访存 |
-| **Linear / DeltaNet** | $\mathcal{O}(S \cdot D^2)$ | $\mathcal{O}(S D)$ | $\mathcal{O}(D^2)$，单步 $\mathcal{O}(1)$ | 吞吐极高，显存不随序列膨胀 | 纯核化易容量饱和；少样本 ICL 弱于标准注意力 |
-| **Ring / Chunked Parallel** | 多卡 $\mathcal{O}(S^2 D / P)$ | 单卡 $\mathcal{O}(B_{\text{chunk}} D)$ | 分布式切片持有 | 打破单卡显存上限，支持百万级长文本 | 强依赖高速互联（NVLink/RoCE），网络易成瓶颈 |
+> [!NOTE]
+> 各机制在显存容量、HBM 访存 IO、前向/反向 FLOPs 及推理单步开销的精确数值对比，已汇总于 **[[#3. 三大效率路线：改算法复杂度与改系统切分|(0) 全景复杂度与硬件瓶颈多维对比矩阵]]**。
 
-#### 工业收敛体系
-1. **底层访存与网络**：FlashAttention 负责单卡 SRAM-HBM 极速访存，RingAttention 负责多卡序列并行扩展；
-2. **架构与算法协同**：GQA 压缩推理头数，结合 NSA 原生动态稀疏或 SSM/DeltaNet 周期混合堆叠（Hybrid）。
+在千亿参数与百万 Token 上下文的生产实践中，单一机制无法独立解决全部物理瓶颈，工业界已形成高度协同的**分层立体收敛体系**：
+
+#### 1. 分层技术栈协同（Systems Stack Synergy）
+- **单卡硬件层（Micro-Architecture）**：统一标配 **FlashAttention**（如 FlashAttention-2 / FlashAttention-3），利用 Tensor Core 脉动阵列与 SRAM Tiling 将单卡访存推至算力极限；
+- **多卡集群层（Context Parallelism）**：在预训练长文本与超长 Prompt 检索时，标配 **RingAttention / USP（Unified Sequence Parallelism）**，通过环形 P2P 双缓冲将单卡显存开销平摊 $P$ 倍，通信被前台计算完全隐藏；
+- **推理 Serving 层（Inference Memory Optimization）**：
+  - 架构上标配 **GQA（8:1 压缩比）** 减少 KV 产生量；
+  - 显存管理标配 **PagedAttention（vLLM）** 消除内存碎片；
+  - 数据精度采用 **FP8 / INT4 KV Cache 量化**，降低访存带宽需求至 50%~25%。
+
+#### 2. 模型架构层收敛：混合注意力形态（Hybrid Architecture）
+单纯的线性注意力和状态空间模型（SSM）在少样本上下文学习（ICL）与精确多跳检索任务上存在天然容量上限，而密集 Softmax 注意力在超长序列下的二次方计算与 Decode 显存开销不可承受。当前工业界最先进的长文本模型普遍收敛于**混合架构（Hybrid）**：
+
+- **周期交替堆叠（Periodic Hybrid Stacking，如 Jamba, Nemotron-4）**：
+  - 每 $N$ 层（如 7 层或 3 层）线性注意力 / Mamba SSM 层之后，插入 1 层密集标准 Softmax 注意力层；
+  - 线性/SSM 层以 $\mathcal{O}(1)$ 恒定开销高速压缩与流转全局语境，密集层以全注意力捕获跨文档精细依赖；
+- **原生稀疏+密集混合（NSA + Sliding Window，如 DeepSeek-V3 / R1 系列）**：
+  - 底层采用基于 64-token 硬件对齐的 NSA，粗筛与细筛分离，在保留 Softmax 检索锐度的同时，将计算与显存开销压低一个数量级。
 
 ---
 
