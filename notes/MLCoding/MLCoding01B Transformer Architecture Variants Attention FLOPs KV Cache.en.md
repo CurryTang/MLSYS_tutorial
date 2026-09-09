@@ -217,18 +217,7 @@ FlashAttention (Dao et al.) is foundational infrastructure for modern LLM traini
 - **Online Softmax (Incremental Dynamic Normalization)**: Maintains running scaling factors $m_i$ and $l_i$, dynamically updating intermediate attention blocks as chunks stream through SRAM. **This completely eliminates reading and writing the $S \times S$ intermediate matrix to slow High Bandwidth Memory (HBM)**;
 - **Recomputation in Backward**: The backward pass discards intermediate forward attention matrices and recomputes them on-the-fly inside SRAM, shrinking training activation memory from $\mathcal{O}(S^2)$ to $\mathcal{O}(S D)$.
 
-#### (2) Rigorous Dissection of Complexities: Memory vs IO vs Compute (FLOPs)
-A frequent misconception among practitioners is conflating "reduced activation memory" with "reduced computational complexity." FlashAttention embodies the quintessential systems engineering philosophy of **"Compute for Memory & IO"**:
-
-| Complexity Dimension | Standard Attention | FlashAttention (Exact) | Physical Mechanism & Engineering Essence |
-| :--- | :--- | :--- | :--- |
-| **Activation Memory Footprint** | $\mathcal{O}(S^2)$<br>Materializes and saves dense $S \times S$ score and probability maps | $\mathcal{O}(S \cdot D)$<br>Stores only output tensor $O$ and normalization vector $L_i$ | **Dimensional Reduction (1000× lower)**: Completely eliminates training-time activation OOM crashes on long sequences. |
-| **HBM Access / IO Complexity** | $\mathcal{O}(S^2 + S D)$<br>Repeated round-trips writing/reading $S \times S$ matrices across slow HBM | $\mathcal{O}\left(\frac{S^2 D^2}{M}\right) \approx \mathcal{O}(S D)$<br>$M$ is SRAM capacity; all intermediates reside in on-chip registers | **5–10× IO Traffic Drop**: Flips the operator from heavily **Memory-Bound** to **Compute-Bound**, doubling hardware MFU. |
-| **Forward FLOPs** | $\approx 4 S^2 D$<br>($2 S^2 D$ under causal masking) | $\approx 4 S^2 D$<br>($2 S^2 D$ under causal masking) | **Strictly Invariant**: Underlying fused GEMMs retain identical tensor multiply-accumulate operations. |
-| **Backward FLOPs** | $\approx 8 S^2 D$<br>($4 S^2 D$ under causal masking) | $\approx 10 S^2 D$<br>($5 S^2 D$ under causal masking) | **~25% FLOP Increase**: Since intermediate $S \times S$ attention maps were discarded, backward recomputes $Q K^T$ and softmax on-the-fly in SRAM. |
-| **Total Computational FLOPs** | $\mathcal{O}(S^2 D)$ | $\mathcal{O}(S^2 D)$<br>(Total arithmetic operations slightly increase by ~16.7%) | **Does NOT reduce asymptotic compute!** FlashAttention speedups stem 100% from cutting slow HBM traffic, not reducing mathematical FLOPs. |
-
-#### (3) Physical Boundaries & Trade-Offs
+#### (2) Physical Boundaries & Trade-Offs
 - **Problems Solved**: Eliminates training-time $\mathcal{O}(S^2)$ activation memory OOM crashes; reduces HBM memory traffic from $\mathcal{O}(S^2)$ to $\mathcal{O}(S)$, boosting MFU by 2–4×;
 - **Problems Unsolved**:
   1. **Total FLOPs remain strictly $\mathcal{O}(S^2 D)$**: Prefill latency at 1M+ context still explodes quadratically;
