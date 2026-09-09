@@ -346,7 +346,12 @@ A typical call sequence: `forward(prompt_embeds, start_pos=0)` for prefill, then
 
 ### Exercise 7 · Flash Attention (tiling + online softmax)
 
-Flash attention isn't about whether attention is computed correctly. It is about whether computing it requires holding the entire $(T, T)$ score matrix in memory. The standard implementation computes the full `scores` matrix and then softmaxes it all at once; flash attention tiles $K, V$ by `BLOCK_N`, runs local attention against the current $Q$ block, and maintains a running max and running sum inside on-chip registers that update as each block arrives, rescaling accumulated state by $\exp(m_{\text{old}} - m_{\text{new}})$. The whole computation only needs $\mathcal{O}(T)$ intermediate state instead of $\mathcal{O}(T^2)$, and it is mathematically identical to the one-shot result, not an approximation.
+Flash attention isn't about whether attention is computed correctly. It is about whether computing it requires holding the entire $(T, T)$ score matrix in memory. The standard implementation computes the full `scores` matrix and then softmaxes it all at once; flash attention tiles $K, V$ by `BLOCK_N`, runs local attention against the current $Q$ block, and maintains a running max and running sum inside on-chip registers that update as each block arrives, rescaling accumulated state by $\exp(m_{\text{old}} - m_{\text{new}})$. It is mathematically identical to the one-shot result, not an approximation.
+
+> **Key Complexity Distinctions**:
+> - **Activation Memory Footprint**: Drops from $\mathcal{O}(T^2)$ to $\mathcal{O}(T \cdot D)$ (recomputation in backward discards intermediate score maps, completely eliminating training OOM);
+> - **HBM IO Traffic**: Reduces from $\mathcal{O}(T^2 + TD)$ to $\mathcal{O}(T D)$ (intermediates stay resident inside fast on-chip SRAM registers);
+> - **Compute FLOPs**: Strictly remains $\mathcal{O}(T^2 D)$ (backward pass even increases by ~16.7% FLOPs due to on-the-fly SRAM recomputation). Speedups stem entirely from transitioning from Memory-Bound to Compute-Bound execution regimes.
 
 This exercise is structured into two progressive stages:
 1. **Part A · PyTorch Algorithmic Simulation (CPU / Prototyping)**: Verify tiling and Online Softmax rescaling logic;

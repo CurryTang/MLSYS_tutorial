@@ -345,7 +345,12 @@ class KVCacheAttention(nn.Module):
 
 ### Exercise 7 · Flash Attention（分块 + online softmax）
 
-Flash attention 要解决的不是“attention 算得对不对”，而是“算的时候要不要把整个 $(T, T)$ 分数矩阵摆在显存里”。标准实现要先算出完整 `scores`，再整体做 softmax；FlashAttention 把 $K, V$ 按 `BLOCK_N` 分块，依次和当前 $Q$ 块做局部注意力，同时在片上寄存器维护流式更新的 running max 和 running sum，将先前累加量按新旧最大值差的指数项 $\exp(m_{\text{old}} - m_{\text{new}})$ 重新缩放，全程只需 $\mathcal{O}(T)$ 的中间状态，而非 $\mathcal{O}(T^2)$。数学上和一次性算完的结果完全一致，不是近似。
+Flash attention 要解决的不是“attention 算得对不对”，而是“算的时候要不要把整个 $(T, T)$ 分数矩阵摆在显存里”。标准实现要先算出完整 `scores`，再整体做 softmax；FlashAttention 把 $K, V$ 按 `BLOCK_N` 分块，依次和当前 $Q$ 块做局部注意力，同时在片上寄存器维护流式更新的 running max 和 running sum，将先前累加量按新旧最大值差的指数项 $\exp(m_{\text{old}} - m_{\text{new}})$ 重新缩放。数学上和一次性算完的结果完全一致，不是近似。
+
+> **核心复杂度辨析**：
+> - **显存容量复杂度**：从 $\mathcal{O}(T^2)$ 骤降至 $\mathcal{O}(T \cdot D)$（反向丢弃中间激活图而在片上极速重算，彻底杜绝长文本训练 OOM）；
+> - **HBM 访存 IO 量**：从 $\mathcal{O}(T^2 + TD)$ 降至 $\mathcal{O}(TD)$（数据驻留片上高速 SRAM 寄存器，打破显存带宽墙）；
+> - **计算复杂度 (FLOPs)**：依然严格为 $\mathcal{O}(T^2 D)$（反向传播甚至因 SRAM 现场重算略微增加了 ~16.7% 浮点运算量）。性能提升纯粹源于摆脱内存带宽受限（Memory-Bound $\to$ Compute-Bound）。
 
 本练习分为两个递进层次：
 1. **Part A · PyTorch 在线 Softmax 算法逻辑模拟（CPU/原型验证）**：跑通纯 Python 分块与重缩放逻辑；

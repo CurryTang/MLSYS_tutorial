@@ -217,9 +217,23 @@ FlashAttention（Dao et al.）是现代大模型基础设施级系统优化，�
 - **Online Softmax（增量动态归一化）**：维护流式局部最大值 $m_i$ 与归一化因子 $l_i$，在流式加载子块时动态更新局部 Attention 输出，**彻底消除在慢速高带宽显存（HBM）中显式读写 $S \times S$ 激活值矩阵的过程**；
 - **Recomputation in Backward（反向重算）**：反向传播时不保存前向的 $S \times S$ 激活图，而在 SRAM 中极速重算，将训练激活显存从 $\mathcal{O}(S^2)$ 压低至 $\mathcal{O}(S D)$。
 
-#### (2) 物理边界与权衡
+#### (2) 核心复杂度深度辨析：显存容量 vs 访存 IO vs 运算量（FLOPs）
+很多工程师容易混淆“显存降低”与“计算复杂度降低”。实际上，FlashAttention 的核心系统哲学是经典的 **“以计算换访存与容量”（Compute for Memory & IO）**。其在不同物理维度的复杂度表现如下：
+
+| 复杂度维度 | 标准 Attention（Standard） | FlashAttention（Exact） | 物理机理与工程本质 |
+| :--- | :--- | :--- | :--- |
+| **显存容量复杂度<br>(Activation Memory)** | $\mathcal{O}(S^2)$<br>物化保存整张 $S \times S$ 得分与概率图 | $\mathcal{O}(S \cdot D)$<br>仅保存输出 $O$ 与归一化统计量 $L_i$ | **降维打击（降低上千倍）**：彻底打破长序列训练显存墙，消除反向传播激活值导致的 GPU OOM。 |
+| **HBM 访存/IO 复杂度<br>(Memory Traffic)** | $\mathcal{O}(S^2 + S D)$<br>频繁往返慢速 HBM 读写 $S \times S$ 中间矩阵 | $\mathcal{O}\left(\frac{S^2 D^2}{M}\right) \approx \mathcal{O}(S D)$<br>$M$ 为片上 SRAM 大小，数据全在片上流转 | **降低 5~10 倍**：将算子从严重的**内存带宽受限（Memory-Bound）**推向 Tensor Core **计算受限（Compute-Bound）**，MFU 翻倍。 |
+| **前向计算量 (Forward FLOPs)** | $\approx 4 S^2 D$<br>（因果遮罩下为 $2 S^2 D$） | $\approx 4 S^2 D$<br>（因果遮罩下为 $2 S^2 D$） | **严格恒等**：尽管分块与动态重缩放，底层张量乘加（GEMM）总数完全一致。 |
+| **反向计算量 (Backward FLOPs)** | $\approx 8 S^2 D$<br>（因果遮罩下为 $4 S^2 D$） | $\approx 10 S^2 D$<br>（因果遮罩下为 $5 S^2 D$） | **运算量增加 ~25%**：由于未持久化 $S \times S$ 矩阵，反向必须在 SRAM 重新计算一次 $Q K^T$ 点积与 Softmax。 |
+| **总计算复杂度 (Total FLOPs)** | $\mathcal{O}(S^2 D)$ | $\mathcal{O}(S^2 D)$<br>（总 FLOPs 实际微增约 16.7%） | **并未降低渐近计算量**！FlashAttention 的速度提升 100% 来自于 IO 访存减少与硬件算术强度跃升，而非减少数学计算。 |
+
+#### (3) 物理边界与权衡
 - **解决的问题**：消除训练期 $\mathcal{O}(S^2)$ 激活值显存 OOM 危机；将 HBM 访存复杂度从 $\mathcal{O}(S^2)$ 降为 $\mathcal{O}(S)$，MFU 提升 2~4 倍；
-- **无法解决的问题**：**总计算量依然严格为 $\mathcal{O}(S^2 D)$**；自回归 Decode 仍需遍历加载全量历史 KV；1M 超长序列的 Prefill 二次方耗时依然存在。
+- **无法解决的问题**：
+  1. **总计算量依然严格为 $\mathcal{O}(S^2 D)$**：在超长上下文（如 1M+ tokens）的 Prefill 阶段，二次方的矩阵乘算力开销依然会导致严重的延迟爆炸；
+  2. **自回归 Decode 访存墙依然存在**：每一步 Decode 生成仍需遍历全量历史 KV Cache，吞吐受限于 KV 搬运带宽；
+  3. **无法降低推理 KV Cache 显存**：KV Cache 占用依然为 $\mathcal{O}(B \cdot S \cdot L \cdot D)$，随序列长度线性膨胀。
 
 > [!TIP]
 > **配套实战编程演练**：
