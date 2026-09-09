@@ -6786,7 +6786,7 @@ const K8S_HIERARCHY_LAYERS = [
 
 function KubernetesHierarchyVisual() {
   const { isEnglish, t } = useUiCopy();
-  const [active, setActive] = useState(0);
+  const [active, setActive] = useState(K8S_HIERARCHY_LAYERS.length - 1);
   const [playing, setPlaying] = useState(true);
   const layer = K8S_HIERARCHY_LAYERS[active];
 
@@ -6806,7 +6806,7 @@ function KubernetesHierarchyVisual() {
         <div>
           <p className="eyebrow">{t('对象模型', 'Object model')}</p>
           <h2>{t('从容器一层层包到 Namespace', 'Wrap a container out to a Namespace')}</h2>
-          <p>{t('点层级或按播放，看每一层真正负责什么。嵌套是记忆图；实现靠 label 和 ownerReference。', 'Click a layer or play to see what each object owns. Nesting is a memory aid; the implementation is labels and ownerReferences.')}</p>
+          <p>{t('六层始终套在一起。点外框或上方标签，看这一层负责什么。嵌套是记忆图；实现靠 label 和 ownerReference。', 'All six layers stay nested. Click a ring or a tab to see what that object owns. Nesting is a memory aid; the implementation is labels and ownerReferences.')}</p>
         </div>
         <div className="k8s-visual-controls">
           <button type="button" className={playing ? 'active' : ''} onClick={() => setPlaying((value) => !value)}>
@@ -6835,25 +6835,25 @@ function KubernetesHierarchyVisual() {
       </div>
 
       <div className="k8s-nest-stage" data-active={layer.id}>
-        {K8S_HIERARCHY_LAYERS.reduceRight((child, item, index) => {
-          if (index > active) {
-            return child;
-          }
-          return (
-            <div
-              key={item.id}
-              className={`k8s-nest-layer is-${item.id} ${index === active ? 'current' : 'visible'}`}
-            >
-              <span>{item.tag}</span>
-              {index === 0 ? (
-                <div className="k8s-nest-process">
-                  <b>train.py</b>
-                  <small>PID 1 in container</small>
-                </div>
-              ) : child}
-            </div>
-          );
-        }, null)}
+        {K8S_HIERARCHY_LAYERS.reduceRight((child, item, index) => (
+          <div
+            key={item.id}
+            className={`k8s-nest-layer is-${item.id} ${index === active ? 'current' : ''}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              setPlaying(false);
+              setActive(index);
+            }}
+          >
+            <span>{item.tag}</span>
+            {index === 0 ? (
+              <div className="k8s-nest-process">
+                <b>train.py</b>
+                <small>PID 1 in container</small>
+              </div>
+            ) : child}
+          </div>
+        ), null)}
       </div>
 
       <footer className="k8s-visual-footer">
