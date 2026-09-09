@@ -95,22 +95,12 @@ A frequent pitfall among junior practitioners is running multiple independent un
 
 ---
 
-### Comprehensive Technical Solution
-
 An interview-grade solution follows the **"Hypothesis Formulation $\to$ Data Governance $\to$ C2ST Deep-Dive $\to$ Effect Size Valuation $\to$ Pitfall Mitigation"** architectural loop:
-
-```mermaid
-flowchart TD
-    A["Raw Multivariate Logs (NA & EU)"] --> B["Data Governance & Defensive Cleaning<br>• Monotonic Power Transform log(x+1) / Winsorization<br>• Structural Missingness Indicators"]
-    B --> C["Leakage-Free Dataset Construction<br>• Strip Metadata (IP, Timezone, Currency)<br>• 1:1 Subsampling for Equal Prior<br>• Strict Train / Test Isolation"]
-    C --> D["C2ST Binary Fit (LightGBM)<br>• Objective: Approximate Density Ratio P(EU|x) / P(NA|x)"]
-    D --> E["Held-Out Test Set Evaluation"]
-    E --> F["Non-parametric Permutation Test<br>Shuffle labels N times to derive empirical p-value"]
-    E --> G["Practical Effect Size Quantification<br>ΔAUC = AUC_test - 0.5 vs. Business Margin"]
-    F & G --> H{"Both Statistically &<br>Practically Significant?"}
-    H -- "Yes" --> I["TreeSHAP Root-Cause Attribution<br>Identify driving features and non-linear interactions"]
-    H -- "No" --> J["Retain Unified Model Baseline<br>Avoid engineering debt of redundant localized models"]
-```
+- **Phase 1: Formal Hypothesis Formulation**: Define joint distribution hypothesis $H_0: P_{\text{NA}}(\mathbf{x}) = P_{\text{EU}}(\mathbf{x})$, guarding against false negatives and FWER inflation from independent univariate tests;
+- **Phase 2: Data Governance & Defensive Cleaning**: Mitigate Pareto heavy tails via $\log(x+1)$ or Yeo-Johnson transforms, isolate outliers via RobustScaler, and differentiate structural behavioral missingness;
+- **Phase 3: C2ST Mechanics & Optimization**: Purge extrinsic metadata, construct a balanced 1:1 binary pseudo-classification task, and optimize GBDT to approximate high-dimensional density ratios;
+- **Phase 4: Effect Size & Statistical Inference**: Evaluate test AUC on held-out data, run non-parametric permutation tests for empirical $p$-values, and benchmark $\Delta\text{AUC} > \tau$ for practical significance;
+- **Phase 5: Production Pitfall Mitigation**: Control confounders via PSM/IPW, partition by User ID to prevent non-IID data leakage, and apply Benjamini-Hochberg FDR control for post-hoc drilling.
 
 ---
 
@@ -478,14 +468,18 @@ The ensemble predictor is defined as the arithmetic mean:
 $$\bar{T}(x) = \frac{1}{B} \sum_{b=1}^B T_b(x)$$
 
 Expanding the ensemble variance:
-$$\begin{aligned}
+
+$$
+\begin{aligned}
 \text{Var}(\bar{T}(x)) &= \text{Var}\left(\frac{1}{B}\sum_{b=1}^B T_b(x)\right) \\
 &= \frac{1}{B^2} \sum_{i=1}^B \sum_{j=1}^B \text{Cov}(T_i(x), T_j(x)) \\
 &= \frac{1}{B^2} \left[ \sum_{i=1}^B \text{Var}(T_i(x)) + \sum_{i=1}^B \sum_{j \neq i} \text{Cov}(T_i(x), T_j(x)) \right] \\
 &= \frac{1}{B^2} \left[ B \sigma^2(x) + B(B - 1) \rho(x) \sigma^2(x) \right] \\
 &= \frac{\sigma^2(x)}{B} + \frac{B - 1}{B} \rho(x) \sigma^2(x) \\
 &= \rho(x) \sigma^2(x) + \frac{1 - \rho(x)}{B} \sigma^2(x)
-\end{aligned}$$
+\end{aligned}
+$$
+
 
 **Key Theoretical Insights**:
 1. **Asymptotic Variance Lower Bound**:
@@ -533,19 +527,7 @@ $$\begin{aligned}
 
 ---
 
-### Core Solution Architecture
-
-```mermaid
-flowchart TD
-    A["Single Decision Tree (High Variance, Low Bias)"] --> B["Greedy Recursive Partitioning<br>Gini / Cross-Entropy / Variance Reduction<br>Cost-Complexity Pruning"]
-    B --> C{"Failure Mode: Hierarchical Instability & Overfitting"}
-    C --> D["Random Forest Dual Stochasticity"]
-    D --> E["Row Sampling: Bootstrap Aggregation (36.8% OOB Validation)"]
-    D --> F["Column Sampling: Candidate Subspaces (m ≈ √p / p/3)"]
-    E & F --> G["Variance Reduction Theorem: Var = ρσ² + (1-ρ)σ²/B"]
-    G --> H["Suppress Pairwise Correlation ρ -> Dramatic Variance Collapse"]
-    H --> I["Engineering Trade-offs: Auditable White-Box vs Production Baseline"]
-```
+An interview-grade solution develops through **"Single-Tree Training & Splitting $\to$ Random Forest Dual Stochasticity $\to$ Bias-Variance Theoretical Contrast $\to$ Production Trade-offs & Engineering Heuristics $\to$ Technical Interview Deep Dives"**.
 
 #### 1. Comprehensive Cross-Dimensional Comparison Matrix
 
@@ -571,16 +553,6 @@ flowchart TD
 | **RF Aggregation** | Majority voting (hard) or average predicted class probabilities (soft). | Arithmetic average across tree outputs: $\hat{y} = \frac{1}{B} \sum_{b=1}^B T_b(x)$. |
 
 #### 3. Production Trade-offs & Selection Heuristics
-
-```mermaid
-flowchart TD
-    Start["New Production Task"] --> Q1{"Does regulation/compliance require<br>deterministic, unambiguous if-else rules?<br>(e.g., credit denial, medical triage, legal)"}
-    Q1 -- "Yes (Hard Constraint)" --> Tree["Deploy Single CART Tree<br>+ Cost-Complexity Pruning<br>Ensure full auditing compliance"]
-    Q1 -- "No" --> Q2{"Is runtime deployed on microcontrollers (MCU)<br>or hard latency budget < 0.1 ms?"}
-    Q2 -- "Yes (Resource Bound)" --> Tree
-    Q2 -- "No" --> Q3{"Prioritize robust tabular baseline<br>with zero hyperparameter tuning overhead?"}
-    Q3 -- "Yes" --> RF["Deploy Random Forest<br>• Out-of-the-box strong generalization<br>• OOB validation & MDA screening"]
-```
 
 - **When to Mandate a Single Decision Tree**:
   1. **Regulatory and Legal Compliance**: Loan underwriting, risk management, and clinical diagnosis where regulatory bodies legally require transparent decision logic (e.g., `IF credit_inquiries > 4 AND debt_ratio > 0.65 THEN REJECT`);
