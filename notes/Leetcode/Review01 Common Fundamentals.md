@@ -4,6 +4,8 @@
 
 ---
 
+## 模块一：核心底层与高频手撕算法 (Core Fundamentals)
+
 ### 1. 归并排序 (Merge Sort)
 
 <details class="review-card">
@@ -332,3 +334,616 @@ def rand10() -> int:
 
 </div>
 </details>
+
+---
+
+## 模块二：数组与哈希核心题组 (Arrays & Hashing)
+
+### 6. 存在重复元素 (Contains Duplicate)
+
+<details class="review-card">
+<summary class="review-card-summary">
+  <span class="review-card-badge">数组 01</span>
+  <span class="review-card-title">存在重复元素 (Contains Duplicate)</span>
+  <span class="review-card-tag">哈希集合 · 早期退出 · 一次遍历</span>
+</summary>
+<div class="review-card-content">
+
+<div class="review-block">
+<div class="review-block-label">📌 题目定义与要求</div>
+
+给定一个整数数组 `nums`。如果任一数值在数组中出现至少两次，返回 `True`；如果数组中每个元素互不相同，返回 `False`。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💡 大致思路与核心算法</div>
+
+核心在于**哈希集合实时查重与早期退出（Early Exit）**：
+1. **哈希集合维护**：初始化空哈希集合 `seen = set()`。
+2. **流式遍历判重**：遍历数组中的每个元素 `x`：
+   - 若 `x` 已存在于 `seen` 中，说明存在重复，直接返回 `True` 终止遍历；
+   - 若 `x` 不在 `seen` 中，将 `x` 加入 `seen`。
+3. **兜底返回**：整轮扫描完毕未触发早期退出，说明所有元素互不相同，返回 `False`。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💻 核心代码 (最简 Python 实现)</div>
+
+```python
+def contains_duplicate(nums: list[int]) -> bool:
+    seen = set()
+    for x in nums:
+        if x in seen:
+            return True
+        seen.add(x)
+    return False
+```
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">⚡ 复杂度与特性速记</div>
+
+- **时间复杂度**：$O(n)$（单次集合查找与插入平均 $O(1)$，最坏哈希冲突退化为 $O(n)$）
+- **辅助空间**：$O(n)$（无重复的最坏情况下集合需容纳全量 $n$ 个元素）
+- **关键心智模型**：空间换时间，边查边存，首次碰撞即时返回
+
+</div>
+
+</div>
+</details>
+
+---
+
+### 7. 有效的字母异位词 (Valid Anagram)
+
+<details class="review-card">
+<summary class="review-card-summary">
+  <span class="review-card-badge">数组 02</span>
+  <span class="review-card-title">有效的字母异位词 (Valid Anagram)</span>
+  <span class="review-card-tag">频次数组 · ASCII 差值 · 长度剪枝</span>
+</summary>
+<div class="review-card-content">
+
+<div class="review-block">
+<div class="review-block-label">📌 题目定义与要求</div>
+
+给定两个字符串 `s` 和 `t`，判断 `t` 是否是 `s` 的字母异位词（由相同字符以不同排列次序构成，且每个字符出现的频次完全相等）。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💡 大致思路与核心算法</div>
+
+核心在于**字符计数与差额平衡校验**：
+1. **长度预检剪枝**：若 `len(s) != len(t)`，字符总数不对等，必不可能构成异位词，直接返回 `False`。
+2. **定长频次数组**：针对小写英文字母表，初始化长度为 26 的计数数组 `counts = [0] * 26`。
+3. **加减平衡统计**：同时遍历两个字符串（使用 `zip(s, t)`）。对 `s` 中的字符频次做加法 `+1`，对 `t` 中的字符频次做减法 `-1`。
+4. **残差全零断言**：遍历 `counts` 数组。若所有字符频次均平衡归零，则返回 `True`；出现任何非零残差则说明频次不符，返回 `False`。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💻 核心代码 (最简 Python 实现)</div>
+
+```python
+def is_anagram(s: str, t: str) -> bool:
+    if len(s) != len(t):
+        return False
+    counts = [0] * 26
+    for c1, c2 in zip(s, t):
+        counts[ord(c1) - ord('a')] += 1
+        counts[ord(c2) - ord('a')] -= 1
+    return all(c == 0 for c in counts)
+```
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">⚡ 复杂度与特性速记</div>
+
+- **时间复杂度**：$O(n)$（单次同步遍历两个长度为 $n$ 的字符串）
+- **辅助空间**：$O(1)$（固定 26 槽计数数组，常数级开销；Unicode 字符集使用哈希表时为 $O(k)$，其中 $k$ 为不同字符数）
+- **关键心智模型**：加减相互对冲，绝对平衡等价于异位构词
+
+</div>
+
+</div>
+</details>
+
+---
+
+### 8. 两数之和 (Two Sum)
+
+<details class="review-card">
+<summary class="review-card-summary">
+  <span class="review-card-badge">数组 03</span>
+  <span class="review-card-title">两数之和 (Two Sum)</span>
+  <span class="review-card-tag">哈希查找 · 差值补数 · 前缀存储</span>
+</summary>
+<div class="review-card-content">
+
+<div class="review-block">
+<div class="review-block-label">📌 题目定义与要求</div>
+
+给定一个整数数组 `nums` 和一个整数目标值 `target`，请在数组中找出和为目标值 `target` 的那两个整数，并返回它们的数组下标。假设每组输入只对应唯一解，且同一个元素不能使用两次。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💡 大致思路与核心算法</div>
+
+核心在于**前缀哈希映射与补数反向探测**：
+1. **差值补数定义**：对于当前扫描的元素 $x = nums[i]$，与其配对的目标值必为 $\text{complement} = target - x$。
+2. **前缀字典反查**：维护字典 `lookup`（映射规则为 `数值 -> 历史下标`）。
+   - 在将当前数字存入前，优先检查 `complement` 是否已在 `lookup` 中：
+     - 若命中，说明先前已遇到过该互补元素，直接返回 `[lookup[complement], i]`；
+     - 若未命中，将当前数及其下标写入字典 `lookup[x] = i`，继续向后扫描。
+3. **避免自配对**：由于仅在已处理的历史前缀中探查，当前数字尚未存入表内，天然杜绝了取用同一元素两次的情况。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💻 核心代码 (最简 Python 实现)</div>
+
+```python
+def two_sum(nums: list[int], target: int) -> list[int]:
+    lookup = {}
+    for i, x in enumerate(nums):
+        complement = target - x
+        if complement in lookup:
+            return [lookup[complement], i]
+        lookup[x] = i
+    return []
+```
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">⚡ 复杂度与特性速记</div>
+
+- **时间复杂度**：$O(n)$（单次线性扫描，哈希表平均查找与写入均为 $O(1)$）
+- **辅助空间**：$O(n)$（哈希表最多存储 $n - 1$ 个元素与下标）
+- **关键心智模型**：记录历史前缀，等待未来补数撞击匹配
+
+</div>
+
+</div>
+</details>
+
+---
+
+### 9. 字母异位词分组 (Group Anagrams)
+
+<details class="review-card">
+<summary class="review-card-summary">
+  <span class="review-card-badge">数组 04</span>
+  <span class="review-card-title">字母异位词分组 (Group Anagrams)</span>
+  <span class="review-card-tag">频次元组 · 典范哈希键 · 字典聚合</span>
+</summary>
+<div class="review-card-content">
+
+<div class="review-block">
+<div class="review-block-label">📌 题目定义与要求</div>
+
+给你一个字符串数组 `strs`，请将所有字母异位词组合在一起，并以列表形式返回结果。返回结果的顺序可以是任意的。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💡 大致思路与核心算法</div>
+
+核心在于**多重集特征向量化与典范哈希键映射**：
+1. **不变特征键构建**：异位词的字符构成与各字符频次完全同构，需将其规约为全局唯一的哈希键。
+   - 排序键：`"".join(sorted(s))`，单词耗时 $O(k \log k)$；
+   - **频次元组键（最优解）**：统计 26 个字符的出现频次，转为不可变元组 `tuple(counts)` 作为字典键，单词处理耗时降为严格线性 $O(k)$。
+2. **多对一哈希聚合**：
+   - 使用 `collections.defaultdict(list)`，以 26 维频次元组为 key，将原始字符串归并追加到对应的列表中。
+   - 最终提取字典的所有 values 列表输出。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💻 核心代码 (最简 Python 实现)</div>
+
+```python
+from collections import defaultdict
+
+def group_anagrams(strs: list[str]) -> list[list[str]]:
+    groups = defaultdict(list)
+    for s in strs:
+        # 统计 26 字符频次，以不可变元组为字典键
+        counts = [0] * 26
+        for c in s:
+            counts[ord(c) - ord('a')] += 1
+        groups[tuple(counts)].append(s)
+    return list(groups.values())
+```
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">⚡ 复杂度与特性速记</div>
+
+- **时间复杂度**：$O(n \cdot k)$（$n$ 为字符串个数，$k$ 为单个字符串最大长度，遍历字符计数耗时 $O(k)$）
+- **辅助空间**：$O(n \cdot k)$（字典存储全部字符串与元组键）
+- **关键心智模型**：字符频次元组标准化，多对一归约聚集
+
+</div>
+
+</div>
+</details>
+
+---
+
+### 10. 前 K 个高频元素 (Top K Frequent Elements)
+
+<details class="review-card">
+<summary class="review-card-summary">
+  <span class="review-card-badge">数组 05</span>
+  <span class="review-card-title">前 K 个高频元素 (Top K Frequent Elements)</span>
+  <span class="review-card-tag">桶排序 · 频次倒排 · 线性时间</span>
+</summary>
+<div class="review-card-content">
+
+<div class="review-block">
+<div class="review-block-label">📌 题目定义与要求</div>
+
+给你一个整数数组 `nums` 和一个整数 `k`，请返回其中出现频率前 `k` 高的元素。可以按任意顺序返回答案。算法时间复杂度必须优于 $O(n \log n)$。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💡 大致思路与核心算法</div>
+
+核心在于**利用频次天然有界特性进行桶排序（倒排索引）**：
+1. **哈希频次统计**：使用 `Counter(nums)` 统计每个唯一元素的出现次数。不同元素数量记为 $m \le n$。
+2. **三大解法复杂度对比**：
+   - 全排序：$O(m \log m)$；
+   - 维持大小为 $k$ 的最小堆：$O(n + m \log k)$；
+   - **桶排序 / 频次倒排（严格线性 $O(n)$ 最优解）**：
+     - 任何元素的出现频次必然介于 $1$ 到 $n$ 之间；
+     - 建立 $n + 1$ 个桶 `buckets = [[] for _ in range(n + 1)]`，其中下标 $i$ 存储所有出现频次恰好为 $i$ 的元素列表；
+     - 将统计得到的 `(num, freq)` 填入对应的 `buckets[freq]` 中。
+3. **逆向贪心提取**：
+   - 从最大频次 $n$ 倒序扫描至 1，依次收集桶内元素至结果列表，集满 $k$ 个后直接返回。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💻 核心代码 (最简 Python 实现)</div>
+
+```python
+from collections import Counter
+
+def top_k_frequent(nums: list[int], k: int) -> list[int]:
+    counts = Counter(nums)
+    # 桶下标代表频次，范围 0..len(nums)
+    buckets = [[] for _ in range(len(nums) + 1)]
+    for num, freq in counts.items():
+        buckets[freq].append(num)
+        
+    res = []
+    # 从最大频次降序收集 k 个元素
+    for freq in range(len(nums), 0, -1):
+        for num in buckets[freq]:
+            res.append(num)
+            if len(res) == k:
+                return res
+    return res
+```
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">⚡ 复杂度与特性速记</div>
+
+- **时间复杂度**：$O(n)$（频次统计 $O(n)$，建桶 $O(m)$，逆向扫描收集 $k$ 个数 $O(n)$，严格线性）
+- **辅助空间**：$O(n)$（哈希表与 $n + 1$ 个桶的列表开销）
+- **关键心智模型**：频次天然以 $n$ 为界，倒排桶扫描击穿对数瓶颈
+
+</div>
+
+</div>
+</details>
+
+---
+
+### 11. 字符串的编码与解码 (Encode and Decode Strings)
+
+<details class="review-card">
+<summary class="review-card-summary">
+  <span class="review-card-badge">数组 06</span>
+  <span class="review-card-title">字符串的编码与解码 (Encode and Decode Strings)</span>
+  <span class="review-card-tag">长度前缀 · 字符流分块 · 无歧义边界</span>
+</summary>
+<div class="review-card-content">
+
+<div class="review-block">
+<div class="review-block-label">📌 题目定义与要求</div>
+
+设计一个算法，将一个字符串列表编码为一个单一的复合字符串，并能够将该复合字符串无损解码还原为原始字符串列表。字符串可能包含任何 256 个可能的 ASCII / Unicode 字符（包括各种分隔符、标点、换行与特殊控制符）。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💡 大致思路与核心算法</div>
+
+核心在于**网络分块传输协议思想（Length-Prefix Framing）**：
+1. **静态分隔符失效陷阱**：使用特定分隔符（如 `,`、`#`）或转义字符时，若原始字符串内恰好包含这些字符，极易引发越界与切分歧义。
+2. **长度前缀协议设计**：
+   - 编码格式：`"{长度}#{原文}"`。例如 `["neet", "code"] -> "4#neet4#code"`。
+   - 解码流程：
+     - 维护游标 $i$。从 $i$ 开始定位首个定界符 `'#'` 的下标 $j$；
+     - 切片 `s[i:j]` 解析为整数，获取后续子串的确切长度 $L = \text{int}(s[i:j])$；
+     - 从 $j + 1$ 向后精确截取 $L$ 个字符：`s[j + 1 : j + 1 + L]` 即为完整原文；
+     - 游标跃迁更新为 $i = j + 1 + L$，进入下一块提取流程。
+3. **抗干扰特性**：无论原文内部包含多少个 `'#'` 或连续数字，由于解码器依据严格预读取的长度界定内容边界，绝不会发生歧义。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💻 核心代码 (最简 Python 实现)</div>
+
+```python
+class Codec:
+    def encode(self, strs: list[str]) -> str:
+        # 协议格式：长度 + '#' + 原文
+        res = []
+        for s in strs:
+            res.append(f"{len(s)}#{s}")
+        return "".join(res)
+
+    def decode(self, s: str) -> list[str]:
+        res, i = [], 0
+        while i < len(s):
+            # 定位长度后的首个定界符 '#'
+            j = s.find('#', i)
+            length = int(s[i:j])
+            # 根据提取出的长度精确切片原文
+            res.append(s[j + 1 : j + 1 + length])
+            i = j + 1 + length
+        return res
+```
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">⚡ 复杂度与特性速记</div>
+
+- **时间复杂度**：编码 $O(N)$，解码 $O(N)$（$N$ 为所有字符串字符总和，单趟线性切分）
+- **辅助空间**：$O(1)$（除存放编解码结果的缓冲区外，仅使用常数级游标指针）
+- **关键心智模型**：元数据（长度）与载荷（内容）解耦，定长切片封死歧义空间
+
+</div>
+
+</div>
+</details>
+
+---
+
+### 12. 除自身以外数组的乘积 (Product of Array Except Self)
+
+<details class="review-card">
+<summary class="review-card-summary">
+  <span class="review-card-badge">数组 07</span>
+  <span class="review-card-title">除自身以外数组的乘积 (Product of Array Except Self)</span>
+  <span class="review-card-tag">前后缀积分解 · 两次扫描 · 常数空间</span>
+</summary>
+<div class="review-card-content">
+
+<div class="review-block">
+<div class="review-block-label">📌 题目定义与要求</div>
+
+给你一个整数数组 `nums`，返回一个数组 `res`，其中 `res[i]` 等于 `nums` 中除 `nums[i]` 之外其余各元素的乘积。题目严格要求：**不能使用除法运算**，且时间复杂度必须为 $O(n)$。进阶要求：额外空间复杂度为 $O(1)$（输出数组不计入辅助空间）。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💡 大致思路与核心算法</div>
+
+核心在于**前后缀乘积正交分解与原地双向扫描**：
+1. **对称分解原理**：位置 $i$ 的除自身乘积，结构上等于其**左侧前缀积**与**右侧后缀积**的交乘：
+   $$res[i] = \left(\prod_{j=0}^{i-1} nums[j]\right) \times \left(\prod_{j=i+1}^{n-1} nums[j]\right)$$
+2. **两遍原地扫描（$O(1)$ 辅助空间）**：
+   - **第一遍（前向求前缀积并填入结果数组）**：
+     - 初始化 `res = [1] * n`，维护标量 `prefix = 1`。
+     - 从左往右扫描：`res[i] = prefix`，随后更新 `prefix *= nums[i]`。此时 `res[i]` 存储位置 $i$ 左边所有数的乘积。
+   - **第二遍（反向维护后缀积并滚入结果）**：
+     - 维护标量 `postfix = 1`。
+     - 从右往左倒序扫描：当前位置左积乘以右积 `res[i] *= postfix`，随后更新 `postfix *= nums[i]`。
+3. **消除额外数组**：直接复用返回值数组存储前缀积，后缀积通过单一标量在线累乘，达成严格 $O(1)$ 辅助空间。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💻 核心代码 (最简 Python 实现)</div>
+
+```python
+def product_except_self(nums: list[int]) -> list[int]:
+    n = len(nums)
+    res = [1] * n
+    
+    # 1. 前向扫描：将左侧前缀积填入 res[i]
+    prefix = 1
+    for i in range(n):
+        res[i] = prefix
+        prefix *= nums[i]
+        
+    # 2. 反向扫描：用单变量 postfix 维护后缀积并乘入 res[i]
+    postfix = 1
+    for i in range(n - 1, -1, -1):
+        res[i] *= postfix
+        postfix *= nums[i]
+        
+    return res
+```
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">⚡ 复杂度与特性速记</div>
+
+- **时间复杂度**：$O(n)$（正向与反向各扫描一次，总计 $2n$ 次乘法操作）
+- **辅助空间**：$O(1)$（输出数组除外，仅使用 `prefix` 与 `postfix` 两个标量指针）
+- **关键心智模型**：对称分解左右积，前向落盘，后向动滚合并
+
+</div>
+
+</div>
+</details>
+
+---
+
+### 13. 有效的数独 (Valid Sudoku)
+
+<details class="review-card">
+<summary class="review-card-summary">
+  <span class="review-card-badge">数组 08</span>
+  <span class="review-card-title">有效的数独 (Valid Sudoku)</span>
+  <span class="review-card-tag">行/列/宫格 · 坐标展平 · 并行判重</span>
+</summary>
+<div class="review-card-content">
+
+<div class="review-block">
+<div class="review-block-label">📌 题目定义与要求</div>
+
+请你判断一个 $9 \times 9$ 的数独网格是否有效。只需要根据以下规则，验证已经填入的数字（未填入单元格以 `'.'` 表示）：
+1. 数字 `1-9` 在每一行只能出现一次。
+2. 数字 `1-9` 在每一列只能出现一次。
+3. 数字 `1-9` 在每一个以粗实线分隔的 $3 \times 3$ 宫格内只能出现一次。
+*注：只需要校验当前已有数字是否合法，无需判断数独是否有解。*
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💡 大致思路与核心算法</div>
+
+核心在于**宫格坐标一维映射与三向哈希并行判重**：
+1. **宫格索引展平映射**：
+   - 坐标 $(r, c)$ 所属的 $3 \times 3$ 宫格子网格编号可通过整除 3 计算：
+     $$box\_idx = (r // 3) \times 3 + (c // 3) \in [0, 8]$$
+2. **三组集合同步维护**：
+   - 创建 9 个行集合 `rows`、9 个列集合 `cols`、9 个宫格集合 `boxes`。
+   - 单次遍历整个 $9 \times 9$ 网格，跳过空单元格 `'.'`；
+   - 对当前提取的数字 `val`，同时校验是否在对应行、列或宫格集合中存在：
+     - 若任一集合命中，说明存在同维度数字冲突，立即返回 `False`；
+     - 若均未命中，分别向三个集合中注册加入 `val`。
+3. 全局扫描无冲突即返回 `True`。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💻 核心代码 (最简 Python 实现)</div>
+
+```python
+def is_valid_sudoku(board: list[list[str]]) -> bool:
+    rows = [set() for _ in range(9)]
+    cols = [set() for _ in range(9)]
+    boxes = [set() for _ in range(9)]
+    
+    for r in range(9):
+        for c in range(9):
+            val = board[r][c]
+            if val == '.':
+                continue
+            box_idx = (r // 3) * 3 + (c // 3)
+            # 行、列、3x3 宫格三维并行冲突校验
+            if val in rows[r] or val in cols[c] or val in boxes[box_idx]:
+                return False
+            rows[r].add(val)
+            cols[c].add(val)
+            boxes[box_idx].add(val)
+    return True
+```
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">⚡ 复杂度与特性速记</div>
+
+- **时间复杂度**：$O(1)$（固定遍历 $9 \times 9 = 81$ 个单元格）
+- **辅助空间**：$O(1)$（$3 \times 9 = 27$ 个集合，每个集合元素上限不超过 9）
+- **关键心智模型**：$(r//3) \times 3 + (c//3)$ 展平子宫格，三向哈希协同判重
+
+</div>
+
+</div>
+</details>
+
+---
+
+### 14. 最长连续序列 (Longest Consecutive Sequence)
+
+<details class="review-card">
+<summary class="review-card-summary">
+  <span class="review-card-badge">数组 09</span>
+  <span class="review-card-title">最长连续序列 (Longest Consecutive Sequence)</span>
+  <span class="review-card-tag">哈希集合 · 前驱探测 · 严格线性</span>
+</summary>
+<div class="review-card-content">
+
+<div class="review-block">
+<div class="review-block-label">📌 题目定义与要求</div>
+
+给定一个未排序的整数数组 `nums`，找出数字连续的最长序列（不要求元素在原数组中连续，如 `[100, 4, 200, 1, 3, 2]` 的最长递增连续序列是 `[1, 2, 3, 4]`，长度为 4）的长度。设计并实现时间复杂度为 $O(n)$ 的算法。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💡 大致思路与核心算法</div>
+
+核心在于**哈希集合 $O(1)$ 寻址与序列头部前驱判定（杜绝重复扫描）**：
+1. **哈希集合去重与常数寻址**：
+   - 将数组转换为哈希集合 `num_set = set(nums)`，提供 $O(1)$ 的元素存在性检验。
+2. **前驱探测剪枝（唯一起点判定）**：
+   - 遍历集合中的每一个数字 $x$：
+   - **关键判断**：检查 $x - 1$ 是否在 `num_set` 中：
+     - 若 $x - 1 \in num\_set$：说明 $x$ 并非连续序列的起始点（其左侧存在更小的前驱），**直接跳过**；
+     - 若 $x - 1 \notin num\_set$：说明 $x$ 必然是某条连续链条的**唯一合法起点**！
+3. **单向线性延伸**：
+   - 确认 $x$ 为起点后，运行 `while current_num + 1 in num_set` 不断向右探索链条长度，更新全局最大长度。
+4. **严格线性时间保证**：
+   - 每个元素仅在两处被触碰：外层循环做一次前驱剪枝检查；内层循环仅由其所属序列的唯一起点驱动遍历一次。没有任何元素会被多重遍历，总计算步数严格小于等于 $2n$。
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">💻 核心代码 (最简 Python 实现)</div>
+
+```python
+def longest_consecutive(nums: list[int]) -> int:
+    num_set = set(nums)
+    max_len = 0
+    
+    for x in num_set:
+        # 核心剪枝：仅当 x-1 不在集合中时，x 才是连续序列的起点
+        if x - 1 not in num_set:
+            current_num = x
+            current_len = 1
+            
+            while current_num + 1 in num_set:
+                current_num += 1
+                current_len += 1
+                
+            max_len = max(max_len, current_len)
+            
+    return max_len
+```
+
+</div>
+
+<div class="review-block">
+<div class="review-block-label">⚡ 复杂度与特性速记</div>
+
+- **时间复杂度**：$O(n)$（构建集合 $O(n)$；起点前驱剪枝确保内层 `while` 总执行次数至多为 $n$）
+- **辅助空间**：$O(n)$（哈希集合存储去重后的数组元素）
+- **关键心智模型**：无前驱者方为起点，锁定起点单向延伸，杜绝冗余重复扫描
+
+</div>
+
+</div>
+</details>
+
