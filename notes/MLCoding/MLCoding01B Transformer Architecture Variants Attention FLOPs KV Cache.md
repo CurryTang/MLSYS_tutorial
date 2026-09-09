@@ -245,12 +245,12 @@ FlashAttention（Dao et al.）是现代大模型基础设施级系统优化，�
 ---
 
 #### 路线 A：稀疏注意力（Sparse Attention，剪枝图）
-- **核心思想**：切断注意力全连接图中的绝大部分边，复杂度从 $\mathcal{O}(S^2)$ 降至 $\mathcal{O}(S \cdot k)$ 或 $\mathcal{O}(S\sqrt{S})$。
-- **静态规则稀疏（Longformer / BigBird）**：人工组合滑动局部窗口（Local Window）+ 跨步空洞窗口（Dilated Window）+ 全局标记（Global Tokens）。局限在于硬编码规则无法自适应非规则长程依赖。
-- **硬件对齐原生稀疏（DeepSeek NSA: Native Sparse Attention）**：
-  1. **Compressed Tokens（粗筛视野）**：将相邻 Token 块通过轻量池化压缩为单向量，Query 先在粗粒度扫描定位潜在相关区域；
-  2. **Selected Tokens（Top-$k$ 块交互）**：仅将粗筛得分最高的块载入高速缓存进行精确细粒度交互；
-  3. **Sliding Window（局部精细上下文）**：对邻近若干 Token 保持全注意力。
+- **核心思想与“Top-$k$ 悖论”**：
+  - **核心痛点**：若“先算全量 $S \times S$ 的 Attention 再做 Top-$k$”，计算量依然是严格的 $\mathcal{O}(S^2 D)$，显存峰值仍是 $\mathcal{O}(S^2)$，稀疏不仅无法降低开销，还会额外引入巨大的全量排序延迟；
+  - **破解逻辑**：绝不能直接算全量 Attention！业界衍生出三大稀疏化选拔机制：
+    1. **静态拓扑规则（Static Heuristics，如 Longformer / BigBird）**：完全不做动态 Top-$k$，硬编码局部窗口（Local Window）+ 跨步空洞（Dilated Window）+ 固定全局锚点（Global Tokens），算力降至 $\mathcal{O}(S \cdot w)$，但对复杂长程语义完全盲目；
+    2. **哈希/聚类分桶（Clustering/LSH，如 Reformer）**：通过随机超平面将向量哈希进桶内，只在同桶内算注意力，但因桶大小严重不均（Bucket Imbalance）导致 GPU 线程分化与 Padding 浪费，已被工业界淘汰；
+    3. **分层金字塔粗筛（Hierarchical Coarse-to-Fine，以 DeepSeek NSA 为代表）**：现代大模型的最优解，先用超轻量的“块级压缩（AvgPool 压缩 64 倍）”以 $<1.5\%$ 的算力打出粗筛分数，选出得分最高的 Top-$k$ 个**连续整块（Block-level Top-$k$）**，再仅将这几个块载入片上 SRAM 执行高精度 FlashAttention，实现严格线性的计算与显存。
 - **优缺点**：保留 Softmax 指数放大与注意力锐度；但必须做块级硬件对齐，否则离散访存开销会抵消算力节约。
 
 > [!TIP]
@@ -268,18 +268,25 @@ FlashAttention（Dao et al.）是现代大模型基础设施级系统优化，�
 - **Tensor Core 脉动阵列失配**：现代 GPU 的 Tensor Core（如 Hopper `wgmma` 架构）以固定尺寸的密集矩阵分块（$64 \times 64$ 或 $128 \times 128$）直接在片上共享内存（SRAM）中运作。细粒度离散 Token 无法填充张量单元，硬件被迫回退到低吞吐的通用 CUDA Cores；
 - **Warp 线程分化（Branch Divergence）**：同 Warp 内不同线程如果执行不同长度或位置的稀疏索引分支，会导致严重流水线气泡。
 
-##### 2. DeepSeek NSA 的三路硬件对齐设计
-DeepSeek NSA（Native Sparse Attention）彻底抛弃细粒度离散寻址，强制以**连续块（Block-Aligned，通常为 $L_b = 64$ 个连续 Token）**作为硬件流转基元：
-1. **压缩粗筛分支（Compressed Tokens）**：
-   - 将 Key/Value 按每块 $L_c$ 个 Token 进行 AvgPool 压缩：$K^{\text{cmp}} \in \mathbb{R}^{\frac{S}{L_c} \times D}$；
-   - Query 与连续压缩键计算粗粒度注意力得分，生成块级重要性分布；因张量连续紧凑，计算直接由 Tensor Core 高速完成。
-2. **细粒度块级选中分支（Selected Tokens）**：
-   - 依据粗筛分数，仅选出 Top-$k$ 个**整块（Contiguous Blocks）**；
-   - 载入时利用 Hopper TMA（Tensor Memory Accelerator）硬件引擎以块为单位跨级直接异步搬运（HBM $\to$ SRAM），实现 100% 内存合并访存。
-3. **局域滑动窗口分支（Sliding Window）**：
-   - 维持最近 $W$ 个 Token（如 512 个，即 8 个连续块）的密集因果注意力，保全局部语法与代码词法。
-4. **统一流式归一化（Unified Online Softmax）**：
-   - 三路分支在 SRAM 寄存器中共享同一组动态累加器 $(m_i, l_i, O_i)$，在单个 Kernel 中完成流式融合，杜绝精度漂移与中间激活落盘。
+##### 2. DeepSeek NSA 的三路硬件对齐设计：Top-$k$ 是如何无开销计算的？
+DeepSeek NSA（Native Sparse Attention）彻底抛弃细粒度逐 Token 寻址，强制以**连续块（Block-Aligned，通常为 $L_b = 64$ 个连续 Token）**作为硬件流转基元，其 Top-$k$ 完整运算流程如下：
+
+1. **第一步：Key 序列块级均值压缩（Spatial Pooling）**：
+   - 原始 Key: $K \in \mathbb{R}^{S \times D}$；
+   - 将每连续 $L_c = 64$ 个 Token 压缩为单向量：$K^{\text{cmp}} = \text{AvgPool}_{L_c}(K) \in \mathbb{R}^{\frac{S}{L_c} \times D}$；
+   - 序列长度瞬间压缩 64 倍（例如 128K 长度仅余 2048 个块代表向量）。
+2. **第二步：轻量粗筛扫描（Coarse-Grained Attention Scan）**：
+   - Query 仅与压缩后的键向量做密集点积：$\text{Scores}_{\text{coarse}} = Q (K^{\text{cmp}})^T \in \mathbb{R}^{S \times \frac{S}{L_c}}$；
+   - **算力开销仅为全量的 $1/L_c = 1/64 \approx 1.5\%$**，张量连续规整，直接由 Tensor Core 脉动阵列极速扫过。
+3. **第三步：块级 Top-$k$ 索引截取（Block-level Top-$k$ Selection）**：
+   - 对每个 Query 块的粗筛打分，选出得分最高的 $n_s$ 个**整块索引**（例如 $n_s = 4$ 或 $8$ 个 Block）：$\mathcal{I}_{\text{sel}} = \text{TopK}(\text{Scores}_{\text{coarse}}, n_s)$；
+   - 绝不逐 Token 离散挑选，保证每次选中的都是连续 $L_b$ 个 Token 的整块内存。
+4. **第四步：细粒度片上精算（Fine-Grained Selected Blocks in SRAM）**：
+   - 依据 $\mathcal{I}_{\text{sel}}$，仅将选中的 $n_s$ 个块（总计 $n_s \times L_b = 256 \sim 512$ 个 Token）的**原始高精 Key/Value** 从 HBM 通过 Hopper TMA 异步加载至片上 SRAM；
+   - 在 SRAM 内部调用 Tensor Core 执行高精度密集 FlashAttention 点积与 Softmax。
+5. **第五步：局部滑动窗口保底（Sliding Window）与统一 Online Softmax**：
+   - 维持最近 $W$ 个 Token（如 512 个，即 8 个连续块）的密集因果注意力，保全局部语法词法；
+   - 粗筛得分仅用于选块，不参与 Softmax 归一化；细粒度选中块与滑动窗口块在 SRAM 寄存器中共享同一组动态累加器 $(m_i, l_i, \text{acc}_o)$，流式融合写回。
 
 ##### 3. NSA 前向 Triton Kernel 核心骨架
 

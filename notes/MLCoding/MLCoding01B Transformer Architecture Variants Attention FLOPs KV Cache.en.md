@@ -245,12 +245,12 @@ To fundamentally transcend the "quadratic FLOPs wall" and "autoregressive decodi
 ---
 
 #### Trajectory A: Sparse Attention (Pruning the Graph)
-- **Core Idea**: Prune non-essential edges in the attention bipartite graph, lowering complexity from $\mathcal{O}(S^2)$ to $\mathcal{O}(S \cdot k)$ or $\mathcal{O}(S\sqrt{S})$.
-- **Static Heuristics (Longformer / BigBird)**: Manually combines local sliding windows + strided/dilated windows + global tokens. Fails to capture dynamic, irregular semantic dependencies.
-- **Hardware-Aligned Native Sparse Attention (DeepSeek NSA)**:
-  1. **Compressed Tokens (Coarse-Grained View)**: Aggregates consecutive token blocks into pooled vectors; Queries scan at coarse granularity to locate relevant regions;
-  2. **Selected Tokens (Top-$k$ Block Interaction)**: Only top-$k$ critical blocks are scheduled into fast on-chip memory for exact fine-grained attention;
-  3. **Sliding Window (Fine Local Context)**: Preserves full attention over adjacent local tokens.
+- **Core Idea & The "Top-$k$ Paradox"**:
+  - **The Core Paradox**: If one must compute the full $S \times S$ attention matrix first to perform a Top-$k$ truncation, compute complexity remains strictly $\mathcal{O}(S^2 D)$ and peak activation memory remains $\mathcal{O}(S^2)$—sparsity yields zero savings while incurring massive full-matrix sorting overhead;
+  - **Resolution**: Attention cannot be computed globally upfront. The field evolved across three generations of routing mechanisms:
+    1. **Static Topological Heuristics (e.g., Longformer, BigBird)**: Completely bypasses dynamic Top-$k$ by hard-coding local sliding windows + strided/dilated patterns + fixed global tokens. Compute drops to $\mathcal{O}(S \cdot w)$, but fails to capture irregular long-range semantic dependencies;
+    2. **Hashing & Clustering Buckets (e.g., Reformer LSH)**: Uses random hyperplanes to hash vectors into buckets and compute attention only within buckets. Abandoned in production due to severe bucket imbalance causing GPU warp divergence and massive padding waste;
+    3. **Hierarchical Coarse-to-Fine Filtering (exemplified by DeepSeek NSA)**: The modern SOTA paradigm. Uses lightweight spatial compression (AvgPool by $64\times$) to compute coarse scores using $<1.5\%$ of baseline FLOPs, picks the highest-scoring **contiguous blocks (Block-level Top-$k$)**, and streams only those raw blocks into on-chip SRAM for exact FlashAttention, achieving linear scaling in compute and memory.
 - **Trade-Offs**: Retains Softmax contrastive sharpness; requires block-level hardware alignment to avoid gather/scatter memory latency penalties.
 
 > [!TIP]
@@ -268,18 +268,25 @@ Early dynamic sparsity approaches (e.g., token-level Top-$k$ pruning) reduce the
 - **Tensor Core Systolic Array Misalignment**: Tensor Cores (such as Hopper `wgmma`) process dense $64 \times 64$ or $128 \times 128$ tiles directly within on-chip Shared Memory (SRAM). Unstructured token selections cannot populate these dense hardware pipelines, forcing fallback to low-throughput generic CUDA cores;
 - **Warp Divergence**: Divergent sparse index patterns across threads within the same warp cause execution serialization and pipeline stalls.
 
-##### 2. DeepSeek NSA 3-Branch Hardware-Aligned Architecture
-DeepSeek NSA enforces **Block Alignment ($L_b = 64$ contiguous tokens)** as the fundamental hardware dataflow primitive:
-1. **Compressed Coarse Branch**:
-   - Compresses Key/Value tokens with block-level AvgPool: $K^{\text{cmp}} \in \mathbb{R}^{\frac{S}{L_c} \times D}$;
-   - Queries interact with compressed keys to yield coarse block-importance scores via fast, contiguous Tensor Core GEMMs.
-2. **Selected Fine-Grained Block Branch**:
-   - Based on coarse scores, selects the Top-$k$ **entire contiguous blocks**;
-   - Blocks are loaded using Hopper TMA (Tensor Memory Accelerator) asynchronous copy engines directly from HBM to SRAM with 100% coalescing.
-3. **Sliding Window Branch**:
-   - Maintains dense causal attention over the most recent $W$ tokens (e.g., 512 tokens = 8 contiguous blocks) to ensure syntactic and grammatical integrity.
-4. **Unified Streaming Online Softmax**:
-   - All three branches update a single shared Online Softmax state $(m_i, l_i, O_i)$ inside SRAM registers within one fused kernel pass, avoiding numerical drift or intermediate activation spills.
+##### 2. DeepSeek NSA 3-Branch Architecture: How Top-$k$ is Evaluated with Near-Zero Overhead
+DeepSeek NSA completely abandons per-token dynamic indexing and enforces **Block Alignment ($L_b = 64$ contiguous tokens)** as the fundamental hardware primitive. The end-to-end Top-$k$ execution pipeline unfolds as follows:
+
+1. **Step 1: Key Sequence Block-Wise Mean Pooling (Spatial Compression)**:
+   - Raw Key tensor: $K \in \mathbb{R}^{S \times D}$;
+   - Compresses consecutive blocks of $L_c = 64$ tokens into representative vectors: $K^{\text{cmp}} = \text{AvgPool}_{L_c}(K) \in \mathbb{R}^{\frac{S}{L_c} \times D}$;
+   - The sequence dimension is instantly compressed by $64\times$ (e.g., 128K tokens collapse to just 2,048 block vectors).
+2. **Step 2: Lightweight Coarse-Grained Scan**:
+   - Queries perform dense GEMM exclusively with compressed keys: $\text{Scores}_{\text{coarse}} = Q (K^{\text{cmp}})^T \in \mathbb{R}^{S \times \frac{S}{L_c}}$;
+   - **FLOPs are only $1/L_c = 1/64 \approx 1.5\%$ of full attention**. The tensor is dense, contiguous, and executed at peak speed by Tensor Core systolic arrays.
+3. **Step 3: Block-Level Top-$k$ Index Selection**:
+   - For each query tile, extracts the top $n_s$ **entire block indices** (e.g., $n_s = 4$ or $8$ blocks): $\mathcal{I}_{\text{sel}} = \text{TopK}(\text{Scores}_{\text{coarse}}, n_s)$;
+   - Selections are strictly chunk-aligned, guaranteeing every index points to contiguous DRAM memory.
+4. **Step 4: Fine-Grained Exact Attention in On-Chip SRAM**:
+   - Based on $\mathcal{I}_{\text{sel}}$, loads only the raw, uncompressed Key/Value tensors for the selected $n_s$ blocks ($n_s \times L_b = 256 \sim 512$ tokens) from HBM into SRAM via asynchronous Hopper TMA engines;
+   - Executes dense, exact FlashAttention in SRAM with Tensor Cores.
+5. **Step 5: Sliding Window Integration & Unified Online Softmax**:
+   - Evaluates dense causal attention over the nearest $W$ tokens (e.g., 512 tokens) for local syntax preservation;
+   - Coarse scores serve exclusively as block routers and are excluded from normalization; fine selected blocks and local sliding windows update a shared Online Softmax state $(m_i, l_i, \text{acc}_o)$ inside SRAM registers.
 
 ##### 3. NSA Forward Triton Kernel Skeleton
 
