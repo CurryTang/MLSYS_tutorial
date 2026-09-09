@@ -1528,12 +1528,6 @@ const mlCodingNotes = mlCodingNoteDefinitions.map((definition) => ({
 
 const systemDesignNoteDefinitions = [
   createTutorialDefinition(
-    'System Design 00 · 怎么读',
-    'SystemDesign00 Overview.md',
-    'SystemDesign00 Overview.en.md',
-    { directory: 'SystemDesign', titleEn: 'System Design 00 · How to read', category: 'Overview', difficulty: 'Intro' },
-  ),
-  createTutorialDefinition(
     'System Design 01 · 无状态服务',
     'SystemDesign01 Stateless Service.md',
     'SystemDesign01 Stateless Service.en.md',
@@ -24641,7 +24635,8 @@ function tokenizeCode(code, language) {
 }
 
 const legacyRoutes = {
-  'SystemDesign05 Interview Flow.md': 'SystemDesign00 Overview.md',
+  'SystemDesign00 Overview.md': 'SystemDesign01 Stateless Service.md',
+  'SystemDesign05 Interview Flow.md': 'SystemDesign01 Stateless Service.md',
   'SystemDesign03 Database Scaling.md': 'SystemDesign02 Database Paradigms.md',
   'SystemDesign05 Reliability Replication.md': 'SystemDesign02 Database Paradigms.md',
   'SystemDesign06 Photo Sharing Feed.md': 'SystemDesign07 Photo Sharing Feed.md',

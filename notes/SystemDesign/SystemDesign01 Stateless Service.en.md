@@ -1,6 +1,31 @@
 # System Design 01 · Stateless Services
 
-Course Location: [[SystemDesign00 Overview|00 How to read]] → this note → [[SystemDesign01B Virtualization Containers|01B Virtualization and Containers]]
+Course Location: this note → [[SystemDesign01B Virtualization Containers|01B Virtualization and Containers]]
+
+Components first, then cases. A component note is the interface and the problem it blocks. A case uses one template to assemble those components.
+
+```system-design-overview-visual
+```
+
+```text
+Case
+1. Functional requirements × 3
+2. Non-functional requirements × 3
+3. Basic workflow + schema + QPS
+4. Deep dive × 3: each ≥2 options, tradeoff, preferred
+5. One end-to-end
+
+Sizing
+1 day ≈ 1e5 seconds
+avg QPS ≈ daily requests / 1e5
+peak QPS ≈ avg × peak factor
+concurrency ≈ QPS × latency_seconds
+DB QPS ≠ API QPS
+```
+
+Only compute quantities that change the shape: cache, replica, shard, queue.
+
+---
 
 "Stateless" does not mean "the system has no state." It means that a service process does not exclusively own any non-recoverable state. An instance receives input, reads external state, completes computation, and then writes the result back to a shared system or returns it to the client.
 

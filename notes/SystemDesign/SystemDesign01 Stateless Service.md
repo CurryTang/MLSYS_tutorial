@@ -1,6 +1,31 @@
 # System Design 01 · 无状态服务
 
-课程位置：[[SystemDesign00 Overview|00 怎么读]] → 本篇 → [[SystemDesign01B Virtualization Containers|01B 虚拟化与容器]]
+课程位置：本篇 → [[SystemDesign01B Virtualization Containers|01B 虚拟化与容器]]
+
+先组件，后案例。组件讲接口和挡住什么问题。案例用同一套模板把组件拼起来。
+
+```system-design-overview-visual
+```
+
+```text
+案例
+1. Functional requirements × 3
+2. Non-functional requirements × 3
+3. Basic workflow + schema + QPS
+4. Deep dive × 3：每个 ≥2 方案，tradeoff，preferred
+5. 一条 end-to-end
+
+估算
+1 day ≈ 1e5 seconds
+avg QPS ≈ daily requests / 1e5
+peak QPS ≈ avg × peak factor
+concurrency ≈ QPS × latency_seconds
+DB QPS ≠ API QPS
+```
+
+只算会改变形态的量：cache、replica、shard、队列。
+
+---
 
 Stateless 不是“系统没有状态”。它指服务进程不独占任何不可丢失的状态。实例收到输入，读取外部状态，完成计算，再把结果写回共享系统或返回客户端。
 

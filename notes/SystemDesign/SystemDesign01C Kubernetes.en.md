@@ -299,7 +299,7 @@ The object model and the scheduler answer where one Pod goes. A system still nee
 
 ### Responsibility layers
 
-Cut by what a layer is allowed to do. The four layers in [[SystemDesign00 Overview|00]] are this axis:
+Cut by what a layer is allowed to do. Edge / compute / data / async is this axis:
 
 | Layer | Typical components | Allowed | Not allowed |
 |---|---|---|---|

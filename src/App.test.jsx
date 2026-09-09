@@ -593,7 +593,8 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: 'System Design' }));
 
     expect(await screen.findByRole('heading', { name: /System Design 0/i })).toBeInTheDocument();
-    expect(screen.getByText('本板块共 13 篇笔记')).toBeInTheDocument();
+    expect(screen.getByText('本板块共 12 篇笔记')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /System Design 00 · /i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /System Design 01 · 无状态服务/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /System Design 01B · 虚拟化与容器/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /System Design 01C · Kubernetes/i })).toBeInTheDocument();
@@ -827,6 +828,19 @@ describe('App', () => {
     expect(within(layered).getByText(/无状态副本 topologySpread/)).toBeInTheDocument();
   });
 
+  it('redirects System Design 00 Overview to the first component note', async () => {
+    window.history.replaceState(null, '', '/#SystemDesign00%20Overview.md');
+
+    render(<App />);
+
+    expect(await screen.findByRole('heading', { name: /无状态服务/ })).toBeInTheDocument();
+    expect(screen.getAllByText('SystemDesign01 Stateless Service.md')).toHaveLength(2);
+
+    await waitFor(() => {
+      expect(window.location.hash).toBe('#SystemDesign01%20Stateless%20Service.md');
+    });
+  });
+
   it('redirects renamed System Design note routes to the new chapter numbers', async () => {
     window.history.replaceState(null, '', '/#SystemDesign07%20Async%20Messaging%20Systems.md');
 
@@ -858,7 +872,7 @@ describe('App', () => {
       const requestUrl = String(input);
       let content = '# System Design tutorial';
 
-      if (requestUrl.includes('SystemDesign00')) {
+      if (requestUrl.includes('SystemDesign01 Stateless') || requestUrl.includes('SystemDesign01%20Stateless')) {
         content = '# Overview\n\n```system-design-overview-visual\n```';
       } else if (requestUrl.includes('SystemDesign06')) {
         content = '# Async Messaging\n\n```async-messaging-architecture-visual\n```';
