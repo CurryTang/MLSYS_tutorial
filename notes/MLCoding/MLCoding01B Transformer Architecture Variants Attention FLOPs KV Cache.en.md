@@ -221,6 +221,10 @@ FlashAttention (Dao et al.) is foundational infrastructure for modern LLM traini
 - **Problems Solved**: Eliminates training-time $\mathcal{O}(S^2)$ activation memory OOM crashes; reduces HBM memory traffic from $\mathcal{O}(S^2)$ to $\mathcal{O}(S)$, boosting MFU by 2–4×;
 - **Problems Unsolved**: **Total FLOPs remain strictly $\mathcal{O}(S^2 D)$**; autoregressive decoding still requires loading full historical KV Cache; quadratic Prefill latency persists at 1M+ context.
 
+> [!TIP]
+> **Hands-On Coding Exercise**:
+> Want to implement FlashAttention's core tiling and GPU kernel from scratch? Check out **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.en.md#Exercise 7 · Flash Attention (tiling + online softmax)|ML Coding 03 · Exercise 7: Flash Attention from PyTorch Online Softmax to Production Triton GPU Kernel]]** for complete implementation and numerical validation.
+
 ---
 
 ### 3. Three Algorithmic & Systems Efficiency Trajectories

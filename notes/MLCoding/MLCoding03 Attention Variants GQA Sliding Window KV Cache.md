@@ -345,11 +345,17 @@ class KVCacheAttention(nn.Module):
 
 ### Exercise 7 · Flash Attention（分块 + online softmax）
 
-Flash attention 要解决的不是"attention 算得对不对"，而是"算的时候要不要把整个 `(T, T)` 分数矩阵摆在显存里"。标准实现要先算出完整 `scores`，再整体做 softmax；flash attention 把 K/V 按 `block_size` 分块，依次和 Q 做局部 attention，同时维护一个随分块更新的 running max 和 running sum，把每次新分块的贡献用正确的缩放因子累加进最终结果，全程只需要 `O(T)` 的中间状态，而不是 `O(T^2)`。数学上和一次性算完的结果完全一致，不是近似。
+Flash attention 要解决的不是“attention 算得对不对”，而是“算的时候要不要把整个 $(T, T)$ 分数矩阵摆在显存里”。标准实现要先算出完整 `scores`，再整体做 softmax；FlashAttention 把 $K, V$ 按 `BLOCK_N` 分块，依次和当前 $Q$ 块做局部注意力，同时在片上寄存器维护流式更新的 running max 和 running sum，将先前累加量按新旧最大值差的指数项 $\exp(m_{\text{old}} - m_{\text{new}})$ 重新缩放，全程只需 $\mathcal{O}(T)$ 的中间状态，而非 $\mathcal{O}(T^2)$。数学上和一次性算完的结果完全一致，不是近似。
 
-在线 softmax 的核心是这一步：当新分块的最大值 `block_max` 超过当前维护的 `running_max` 时，之前累积的输出和归一化和都要按 `exp(running_max - new_max)` 重新缩放，再累加新分块的贡献。这一步系数算错，是实现 flash attention 时最常见、也最隐蔽的 bug。它不会报错，只会让输出数值上和标准 attention 有一个不易察觉的偏差。
+本练习分为两个递进层次：
+1. **Part A · PyTorch 在线 Softmax 算法逻辑模拟（CPU/原型验证）**：跑通纯 Python 分块与重缩放逻辑；
+2. **Part B · Triton GPU 算子级实现（片上 SRAM Tiling + Tensor Core + 因果剪枝）**：工程生产级 GPU Kernel 编程实战。
 
-#### Quick Coding：`flash_attention`
+---
+
+#### Part A · PyTorch 算法级实现：`flash_attention`
+
+##### Quick Coding：`flash_attention`
 
 ```python
 def flash_attention(Q, K, V, block_size, causal=False):
@@ -357,7 +363,7 @@ def flash_attention(Q, K, V, block_size, causal=False):
 ```
 
 <details>
-<summary>参考答案</summary>
+<summary>参考答案（PyTorch 算法实现）</summary>
 
 ```python
 def flash_attention(Q, K, V, block_size, causal=False):
@@ -401,6 +407,206 @@ def flash_attention(Q, K, V, block_size, causal=False):
 ```
 
 这份实现和一次性算完整 `(T, T)` 矩阵再 softmax 的朴素版本，在因果和非因果两种设置下都用 NumPy 数值验证过 `allclose`，包括某一整行在某个分块里被完全 mask 掉（`block_max = -inf`）这种边界情况。
+
+</details>
+
+---
+
+#### Part B · Triton GPU 算子级实战：`flash_attn_triton`
+
+##### 算子工程设计与硬件映射
+1. **Grid 划分与 CTA 映射**：
+   - 启动网格为 2D：`grid = (triton.cdiv(N_CTX, BLOCK_M), Batch * NumHeads)`；
+   - 每个 Program 实例（CTA / Thread Block）独占处理某一个 Batch、某一个 Head 下的一个 Query Tile（大小为 `BLOCK_M = 64`）；
+2. **SRAM 片上数据流**：
+   - **外层**：将当前 Query 块（`[BLOCK_M, HEAD_DIM]`）一次性装载至片上 SRAM 寄存器，在整个内层循环中**常驻不变**；
+   - **内层**：沿 Key/Value 序列维度按 `BLOCK_N = 64` 流式循环加载；
+   - **寄存器累加器**：
+     - `m_i`: `[BLOCK_M]` 行最大值；
+     - `l_i`: `[BLOCK_M]` 归一化分母；
+     - `acc_o`: `[BLOCK_M, HEAD_DIM]` 输出累加值；
+3. **因果边界剪枝（Causal Early Termination）**：
+   - 若开启因果遮罩，当 Key 块起始位置 `start_n > (start_m + 1) * BLOCK_M` 时，后续所有块均为严格未来时间步，直接截断 `break` 循环，将计算量直接减半；
+   - 处于对角线重叠的块，使用 `offs_m[:, None] >= offs_n[None, :]` 进行行级掩码。
+
+##### Quick Coding：`_flash_attn_fwd_kernel`
+
+```python
+import triton
+import triton.language as tl
+
+@triton.jit
+def _flash_attn_fwd_kernel(
+    Q, K, V, sm_scale,
+    L, Out,
+    stride_qz, stride_qh, stride_qm, stride_qk,
+    stride_kz, stride_kh, stride_kn, stride_kk,
+    stride_vz, stride_vh, stride_vn, stride_vk,
+    stride_oz, stride_oh, stride_om, stride_ok,
+    Z, H, N_CTX,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+):
+    ...
+
+def flash_attention_triton(q, k, v, causal=True, sm_scale=None):
+    ...
+```
+
+<details>
+<summary>参考答案（Triton Kernel 算子级完整实现）</summary>
+
+```python
+import math
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def _flash_attn_fwd_kernel(
+    Q, K, V, sm_scale,
+    L, Out,
+    stride_qz, stride_qh, stride_qm, stride_qk,
+    stride_kz, stride_kh, stride_kn, stride_kk,
+    stride_vz, stride_vh, stride_vn, stride_vk,
+    stride_oz, stride_oh, stride_om, stride_ok,
+    Z, H, N_CTX,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+):
+    start_m = tl.program_id(0)
+    off_hz = tl.program_id(1)
+
+    off_z = off_hz // H
+    off_h = off_hz % H
+
+    # 行与列在当前 Block 内的相对偏移
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    offs_n = tl.arange(0, BLOCK_N)
+
+    # 内存基地址指针
+    q_offset = off_z * stride_qz + off_h * stride_qh + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
+    k_offset = off_z * stride_kz + off_h * stride_kh + offs_n[None, :] * stride_kn + offs_d[:, None] * stride_kk
+    v_offset = off_z * stride_vz + off_h * stride_vh + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
+
+    # 1. 载入 Query 块至 SRAM 寄存器（外层常驻）
+    q = tl.load(Q + q_offset, mask=offs_m[:, None] < N_CTX, other=0.0)
+
+    # 2. 初始化 Online Softmax 寄存器累加器
+    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc_o = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+
+    # 3. 因果注意力的分块循环上界计算
+    lo = 0
+    hi = (start_m + 1) * BLOCK_M if IS_CAUSAL else N_CTX
+
+    # 4. 内层循环：沿 Key/Value 流式载入分块
+    for start_n in range(lo, hi, BLOCK_N):
+        curr_offs_n = start_n + offs_n
+        
+        # 载入 K 块与 V 块到片上 SRAM
+        k = tl.load(K + k_offset + start_n * stride_kn, mask=curr_offs_n[None, :] < N_CTX, other=0.0)
+        v = tl.load(V + v_offset + start_n * stride_vn, mask=curr_offs_n[:, None] < N_CTX, other=0.0)
+
+        # Tensor Core 点积：Q @ K.T
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        qk += tl.dot(q, k)
+        qk *= sm_scale
+
+        # 因果下三角屏蔽
+        if IS_CAUSAL:
+            mask = offs_m[:, None] >= curr_offs_n[None, :]
+            qk = tl.where(mask, qk, float("-inf"))
+
+        # 局部分块的最大值与指数和
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        p = tl.exp(qk - m_ij[:, None])
+        l_ij = tl.sum(p, 1)
+
+        # 核心：根据 (旧 max - 新 max) 重新缩放先前的累加和
+        alpha = tl.exp(m_i - m_ij)
+        acc_o = acc_o * alpha[:, None]
+        l_i = l_i * alpha + l_ij
+        m_i = m_ij
+
+        # 累加当前块的 V 特征贡献
+        acc_o += tl.dot(p.to(v.dtype), v)
+
+    # 5. 最终除以归一化分母，写回全局内存 HBM
+    acc_o = acc_o / l_i[:, None]
+    out_offset = off_z * stride_oz + off_h * stride_oh + offs_m[:, None] * stride_om + offs_d[None, :] * stride_ok
+    tl.store(Out + out_offset, acc_o.to(Out.dtype.element_ty), mask=offs_m[:, None] < N_CTX)
+    
+    # 存储 logsumexp 便于反向传播
+    if L is not None:
+        l_ptrs = L + off_hz * N_CTX + offs_m
+        tl.store(l_ptrs, m_i + tl.log(l_i), mask=offs_m < N_CTX)
+
+
+def flash_attention_triton(q, k, v, causal=True, sm_scale=None):
+    """
+    输入张量 shape 均为：(Batch, Heads, SeqLen, HeadDim)
+    """
+    if sm_scale is None:
+        sm_scale = 1.0 / math.sqrt(q.shape[-1])
+        
+    Z, H, N_CTX, D = q.shape
+    out = torch.empty_like(q)
+    L = torch.empty((Z * H, N_CTX), device=q.device, dtype=torch.float32)
+
+    BLOCK_M = 64
+    BLOCK_N = 64
+
+    # 网格维度：(Query 分块数, Batch * Heads)
+    grid = (triton.cdiv(N_CTX, BLOCK_M), Z * H)
+
+    _flash_attn_fwd_kernel[grid](
+        q, k, v, sm_scale,
+        L, out,
+        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+        Z, H, N_CTX,
+        BLOCK_M=BLOCK_M,
+        BLOCK_DMODEL=D,
+        BLOCK_N=BLOCK_N,
+        IS_CAUSAL=causal,
+        num_warps=4,
+        num_stages=2,
+    )
+    return out
+```
+
+##### 单元测试与数值对齐验证代码
+```python
+if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        B, H, S, D = 2, 8, 1024, 64
+        q = torch.randn((B, H, S, D), device=device, dtype=torch.float16)
+        k = torch.randn((B, H, S, D), device=device, dtype=torch.float16)
+        v = torch.randn((B, H, S, D), device=device, dtype=torch.float16)
+
+        # 1. 运行 Triton FlashAttention 算子
+        out_triton = flash_attention_triton(q, k, v, causal=True)
+
+        # 2. 运行 PyTorch 原生 Eager Attention
+        mask = torch.triu(torch.full((S, S), float("-inf"), device=device), diagonal=1)
+        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(D) + mask
+        attn = torch.softmax(scores, dim=-1)
+        out_ref = torch.matmul(attn, v)
+
+        # 3. 验证精度完全对齐
+        assert torch.allclose(out_triton, out_ref, atol=1e-2, rtol=1e-2)
+        print("Triton FlashAttention 数值精度验证通过！")
+```
 
 </details>
 

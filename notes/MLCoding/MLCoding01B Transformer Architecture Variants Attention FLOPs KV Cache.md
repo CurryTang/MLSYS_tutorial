@@ -221,6 +221,10 @@ FlashAttention（Dao et al.）是现代大模型基础设施级系统优化，�
 - **解决的问题**：消除训练期 $\mathcal{O}(S^2)$ 激活值显存 OOM 危机；将 HBM 访存复杂度从 $\mathcal{O}(S^2)$ 降为 $\mathcal{O}(S)$，MFU 提升 2~4 倍；
 - **无法解决的问题**：**总计算量依然严格为 $\mathcal{O}(S^2 D)$**；自回归 Decode 仍需遍历加载全量历史 KV；1M 超长序列的 Prefill 二次方耗时依然存在。
 
+> [!TIP]
+> **配套实战编程演练**：
+> 想亲手编写 FlashAttention 的核心逻辑与 GPU 算子？前往 **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.md#Exercise 7 · Flash Attention（分块 + online softmax）|ML Coding 03 · Exercise 7：Flash Attention 从 PyTorch 在线 Softmax 到 Triton GPU Kernel 算子级实现]]** 进行实战编码与数值验证。
+
 ---
 
 ### 3. 三大效率路线：改算法复杂度与改系统切分

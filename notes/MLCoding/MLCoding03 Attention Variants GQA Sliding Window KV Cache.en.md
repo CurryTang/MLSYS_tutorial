@@ -346,11 +346,17 @@ A typical call sequence: `forward(prompt_embeds, start_pos=0)` for prefill, then
 
 ### Exercise 7 · Flash Attention (tiling + online softmax)
 
-Flash attention isn't about whether attention is computed correctly. It is about whether computing it requires holding the entire `(T, T)` score matrix in memory. The standard implementation computes the full `scores` matrix and then softmaxes it all at once; flash attention tiles K/V by `block_size`, runs local attention against Q one block at a time, and maintains a running max and running sum that update as each block arrives, rescaling each block's contribution correctly as it accumulates into the final result. The whole computation only needs `O(T)` intermediate state instead of `O(T^2)`, and it is mathematically identical to the one-shot result, not an approximation.
+Flash attention isn't about whether attention is computed correctly. It is about whether computing it requires holding the entire $(T, T)$ score matrix in memory. The standard implementation computes the full `scores` matrix and then softmaxes it all at once; flash attention tiles $K, V$ by `BLOCK_N`, runs local attention against the current $Q$ block, and maintains a running max and running sum inside on-chip registers that update as each block arrives, rescaling accumulated state by $\exp(m_{\text{old}} - m_{\text{new}})$. The whole computation only needs $\mathcal{O}(T)$ intermediate state instead of $\mathcal{O}(T^2)$, and it is mathematically identical to the one-shot result, not an approximation.
 
-The core of online softmax is this step: when a new block's `block_max` exceeds the currently maintained `running_max`, both the accumulated output and the accumulated normalizer must be rescaled by `exp(running_max - new_max)` before the new block's contribution is added. Getting this rescaling factor wrong is the most common, and most subtle, bug in a flash attention implementation. It won't throw an error; it will just silently produce output that's numerically off from standard attention.
+This exercise is structured into two progressive stages:
+1. **Part A · PyTorch Algorithmic Simulation (CPU / Prototyping)**: Verify tiling and Online Softmax rescaling logic;
+2. **Part B · Production Triton GPU Kernel Implementation (`_flash_attn_fwd_kernel`)**: Full GPU kernel programming with SRAM tiling, Tensor Cores, and causal early termination.
 
-#### Quick Coding: `flash_attention`
+---
+
+#### Part A · PyTorch Algorithmic Implementation: `flash_attention`
+
+##### Quick Coding: `flash_attention`
 
 ```python
 def flash_attention(Q, K, V, block_size, causal=False):
@@ -358,7 +364,7 @@ def flash_attention(Q, K, V, block_size, causal=False):
 ```
 
 <details>
-<summary>Reference solution</summary>
+<summary>Reference solution (PyTorch Algorithm)</summary>
 
 ```python
 def flash_attention(Q, K, V, block_size, causal=False):
@@ -402,6 +408,206 @@ def flash_attention(Q, K, V, block_size, causal=False):
 ```
 
 This implementation has been checked against the naive "compute the full `(T, T)` matrix, then softmax" version with NumPy `allclose`, in both causal and non-causal settings, including the edge case where an entire row is fully masked out within some block (`block_max = -inf`).
+
+</details>
+
+---
+
+#### Part B · Triton GPU Kernel Implementation: `flash_attn_triton`
+
+##### Kernel Systems Architecture & Hardware Mapping
+1. **Grid Partitioning & CTA Scheduling**:
+   - 2D execution grid: `grid = (triton.cdiv(N_CTX, BLOCK_M), Batch * NumHeads)`;
+   - Each Program instance (CTA / Thread Block) independently computes one Query tile (size `BLOCK_M = 64`) for a specific Batch index and Head;
+2. **On-Chip SRAM Dataflow**:
+   - **Outer Loop**: Current Query block (`[BLOCK_M, HEAD_DIM]`) is loaded once into on-chip SRAM registers and **remains persistent** across all inner iterations;
+   - **Inner Loop**: Streams through Key and Value tiles along the sequence dimension in blocks of `BLOCK_N = 64`;
+   - **Register Accumulators**:
+     - `m_i`: `[BLOCK_M]` running row maxima;
+     - `l_i`: `[BLOCK_M]` running row normalizer denominators;
+     - `acc_o`: `[BLOCK_M, HEAD_DIM]` running unnormalized attention output matrix;
+3. **Causal Early Termination**:
+   - If causal masking is enabled, when Key tile start index `start_n > (start_m + 1) * BLOCK_M`, all future tiles are strictly unobservable. The kernel immediately executes `break`, halving global FLOPs;
+   - Overlapping diagonal blocks apply row-wise boolean masking via `offs_m[:, None] >= offs_n[None, :]`.
+
+##### Quick Coding: `_flash_attn_fwd_kernel`
+
+```python
+import triton
+import triton.language as tl
+
+@triton.jit
+def _flash_attn_fwd_kernel(
+    Q, K, V, sm_scale,
+    L, Out,
+    stride_qz, stride_qh, stride_qm, stride_qk,
+    stride_kz, stride_kh, stride_kn, stride_kk,
+    stride_vz, stride_vh, stride_vn, stride_vk,
+    stride_oz, stride_oh, stride_om, stride_ok,
+    Z, H, N_CTX,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+):
+    ...
+
+def flash_attention_triton(q, k, v, causal=True, sm_scale=None):
+    ...
+```
+
+<details>
+<summary>Reference solution (Complete Triton Kernel Implementation)</summary>
+
+```python
+import math
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def _flash_attn_fwd_kernel(
+    Q, K, V, sm_scale,
+    L, Out,
+    stride_qz, stride_qh, stride_qm, stride_qk,
+    stride_kz, stride_kh, stride_kn, stride_kk,
+    stride_vz, stride_vh, stride_vn, stride_vk,
+    stride_oz, stride_oh, stride_om, stride_ok,
+    Z, H, N_CTX,
+    BLOCK_M: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    IS_CAUSAL: tl.constexpr,
+):
+    start_m = tl.program_id(0)
+    off_hz = tl.program_id(1)
+
+    off_z = off_hz // H
+    off_h = off_hz % H
+
+    # Relative offsets inside current block
+    offs_m = start_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_d = tl.arange(0, BLOCK_DMODEL)
+    offs_n = tl.arange(0, BLOCK_N)
+
+    # Base pointers
+    q_offset = off_z * stride_qz + off_h * stride_qh + offs_m[:, None] * stride_qm + offs_d[None, :] * stride_qk
+    k_offset = off_z * stride_kz + off_h * stride_kh + offs_n[None, :] * stride_kn + offs_d[:, None] * stride_kk
+    v_offset = off_z * stride_vz + off_h * stride_vh + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
+
+    # 1. Load Query tile into SRAM registers (outer loop invariant)
+    q = tl.load(Q + q_offset, mask=offs_m[:, None] < N_CTX, other=0.0)
+
+    # 2. Initialize Online Softmax accumulators in registers
+    m_i = tl.zeros([BLOCK_M], dtype=tl.float32) - float("inf")
+    l_i = tl.zeros([BLOCK_M], dtype=tl.float32)
+    acc_o = tl.zeros([BLOCK_M, BLOCK_DMODEL], dtype=tl.float32)
+
+    # 3. Causal boundary upper limit
+    lo = 0
+    hi = (start_m + 1) * BLOCK_M if IS_CAUSAL else N_CTX
+
+    # 4. Inner loop over streaming Key and Value blocks
+    for start_n in range(lo, hi, BLOCK_N):
+        curr_offs_n = start_n + offs_n
+        
+        # Load K and V tiles into SRAM
+        k = tl.load(K + k_offset + start_n * stride_kn, mask=curr_offs_n[None, :] < N_CTX, other=0.0)
+        v = tl.load(V + v_offset + start_n * stride_vn, mask=curr_offs_n[:, None] < N_CTX, other=0.0)
+
+        # Tensor Core GEMM: Q @ K.T
+        qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
+        qk += tl.dot(q, k)
+        qk *= sm_scale
+
+        # Causal masking
+        if IS_CAUSAL:
+            mask = offs_m[:, None] >= curr_offs_n[None, :]
+            qk = tl.where(mask, qk, float("-inf"))
+
+        # Local block maximum and exponentials
+        m_ij = tl.maximum(m_i, tl.max(qk, 1))
+        p = tl.exp(qk - m_ij[:, None])
+        l_ij = tl.sum(p, 1)
+
+        # Dynamic rescaling by exp(m_old - m_new)
+        alpha = tl.exp(m_i - m_ij)
+        acc_o = acc_o * alpha[:, None]
+        l_i = l_i * alpha + l_ij
+        m_i = m_ij
+
+        # Accumulate Value contribution
+        acc_o += tl.dot(p.to(v.dtype), v)
+
+    # 5. Final normalization and write-back to global HBM
+    acc_o = acc_o / l_i[:, None]
+    out_offset = off_z * stride_oz + off_h * stride_oh + offs_m[:, None] * stride_om + offs_d[None, :] * stride_ok
+    tl.store(Out + out_offset, acc_o.to(Out.dtype.element_ty), mask=offs_m[:, None] < N_CTX)
+    
+    # Store logsumexp for backward pass
+    if L is not None:
+        l_ptrs = L + off_hz * N_CTX + offs_m
+        tl.store(l_ptrs, m_i + tl.log(l_i), mask=offs_m < N_CTX)
+
+
+def flash_attention_triton(q, k, v, causal=True, sm_scale=None):
+    """
+    Input tensor shapes: (Batch, Heads, SeqLen, HeadDim)
+    """
+    if sm_scale is None:
+        sm_scale = 1.0 / math.sqrt(q.shape[-1])
+        
+    Z, H, N_CTX, D = q.shape
+    out = torch.empty_like(q)
+    L = torch.empty((Z * H, N_CTX), device=q.device, dtype=torch.float32)
+
+    BLOCK_M = 64
+    BLOCK_N = 64
+
+    # Grid: (Query chunk count, Batch * Heads)
+    grid = (triton.cdiv(N_CTX, BLOCK_M), Z * H)
+
+    _flash_attn_fwd_kernel[grid](
+        q, k, v, sm_scale,
+        L, out,
+        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+        out.stride(0), out.stride(1), out.stride(2), out.stride(3),
+        Z, H, N_CTX,
+        BLOCK_M=BLOCK_M,
+        BLOCK_DMODEL=D,
+        BLOCK_N=BLOCK_N,
+        IS_CAUSAL=causal,
+        num_warps=4,
+        num_stages=2,
+    )
+    return out
+```
+
+##### Unit Test & Numerical Validation
+```python
+if __name__ == "__main__":
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cuda":
+        B, H, S, D = 2, 8, 1024, 64
+        q = torch.randn((B, H, S, D), device=device, dtype=torch.float16)
+        k = torch.randn((B, H, S, D), device=device, dtype=torch.float16)
+        v = torch.randn((B, H, S, D), device=device, dtype=torch.float16)
+
+        # 1. Run Triton FlashAttention kernel
+        out_triton = flash_attention_triton(q, k, v, causal=True)
+
+        # 2. Run PyTorch eager reference attention
+        mask = torch.triu(torch.full((S, S), float("-inf"), device=device), diagonal=1)
+        scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(D) + mask
+        attn = torch.softmax(scores, dim=-1)
+        out_ref = torch.matmul(attn, v)
+
+        # 3. Validate numerical precision
+        assert torch.allclose(out_triton, out_ref, atol=1e-2, rtol=1e-2)
+        print("Triton FlashAttention validation passed!")
+```
 
 </details>
 
