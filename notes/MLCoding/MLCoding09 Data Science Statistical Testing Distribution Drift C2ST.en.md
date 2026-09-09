@@ -424,6 +424,21 @@ $$
 
     At every internal node, greedy split selection **physically searches for the cut that maximally separates the daughter node response means $|\hat{c}_1 - \hat{c}_2|$ while shrinking internal residual variance to its theoretical minimum**.
 
+  **5. Testing / Inference Phase: How is the Average $y$ Retrieved?**:
+  A common beginner misconception is: "At test time, the sample has no ground-truth label $y$. Is the average $\hat{c}_m$ dynamically computed on the fly?"
+  - **Core Concept: No Averages are Ever Computed at Test Time!**
+    - **Training Phase (Offline Pre-computation & Baking)**: When tree construction concludes, every terminal leaf node (hyper-rectangle $R_m$) already computes the arithmetic mean of all **training instances** falling into it: $\hat{c}_m = \frac{1}{N_m} \sum_{i \in \text{Train} \cap R_m} y_i$. This scalar is **hardcoded (baked/pre-stored) as a permanent static attribute** within the node object (e.g. `node.value = 8.50`);
+    - **Testing Phase (Online Routing & Table Lookup)**: When an unseen test observation $\mathbf{x}_{\text{test}} = (x_{\text{test}, 1}, \dots, x_{\text{test}, p})$ arrives, it carries **features only, zero labels**. The model performs a top-down traversal through the binary tree via simple scalar inequality comparisons (`if x_1 <= 5.0 ...`), routing the test point down to a single terminal leaf node $R_m$;
+    - **Direct Constant Retrieval**: Upon reaching leaf $R_m$, the model **directly returns the pre-stored constant $\hat{c}_m$ as its prediction**:
+
+      $$
+      \hat{y}_{\text{test}} = f(\mathbf{x}_{\text{test}}) = \sum_{m=1}^M \hat{c}_m I(\mathbf{x}_{\text{test}} \in R_m) = \hat{c}_m
+      $$
+
+    - **Computational Complexity & Latency**: The entire inference requires zero linear algebra or matrix multiplications, executing strictly in $\mathcal{O}(\text{depth}) \approx \mathcal{O}(\log N)$ scalar comparisons, achieving microsecond-level ($\mu s$) online scoring latency;
+    - **Contrast with $k$-NN (Lazy vs. Eager Learning)**: $k$-Nearest Neighbors ($k$-NN) is a lazy learner that must retain the entire training corpus and compute pairwise distances to find $k$ neighbors at test time ($\mathcal{O}(N)$ test cost). CART is an eager learner: all spatial partitions and regional averages are fully pre-computed and compressed into the tree topology during training.
+
+
 
 - **Classification Tasks (Node Impurity Measures)**:
   Let $\hat{p}_{mk} = \frac{1}{N_m} \sum_{x_i \in R_m} I(y_i = k)$ denote the class-$k$ proportion in node $m$. Node assignment classifies to the majority label $k(m) = \arg\max_k \hat{p}_{mk}$. Standard impurity measures include:
