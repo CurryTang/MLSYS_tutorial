@@ -2405,12 +2405,12 @@ const mlCodingNoteDefinitions = [
     },
   ),
   createTutorialDefinition(
-    'ML Coding 09 · 数据科学与统计检验：多元分布差异、C2ST 分类器双样本检验与因果数据治理',
+    'ML Coding 09 · 数据科学核心：统计检验、多元分布漂移、决策树与随机森林体系',
     'MLCoding09 Data Science Statistical Testing Distribution Drift C2ST.md',
     'MLCoding09 Data Science Statistical Testing Distribution Drift C2ST.en.md',
     {
       directory: 'MLCoding',
-      titleEn: 'ML Coding 09 · Data Science & Statistical Testing: Multivariate Distribution Shift, Classifier Two-Sample Tests & Causal Data Governance',
+      titleEn: 'ML Coding 09 · Data Science Core: Statistical Testing, Distribution Shift, Decision Trees & Random Forests',
       category: 'Data Science & Applied Statistics',
       difficulty: 'Hard',
     },
