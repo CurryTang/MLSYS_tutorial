@@ -239,9 +239,21 @@ A frequent misconception among practitioners is conflating "reduced activation m
 > **Hands-On Coding Exercise**:
 > Want to implement FlashAttention's core tiling and GPU kernel from scratch? Check out **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.en.md#Exercise 7 · Flash Attention (tiling + online softmax)|ML Coding 03 · Exercise 7: Flash Attention from PyTorch Online Softmax to Production Triton GPU Kernel]]** for complete implementation and numerical validation.
 
----
-
 ### 3. Three Algorithmic & Systems Efficiency Trajectories
+
+To fundamentally transcend the "quadratic FLOPs wall" and "autoregressive decoding KV cache bandwidth wall" left unresolved by FlashAttention, the ecosystem has developed three primary efficiency trajectories. The table below presents a unified, multi-dimensional complexity comparison benchmarking these three trajectories alongside Standard Attention and FlashAttention under the same physical hardware metrics:
+
+#### (0) Unified Complexity & Hardware Bottleneck Benchmark Matrix
+
+| Mechanism / Efficiency Trajectory | Training Activation Memory | HBM Access / IO Traffic | Forward FLOPs | Backward FLOPs | Autoregressive Decode Step Cost | Hardware Regime | Physical Bottleneck & Engineering Constraints |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Standard Attention<br>(Standard / Eager)** | $\mathcal{O}(S^2)$<br>Materializes dense $S \times S$ matrix | $\mathcal{O}(S^2 + S D)$<br>Frequent round-trip HBM spills | $4 S^2 D$<br>($2 S^2 D$ causal) | $8 S^2 D$<br>($4 S^2 D$ causal) | Memory: $\mathcal{O}(S D)$ linear growth<br>Compute: $2 S D$ scans full history | **Severe Memory-Bound**<br>Intensity $< 1$, extreme bandwidth starvation | Instant activation OOM on long sequences; zero on-chip data reuse. |
+| **FlashAttention<br>(Dao et al. Systems Patch)** | $\mathcal{O}(S \cdot D)$<br>Discards intermediates; stores only $O$ and $L_i$ | $\mathcal{O}\left(\frac{S^2 D^2}{M}\right) \approx \mathcal{O}(S D)$<br>SRAM-tiled pipelined fusion | $4 S^2 D$<br>($2 S^2 D$ causal) | $10 S^2 D$<br>($5 S^2 D$ causal)<br>Recomputation adds ~25% | Memory: $\mathcal{O}(S D)$ linear growth<br>Compute: $2 S D$ scans full history | **Compute-Bound**<br>Fully saturates Tensor Core systolic arrays | **Does NOT reduce quadratic FLOPs**; Prefill latency explodes at 1M+ context; cannot break decoding KV cache wall. |
+| **Trajectory A: Native Sparse Attention<br>(DeepSeek NSA / Sparse)** | $\mathcal{O}(S \cdot D)$<br>Stores only coarse indices and Top-$k$ active blocks | $\mathcal{O}(S \cdot k_{\text{eff}} \cdot D)$<br>TMA block-aligned coalesced transfers | $\approx 4 S \cdot k_{\text{eff}} \cdot D$<br>(Scales near-linearly with length) | $\approx 8 S \cdot k_{\text{eff}} \cdot D$<br>(Compute drops by multiples to orders of magnitude) | Memory: $\mathcal{O}(k_{\text{eff}} \cdot D)$<br>Compute: $2 k_{\text{eff}} D$ scans active blocks only | **Compute-Bound**<br>(Requires 64-token block alignment) | Must strictly enforce hardware block alignment (64 tokens); discrete token pruning causes catastrophic uncoalesced memory stalls. |
+| **Trajectory B: Linear Attention & SSM<br>(DeltaNet / RetNet / SSM)** | $\mathcal{O}(S \cdot D)$<br>Propagates $D \times D$ hidden states chunkwise | $\mathcal{O}(S \cdot D)$<br>Single streaming linear scan, minimal IO | $\approx 4 S D^2$<br>(At $S \gg D$, compute drops 1000×) | $\approx 8 S D^2$<br>(Strictly linear complexity) | Memory: $\mathcal{O}(D^2)$ **Strictly $\mathcal{O}(1)$ constant**<br>Compute: $\mathcal{O}(D^2)$ **Strictly $\mathcal{O}(1)$ constant** | **Compute-Bound** (Training)<br>**Throughput-Flat** (Decoding) | Plain kernelization suffers capacity saturation & attention dilution; requires Delta projection erasure; slightly trails Softmax on complex retrieval. |
+| **Trajectory C: Distributed Context Parallelism<br>(RingAttention / CP)** | Per-GPU $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>Scales down linearly with GPU count $P$ | Per-GPU retains SRAM tiling; cross-node over NVLink/RDMA ring | Per-GPU $\approx \frac{2 S^2 D}{P}$<br>Cluster total strictly invariant | Per-GPU $\approx \frac{5 S^2 D}{P}$<br>Cluster total strictly invariant | Per-GPU holds slice $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>Asynchronous ring flow | **Overlap Compute-Bound**<br>(Double-buffering hides comm latency) | Highly dependent on cluster interconnect bandwidth; too small chunks fail to hide communication (falls back to Comm-Bound). |
+
+---
 
 #### Trajectory A: Sparse Attention (Pruning the Graph)
 - **Core Idea**: Prune non-essential edges in the attention bipartite graph, lowering complexity from $\mathcal{O}(S^2)$ to $\mathcal{O}(S \cdot k)$ or $\mathcal{O}(S\sqrt{S})$.

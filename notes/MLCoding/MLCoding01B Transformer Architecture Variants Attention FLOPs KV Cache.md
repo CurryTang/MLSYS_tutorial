@@ -239,9 +239,21 @@ FlashAttention（Dao et al.）是现代大模型基础设施级系统优化，�
 > **配套实战编程演练**：
 > 想亲手编写 FlashAttention 的核心逻辑与 GPU 算子？前往 **[[MLCoding03 Attention Variants GQA Sliding Window KV Cache.md#Exercise 7 · Flash Attention（分块 + online softmax）|ML Coding 03 · Exercise 7：Flash Attention 从 PyTorch 在线 Softmax 到 Triton GPU Kernel 算子级实现]]** 进行实战编码与数值验证。
 
----
-
 ### 3. 三大效率路线：改算法复杂度与改系统切分
+
+为了彻底突破 FlashAttention 留下的“二次方计算量”与“自回归 Decode 阶段 KV 访存墙”，学术界与工业界衍生出三大效率路线。下表在相同的多维物理复杂度度量框架下，对三大路线与标准 Attention、FlashAttention 进行了统一度量与机制对比：
+
+#### (0) 全景复杂度与硬件瓶颈多维对比矩阵
+
+| 机制 / 效率路线 | 训练激活显存<br>(Activation Memory) | HBM 访存 IO 量<br>(Memory Traffic) | 前向计算量<br>(Forward FLOPs) | 反向计算量<br>(Backward FLOPs) | 自回归推理单步<br>(Decode Step 开销) | 硬件运行瓶颈<br>(Hardware Regime) | 核心物理代价与工程约束 |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **标准 Attention<br>(Standard / Eager)** | $\mathcal{O}(S^2)$<br>物化保存完整 $S \times S$ 矩阵 | $\mathcal{O}(S^2 + S D)$<br>频繁往返 HBM 倾倒矩阵 | $4 S^2 D$<br>(因果掩码 $2 S^2 D$) | $8 S^2 D$<br>(因果掩码 $4 S^2 D$) | 显存：$\mathcal{O}(S D)$ 线性膨胀<br>计算：$2 S D$ 遍历历史 | **严重 Memory-Bound**<br>算术强度 $< 1$，带宽极度饥饿 | 训练长序列瞬间显存 OOM 崩溃；无任何片上数据复用。 |
+| **FlashAttention<br>(Dao et al. 系统补丁)** | $\mathcal{O}(S \cdot D)$<br>丢弃中间激活，仅存 $O$ 与 $L_i$ | $\mathcal{O}\left(\frac{S^2 D^2}{M}\right) \approx \mathcal{O}(S D)$<br>SRAM 分块流水线融合 | $4 S^2 D$<br>(因果掩码 $2 S^2 D$) | $10 S^2 D$<br>(因果掩码 $5 S^2 D$)<br>重算浮点量增 ~25% | 显存：$\mathcal{O}(S D)$ 仍线性膨胀<br>计算：$2 S D$ 仍需遍历历史 | **Compute-Bound**<br>充分跑满 Tensor Core 脉动阵列 | **未降低总 FLOPs 二次方**；Prefill 耗时依然剧烈爆炸；自回归无法摆脱 KV 访存墙。 |
+| **路线 A：原生稀疏注意力<br>(DeepSeek NSA / Sparse)** | $\mathcal{O}(S \cdot D)$<br>仅维护粗筛与 Top-$k$ 活跃块 | $\mathcal{O}(S \cdot k_{\text{eff}} \cdot D)$<br>TMA 块级对齐连续加载 | $\approx 4 S \cdot k_{\text{eff}} \cdot D$<br>(降为与序列近似线性) | $\approx 8 S \cdot k_{\text{eff}} \cdot D$<br>(计算量压低数倍至数十倍) | 显存：$\mathcal{O}(k_{\text{eff}} \cdot D)$<br>计算：$2 k_{\text{eff}} D$ 只算活跃块 | **Compute-Bound**<br>(依赖 64-token 块硬件对齐) | 必须保证硬件块对齐（64-token）；离散 Token 剪枝会导致非合并访存灾难。 |
+| **路线 B：线性与状态空间<br>(DeltaNet / RetNet / SSM)** | $\mathcal{O}(S \cdot D)$<br>Chunkwise 块级传递 $D \times D$ 状态 | $\mathcal{O}(S \cdot D)$<br>单次流式线性扫描，极低 IO | $\approx 4 S D^2$<br>(长文本下 $S \gg D$，计算降千倍) | $\approx 8 S D^2$<br>(严格线性复杂度) | 显存：$\mathcal{O}(D^2)$ **严格恒定 $\mathcal{O}(1)$**<br>计算：$\mathcal{O}(D^2)$ **严格恒定 $\mathcal{O}(1)$** | **Compute-Bound** (训练)<br>**Throughput-Flat** (推理) | 纯核化易产生注意力稀释与容量饱和；需引入 Delta 规则在线擦除投影，少样本检索略弱于 Softmax。 |
+| **路线 C：分布式上下文并行<br>(RingAttention / CP)** | 单卡 $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>随 GPU 卡数 $P$ 严格线性均摊 | 单卡片上 SRAM 极速流转；跨卡走 NVLink/RDMA 环 | 单卡 $\approx \frac{2 S^2 D}{P}$<br>集群总算力严格等价 | 单卡 $\approx \frac{5 S^2 D}{P}$<br>集群总算力严格等价 | 单卡切片持有 $\mathcal{O}\left(\frac{S}{P} \cdot D\right)$<br>环形异步流动检索 | **Overlap Compute-Bound**<br>(双缓冲重叠通信耗时) | 强依赖高速网络互联带宽；切片过小会导致通信无法被计算完全掩盖（退化为 Comm-Bound）。 |
+
+---
 
 #### 路线 A：稀疏注意力（Sparse Attention，剪枝图）
 - **核心思想**：切断注意力全连接图中的绝大部分边，复杂度从 $\mathcal{O}(S^2)$ 降至 $\mathcal{O}(S \cdot k)$ 或 $\mathcal{O}(S\sqrt{S})$。
