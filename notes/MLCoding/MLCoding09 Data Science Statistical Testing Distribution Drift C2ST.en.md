@@ -477,11 +477,118 @@ For an unordered categorical feature with $q$ distinct levels, evaluating all bi
   - **Theoretical Guarantee**: The optimal threshold among the $q - 1$ linear splits is **provably identical** to the optimal subset among all $2^{q-1} - 1$ combinations.
 - **Limitation**: This theorem does not generalize to multiclass outcomes ($K \ge 3$). Furthermore, high-cardinality categorical variables present a profound **selection bias / overfitting trap** during tree growth due to excessive degrees of freedom.
 
-#### (4) Handling Missing Data: Surrogate Splits (ESL Section 9.2.4)
-Rather than discarding records with missing values or performing static imputation, CART incorporates **Surrogate Splits**:
-- After determining the primary splitting predictor and cutpoint using available cases, the algorithm ranks all alternative predictors based on their ability to mimic the binary division of the primary split;
-- If an instance has a missing primary value during training or inference, the decision tree routes it using the primary surrogate split (and subsequent surrogates if also missing);
-- This natively exploits local feature correlation to preserve sample size and preserve predictive signal.
+#### (4) Handling Missing Data: Surrogate Splits & Industrial Strategy Cross-Comparison
+
+Missing values (NaN) are pervasive across production datasets. Traditional preprocessing techniques suffer from severe theoretical and empirical drawbacks:
+- **Listwise Deletion (Complete Case Analysis)**: When missingness is distributed across multiple features, dropping incomplete records causes sample size collapse and induces severe selection bias;
+- **Global Mean/Median Imputation**: Flattens real variance and distorts joint covariance structures between predictors;
+- **Missing as Category**: Applicable only to discrete nominal features; cannot be natively extended to continuous variables without arbitrary binning.
+
+In their seminal CART monograph (Breiman et al., 1984) and ESL (Section 9.2.4), the authors introduced the statistically elegant **Surrogate Splits** mechanism.
+
+##### 1. Mathematical Definition & Two-Stage Construction Mechanics
+
+At internal node $t$ containing training subset $\mathcal{N}_t$:
+
+- **Stage 1: Identify the Primary Split on Available Cases**:
+  - For each candidate feature $X_j$, extract the subset of observations non-missing for that feature: $\mathcal{N}_{t, j} \subseteq \mathcal{N}_t$;
+  - Evaluate split criteria exclusively over non-missing cases to find the optimal feature $j^*$ and cutpoint $s^*$, yielding the **Primary Split** $s^* = (X_{j^*}, s^*)$;
+  - This primary split partitions $\mathcal{N}_{t, j^*}$ into two ground-truth subsets:
+
+    $$
+    L^* = \{x_i \in \mathcal{N}_{t, j^*} \mid x_{i, j^*} \le s^*\}, \quad R^* = \{x_i \in \mathcal{N}_{t, j^*} \mid x_{i, j^*} > s^*\}
+    $$
+
+- **Stage 2: Fit Surrogate Predictors Using the Primary Split as Pseudo-Labels**:
+  - **Core Paradigm Shift**: The objective is no longer predicting the target response $y$. Instead, **every alternative feature $X_k$ ($k \ne j^*$) is trained to predict whether an observation was sent Left or Right by the primary split**!
+  - For each candidate feature $X_k$, define the co-occurring non-missing subset $\mathcal{N}_{j^* \cap k} = \mathcal{N}_{t, j^*} \cap \mathcal{N}_{t, k}$. Search for a split $\tilde{s}_k = (X_k, c)$ maximizing the **Probability of Agreement** $\lambda(s^*, \tilde{s}_k)$ with the primary partition $(L^*, R^*)$:
+
+    $$
+    \lambda(s^*, \tilde{s}_k) = \frac{N_{LL}(s^*, \tilde{s}_k) + N_{RR}(s^*, \tilde{s}_k)}{|\mathcal{N}_{j^* \cap k}|}
+    $$
+
+    where:
+    - $N_{LL}$ is the count of observations sent Left by both the primary split and the surrogate split;
+    - $N_{RR}$ is the count of observations sent Right by both splits.
+
+##### 2. Predictive Measure of Association & Spurious Surrogate Filtering
+
+Relying solely on raw agreement $\lambda(s^*, \tilde{s}_k)$ introduces a fatal flaw: **class imbalance**.
+If the primary split is heavily skewed (e.g., routing $95\%$ to the Left and $5\%$ to the Right), a completely uninformative feature can achieve an artificial $95\%$ agreement simply by sending all cases to the Left!
+
+To eliminate trivial majority-class guessing, CART defines Breiman's **Predictive Measure of Association**:
+
+Let the prior routing proportions of the primary split be:
+
+$$
+P_L = \frac{|L^*|}{|\mathcal{N}_{t, j^*}|}, \quad P_R = \frac{|R^*|}{|\mathcal{N}_{t, j^*}|}
+$$
+
+The majority baseline error rate is $1 - \max(P_L, P_R)$. The relative reduction in classification error achieved by surrogate $\tilde{s}_k$ over naive majority assignment is:
+
+$$
+\lambda_{\text{assoc}}(s^*, \tilde{s}_k) = \frac{\lambda(s^*, \tilde{s}_k) - \max(P_L, P_R)}{1 - \max(P_L, P_R)}
+$$
+
+- **Filtering Rule**: If $\lambda_{\text{assoc}}(s^*, \tilde{s}_k) \le 0$, the surrogate performs no better than blindly picking the majority node. Such candidate features are **strictly discarded**;
+- **Ranking Hierarchy**: Retained surrogate predictors are sorted in descending order of $\lambda_{\text{assoc}}$:
+
+  $$
+  \text{Surrogate}_1, \quad \text{Surrogate}_2, \quad \dots, \quad \text{Surrogate}_K
+  $$
+
+##### 3. Online Inference / Cascading Fallback Routing Protocol
+
+When an observation arrives at node $t$ (during recursive partitioning or online inference), it executes a deterministic **4-level fallback routing ladder**:
+
+```text
+       Sample arrives at node t
+                 │
+   [Is primary feature X_j* missing?]
+          ├── No  ──► Route via primary rule (X_j* ≤ s*) (Priority 1)
+          │
+          └── Yes
+                 │
+   [Is 1st surrogate X_k1 missing?]
+          ├── No  ──► Route via 1st surrogate rule (X_k1 ≤ c1) (Priority 2)
+          │
+          └── Yes
+                 │
+   [Poll 2nd, 3rd, ... surrogates sequentially]
+          ├── Valid surrogate found ──► Route via that surrogate's rule (Priority 3)
+          │
+          └── All recorded surrogates missing
+                 │
+   [Execute Majority Rule fallback] ──► Route to daughter node with larger training count (Priority 4)
+```
+
+1. **Priority 1 (Primary Split)**: If $X_{j^*}$ is present, route via $X_{j^*} \le s^*$;
+2. **Priority 2 (1st Surrogate)**: If $X_{j^*}$ is missing, evaluate $\text{Surrogate}_1$ ($X_{k_1} \le c_1$);
+3. **Priority 3 (Cascading Fallback)**: If $X_{k_1}$ is also missing, sequentially query $\text{Surrogate}_2, \text{Surrogate}_3, \dots$;
+4. **Priority 4 (Majority Rule Fallback)**: If the observation has missing values across all qualified surrogates, route it to whichever daughter node received the majority of training instances ($\arg\max(N_L, N_R)$).
+
+##### 4. Real-World Numerical Walkthrough
+
+Consider a real-estate appraisal node estimating home values:
+- **Primary Split**: `Square Footage ≤ 1200` (maximizes variance reduction);
+- **Candidate Surrogates Evaluated**:
+  - Feature A `Bedrooms`: Optimal split `Bedrooms ≤ 2`, agreement $\lambda = 91\%$, association $\lambda_{\text{assoc}} = 0.78$ (**Ranked as 1st Surrogate**);
+  - Feature B `Bathrooms`: Optimal split `Bathrooms ≤ 1`, agreement $\lambda = 84\%$, association $\lambda_{\text{assoc}} = 0.62$ (**Ranked as 2nd Surrogate**);
+- **Inference Execution**:
+  - A test property listing arrives with missing `Square Footage = NaN`, but records `Bedrooms = 3`;
+  - The primary split fails; the engine invokes the 1st Surrogate `Bedrooms ≤ 2`;
+  - Evaluating $3 > 2$ routes the property directly into the **Right branch** (large/high-value homes), preserving predictive accuracy with zero missing-data distortion.
+
+##### 5. Cross-Comparison of Missing Value Strategies in Industry
+
+| Paradigm | Target Architectures | Mechanism & Routing Behavior | Key Advantages | Fatal Limitations / System Overhead |
+| :--- | :--- | :--- | :--- | :--- |
+| **CART Surrogate Splits** | Classical CART, Random Forest (`rpart`) | Leverages local covariance by training multi-tiered backup binary classifiers at every internal node. | **Zero imputation assumptions**; preserves complex non-linear co-dependencies; unified training and inference logic. | Heavy tree-growing compute/memory overhead ($\mathcal{O}(p^2)$ split searches); omitted from Scikit-Learn due to C-extension memory constraints. |
+| **GBDT Default Direction** | XGBoost, LightGBM, CatBoost | During training, missing instances are sent to Left and Right subtrees; the direction yielding higher split gain is assigned as the **Default Path**. | Extremely low computational overhead; blazing-fast inference; natively supports sparse CSR matrices. | Fixed global path per node; cannot adapt dynamically based on other correlated features present in the sample. |
+| **Missing as Category / Bin** | Categorical features, CatBoost, LightGBM | Encodes `NaN` as an explicit categorical level or as the $0$-th bin in numerical histograms. | Ideal when missingness carries strong domain signal (Missing Not At Random, MNAR). | Forces continuous variables into discrete bins; cannot borrow predictive strength from correlated observed predictors. |
+| **Multivariate Imputation (MICE / KNN)** | Linear models, SVM, Deep Networks | Pre-imputes missing values using iterative regression or nearest neighbors before model ingestion. | Universal applicability across all downstream estimators; preserves complete tabular matrices. | Two-stage decoupling; high inference latency; propagates imputation estimation variance into downstream predictions. |
+
+
 
 #### (5) Cost-Complexity Pruning (Weakest Link Pruning)
 Trees are grown deeply to a minimum terminal leaf size (e.g., $n_{\text{min}} = 5$) to yield $T_0$.
